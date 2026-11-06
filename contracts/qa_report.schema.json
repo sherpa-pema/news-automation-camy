@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QAReportHandoff",
+  "description": "Output of the QA Agent evaluating final video quality, synchronization, and attribution.",
+  "type": "object",
+  "properties": {
+    "passed": {
+      "type": "boolean",
+      "description": "True if all QA checks pass and video is ready for publishing"
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of verification check (e.g., duration_sync, loudness, attribution_present, no_black_frames)"
+          },
+          "passed": {
+            "type": "boolean",
+            "description": "Whether this specific check passed"
+          },
+          "detail": {
+            "type": "string",
+            "description": "Diagnostic details, measurements, or error information"
+          }
+        },
+        "required": ["name", "passed", "detail"],
+        "additionalProperties": false
+      }
+    },
+    "redo_stage": {
+      "type": ["string", "null"],
+      "description": "The specific pipeline stage ID to re-run on failure, or null if passed"
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Optional numeric diagnostics (audio_duration_sec, video_duration_sec, integrated_loudness_lufs)",
+      "additionalProperties": true
+    }
+  },
+  "required": ["passed", "checks", "redo_stage"],
+  "additionalProperties": false
+}

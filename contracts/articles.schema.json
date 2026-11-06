@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ArticlesHandoff",
+  "description": "Output of the Scraper Agent containing parsed articles from verified news sources.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "source": {
+        "type": "string",
+        "description": "Name of the publisher/news outlet"
+      },
+      "title": {
+        "type": "string",
+        "description": "Original article headline"
+      },
+      "url": {
+        "type": "string",
+        "format": "uri",
+        "description": "Canonical URL of the article"
+      },
+      "published_at": {
+        "type": ["string", "null"],
+        "description": "ISO 8601 or RFC 2822 published timestamp (null if missing from source)"
+      },
+      "text_summary": {
+        "type": "string",
+        "description": "Extracted article body or summary text"
+      },
+      "author": {
+        "type": ["string", "null"],
+        "description": "Author or byline if available"
+      },
+      "full_text": {
+        "type": "string",
+        "maxLength": 6000,
+        "description": "Cleaned extracted full text, capped at 6000 chars. INTERNAL ONLY for Editor Agent, never published."
+      },
+      "language": {
+        "type": "string",
+        "pattern": "^[a-z]{2}$",
+        "description": "ISO 639-1 two-letter language code (e.g., 'en' or 'ne')"
+      },
+      "word_count": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Word count of the extracted full text"
+      }
+    },
+    "required": ["source", "title", "url", "published_at", "text_summary"],
+    "additionalProperties": false
+  }
+}

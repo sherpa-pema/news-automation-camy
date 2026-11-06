@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScriptHandoff",
+  "description": "Output of the Editor Agent containing rewritten broadcast narration scenes.",
+  "type": "object",
+  "properties": {
+    "language": {
+      "type": "string",
+      "enum": ["English", "Nepali"],
+      "description": "Language of the broadcast narration"
+    },
+    "total_estimated_duration_sec": {
+      "type": "number",
+      "description": "Estimated duration in seconds for target video length (120-180 sec)"
+    },
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the scene (e.g., scene_01)"
+          },
+          "headline": {
+            "type": "string",
+            "description": "On-screen display headline for the news item"
+          },
+          "narration": {
+            "type": "string",
+            "description": "Rewritten broadcast narration script in our own words"
+          },
+          "source": {
+            "type": "string",
+            "description": "News outlet credit to display on screen (e.g., Onlinekhabar English)"
+          },
+          "visual_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keywords describing desired B-roll visuals or motion elements"
+          }
+        },
+        "required": ["id", "headline", "narration", "source", "visual_keywords"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["language", "scenes"],
+  "additionalProperties": false
+}

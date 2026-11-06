@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Nepal Sample News Feed</title>
+    <link>https://sample.nepalnews.com</link>
+    <description>Sample feed for testing</description>
+    <item>
+      <title>Government Approves New Hydropower Project in Gandaki</title>
+      <link>https://sample.nepalnews.com/news/hydropower-project-gandaki?utm_source=rss&amp;utm_medium=feed#comments</link>
+      <pubDate>Fri, 06 Nov 2026 12:00:00 +0545</pubDate>
+      <description><![CDATA[The government has formally granted permission for a 150MW hydropower installation in Gandaki province. Authorities confirmed work will begin next month.]]></description>
+    </item>
+    <item>
+      <title>Government Approves New Hydropower Project in Gandaki!</title>
+      <link>https://sample.nepalnews.com/news/hydropower-project-gandaki-mirror?ref=newsbot</link>
+      <pubDate>Fri, 06 Nov 2026 12:05:00 +0545</pubDate>
+      <description><![CDATA[Duplicate story with near identical title.]]></description>
+    </item>
+    <item>
+      <title>Kathmandu Valley Air Quality Index Improves Following Rain</title>
+      <link>https://sample.nepalnews.com/environment/air-quality-improves-2026</link>
+      <pubDate>Fri, 06 Nov 2026 09:30:00 +0545</pubDate>
+      <description><![CDATA[Rainfall across Kathmandu Valley has brought substantial relief from pollution, bringing the AQI down to moderate levels.]]></description>
+    </item>
+    <item>
+      <title>Old Story from Three Days Ago</title>
+      <link>https://sample.nepalnews.com/archive/old-story-three-days-ago</link>
+      <pubDate>Tue, 03 Nov 2026 10:00:00 +0545</pubDate>
+      <description><![CDATA[This story is more than 24 hours old and should be filtered out by date check.]]></description>
+    </item>
+    <item>
+      <title>Story Without Date Field in RSS Item</title>
+      <link>https://sample.nepalnews.com/news/undated-story</link>
+      <description><![CDATA[This story lacks any pubDate field and should result in published_at being null.]]></description>
+    </item>
+  </channel>
+</rss>

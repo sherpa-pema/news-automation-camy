@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TimelineHandoff",
+  "description": "Output of the Timeline Agent containing word-level and scene-level alignment timestamps.",
+  "type": "object",
+  "properties": {
+    "audio_file": {
+      "type": "string",
+      "description": "Relative path to master narration audio file"
+    },
+    "duration_sec": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Total duration of audio in seconds"
+    },
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Scene identifier corresponding to script.json scene id"
+          },
+          "start": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Start timestamp in seconds"
+          },
+          "end": {
+            "type": "number",
+            "minimum": 0,
+            "description": "End timestamp in seconds"
+          },
+          "words": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "w": {
+                  "type": "string",
+                  "description": "Word token"
+                },
+                "start": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Word start timestamp in seconds"
+                },
+                "end": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Word end timestamp in seconds"
+                },
+                "confidence": {
+                  "type": "number",
+                  "description": "Alignment confidence score (optional)"
+                }
+              },
+              "required": ["w", "start", "end"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["id", "start", "end", "words"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["audio_file", "duration_sec", "scenes"],
+  "additionalProperties": false
+}

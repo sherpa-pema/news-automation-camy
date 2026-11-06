@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RenderPlanHandoff",
+  "description": "Output of the Motion Agent defining the visual composition and motion graphics plan.",
+  "type": "object",
+  "properties": {
+    "resolution": {
+      "type": "string",
+      "pattern": "^[0-9]+x[0-9]+$",
+      "description": "Target video resolution, e.g. '1920x1080' or '1080x1920'"
+    },
+    "fps": {
+      "type": "integer",
+      "minimum": 24,
+      "maximum": 60,
+      "description": "Frames per second (e.g., 30)"
+    },
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Scene identifier corresponding to script.json scene id"
+          },
+          "media": {
+            "type": "string",
+            "description": "Path to primary background media or graphic asset for this scene"
+          },
+          "lower_third": {
+            "type": "object",
+            "properties": {
+              "headline": { "type": "string" },
+              "source_credit": { "type": "string" },
+              "style": { "type": "string" }
+            },
+            "required": ["headline", "source_credit"],
+            "additionalProperties": false
+          },
+          "caption_style": {
+            "type": "object",
+            "properties": {
+              "font": { "type": "string" },
+              "font_size": { "type": "integer" },
+              "position": { "type": "string", "enum": ["bottom", "middle", "top"] },
+              "highlight_color": { "type": "string" }
+            },
+            "required": ["position"],
+            "additionalProperties": true
+          },
+          "transition": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string", "enum": ["cut", "fade", "crossfade", "slide_left", "slide_right", "zoom_in"] },
+              "duration_sec": { "type": "number", "minimum": 0 }
+            },
+            "required": ["type", "duration_sec"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "media", "lower_third", "caption_style", "transition"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["resolution", "fps", "scenes"],
+  "additionalProperties": false
+}

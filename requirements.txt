@@ -1,0 +1,8 @@
+feedparser>=6.0.11
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+trafilatura>=1.12.0
+pyyaml>=6.0.2
+jsonschema>=4.23.0
+pydantic>=2.10.0
+pytest>=8.0.0

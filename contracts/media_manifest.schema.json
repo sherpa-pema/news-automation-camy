@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MediaManifestHandoff",
+  "description": "Output of the Media Agent tracking licensed visual assets retrieved for each scene.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "scene_id": {
+        "type": "string",
+        "description": "Scene identifier corresponding to script.json scene id"
+      },
+      "file": {
+        "type": "string",
+        "description": "Relative path to the locally saved media file"
+      },
+      "type": {
+        "type": "string",
+        "enum": ["video", "image", "motion_graphic"],
+        "description": "Media type of the asset"
+      },
+      "origin_url": {
+        "type": "string",
+        "format": "uri",
+        "description": "Source URL where the media was obtained"
+      },
+      "license": {
+        "type": "string",
+        "description": "Verified license type (e.g., CC0, CC-BY-4.0, Pexels License, Pixabay License)"
+      },
+      "attribution": {
+        "type": "string",
+        "description": "Mandatory creator/author credit and attribution string"
+      },
+      "duration_sec": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Duration in seconds if video asset"
+      }
+    },
+    "required": ["scene_id", "file", "type", "origin_url", "license", "attribution"],
+    "additionalProperties": false
+  }
+}
