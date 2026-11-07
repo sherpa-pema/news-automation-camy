@@ -13,6 +13,28 @@
       "minimum": 0,
       "description": "Total duration of audio in seconds"
     },
+    "sample_rate": {
+      "type": "integer",
+      "description": "Sample rate of audio in Hz"
+    },
+    "language": {
+      "type": "string",
+      "description": "Language code or identifier"
+    },
+    "aligner": {
+      "type": "object",
+      "description": "Alignment engine and model metadata",
+      "properties": {
+        "name": { "type": "string" },
+        "model": { "type": "string" },
+        "device": { "type": "string" }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Warnings generated during alignment"
+    },
     "scenes": {
       "type": "array",
       "minItems": 1,
@@ -22,6 +44,10 @@
           "id": {
             "type": "string",
             "description": "Scene identifier corresponding to script.json scene id"
+          },
+          "type": {
+            "type": "string",
+            "description": "Scene type, e.g. intro, story, outro"
           },
           "start": {
             "type": "number",
@@ -33,6 +59,28 @@
             "minimum": 0,
             "description": "End timestamp in seconds"
           },
+          "speech_start": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Timestamp of the first spoken word in the scene"
+          },
+          "speech_end": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Timestamp of the last spoken word in the scene"
+          },
+          "sentences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": { "type": "string" },
+                "start": { "type": "number", "minimum": 0 },
+                "end": { "type": "number", "minimum": 0 }
+              },
+              "required": ["text", "start", "end"]
+            }
+          },
           "words": {
             "type": "array",
             "items": {
@@ -40,7 +88,11 @@
               "properties": {
                 "w": {
                   "type": "string",
-                  "description": "Word token"
+                  "description": "Original script word token"
+                },
+                "tts": {
+                  "type": "string",
+                  "description": "Spoken/respelled TTS form"
                 },
                 "start": {
                   "type": "number",
@@ -52,21 +104,22 @@
                   "minimum": 0,
                   "description": "Word end timestamp in seconds"
                 },
+                "score": {
+                  "type": "number",
+                  "description": "Alignment confidence score"
+                },
                 "confidence": {
                   "type": "number",
-                  "description": "Alignment confidence score (optional)"
+                  "description": "Alignment confidence score (alias)"
                 }
               },
-              "required": ["w", "start", "end"],
-              "additionalProperties": false
+              "required": ["w", "start", "end"]
             }
           }
         },
-        "required": ["id", "start", "end", "words"],
-        "additionalProperties": false
+        "required": ["id", "start", "end", "words"]
       }
     }
   },
-  "required": ["audio_file", "duration_sec", "scenes"],
-  "additionalProperties": false
+  "required": ["audio_file", "duration_sec", "scenes"]
 }

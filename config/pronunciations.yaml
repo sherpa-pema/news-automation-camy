@@ -1,0 +1,5 @@
+# Pronunciation respelling dictionary (word -> phonetic respelling)
+# Applied as case-insensitive whole-word replacements before TTS synthesis.
+# Leave empty or add entries as needed, e.g.:
+# Birgunj: "Beer-gunj"
+{}

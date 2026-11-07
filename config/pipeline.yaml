@@ -36,13 +36,39 @@ stages:
     depends_on: ["editor"]
     can_run_parallel_with: ["media"]
     retries: 2
-    timeout_seconds: 300
+    timeout_seconds: 3600
     inputs:
       - "script.json"
     outputs:
       - "audio/narration.wav"
-    model: "TODO: Open-source TTS (e.g. Kokoro-82M / Piper / Bark / Coqui XTTS-v2)"
-    notes: "Synthesizes clear broadcast narration audio."
+      - "audio/scene_durations.json"
+      - "audio/voice_report.json"
+    engine: "ming"
+    model_path: "models/Ming-3.0-tts-0.5b"
+    task: "TTS"
+    voice: "NP_lemi"
+    reference_wav: "config/voice/reference.wav"
+    reference_txt: "config/voice/reference.txt"
+    use_spk_emb: true
+    use_zero_spk_emb: false
+    chunk_mode: "scene"
+    similarity_threshold: 0.72
+    f0_tolerance_pct: 0.25
+    max_retries: 2
+    language_id: "en"
+    instruction_schema: "en"
+    device: "cuda:0"
+    dtype: "bfloat16"
+    subprocess_python: ".venv-tts/Scripts/python.exe"
+    worker_timeout_sec: 3600
+    pause_between_sentences: 0.25
+    pad_before: 0.4
+    pad_after: 0.6
+    target_lufs: -16
+    output_sample_rate: 48000
+    text_normalization: false
+    disclose_synthetic_voice: true
+    notes: "Synthesizes broadcast narration audio using Ming-3.0-tts zero-shot cloning anchored to config/voice/reference.wav."
 
   - id: "media"
     agent: "MediaAgent"
@@ -62,15 +88,39 @@ stages:
     depends_on: ["voice"]
     can_run_parallel_with: ["media"]
     retries: 2
-    timeout_seconds: 180
+    timeout_seconds: 300
     inputs:
       - "audio/narration.wav"
+      - "audio/scene_durations.json"
       - "script.json"
     outputs:
+      - "timeline/timeline.json"
+      - "timeline/captions.srt"
+      - "timeline/captions.json"
+      - "timeline/timeline_preview.mp4"
       - "timeline.json"
       - "captions.srt"
-    tool: "TODO: Forced alignment / ASR (e.g. whisper-timestamped / gentle / CTC-segmentation)"
-    notes: "Extracts word-level and scene-level timestamps from narration audio."
+    aligner: "mms_fa"
+    model_path: "models/MMS_FA/model.pt"
+    device: "cuda:0"
+    dtype: "float32"
+    subprocess_python: ".venv-tts/Scripts/python.exe"
+    worker_script: "tools/timeline_worker.py"
+    worker_timeout_sec: 300
+    low_score_threshold: 0.35
+    max_unplaced_scene_ratio: 0.15
+    max_unplaced_total_ratio: 0.05
+    min_wps: 1.2
+    max_wps: 6.0
+    max_chars_per_line: 42
+    max_lines: 2
+    min_duration_sec: 0.9
+    max_duration_sec: 5.0
+    lead_in_sec: 0.05
+    hold_after_sec: 0.15
+    min_gap_sec: 0.04
+    tool: "torchaudio MMS_FA forced aligner"
+    notes: "Extracts word-level and scene-level timestamps from narration audio using MMS_FA forced aligner."
 
   - id: "motion"
     agent: "MotionAgent"

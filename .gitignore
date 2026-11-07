@@ -7,9 +7,15 @@ __pycache__/
 
 # Virtual Environment
 .venv/
+.venv*/
 env/
 venv/
 ENV/
+
+# Vendor & TTS Models
+vendor/
+models/
+data/tts_tests/
 
 # Environment Variables
 .env
