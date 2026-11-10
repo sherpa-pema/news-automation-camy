@@ -1,19 +1,21 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+set "PROJECT_DIR=C:\news-auto"
+cd /d "%PROJECT_DIR%"
 chcp 65001 >nul
 set "PYTHONIOENCODING=utf-8"
 
-if not exist ".venv\Scripts\python.exe" (
-    echo [ERROR] Missing virtual environment Python at .venv\Scripts\python.exe
+if not exist "%PROJECT_DIR%\.venv\Scripts\python.exe" (
+    echo [ERROR] Missing virtual environment Python at %PROJECT_DIR%\.venv\Scripts\python.exe
     pause
     exit /b 1
 )
 
 echo ==================================================
 echo  Nepal News Bot - Finish Broadcast (--finish)
+echo  Folder: %PROJECT_DIR%
 echo ==================================================
-".venv\Scripts\python.exe" run_daily.py --finish %*
+"%PROJECT_DIR%\.venv\Scripts\python.exe" "%PROJECT_DIR%\run_daily.py" --finish %*
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

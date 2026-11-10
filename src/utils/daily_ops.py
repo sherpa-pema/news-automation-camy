@@ -35,6 +35,12 @@ PROTECTED_TOP_DIRS = ("data/media_library", ".env", "models", "vendor")
 DATED_RUN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 STAGE_ORDER = ["scraper", "editor", "voice", "timeline", "media", "motion", "render", "qa"]
+_UNSET = object()
+
+
+def get_default_mirror_dir() -> str:
+    """Returns the default OneDrive viewer mirror path for finished latest deliverables."""
+    return (Path.home() / "OneDrive" / "NepalNewsBot" / "latest").as_posix()
 
 
 def get_kathmandu_today() -> str:
@@ -59,6 +65,26 @@ def load_execution_config(config_dir: Path | str = "config") -> dict[str, Any]:
         exec_cfg = dict(defaults)
         exec_cfg.update(data.get("execution", {}) or {})
         return exec_cfg
+    except Exception:
+        return defaults
+
+
+def load_outputs_config(config_dir: Path | str = "config") -> dict[str, Any]:
+    """Loads outputs settings (such as mirror_dir) from config/pipeline.yaml."""
+    cfg_path = Path(config_dir) / "pipeline.yaml"
+    defaults: dict[str, Any] = {
+        "mirror_dir": get_default_mirror_dir(),
+    }
+    if not cfg_path.exists():
+        return defaults
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        if "outputs" in data:
+            out_cfg = dict(data.get("outputs") or {})
+            raw_mirror = out_cfg.get("mirror_dir")
+            out_cfg["mirror_dir"] = str(raw_mirror).strip() if raw_mirror else None
+            return out_cfg
+        return defaults
     except Exception:
         return defaults
 
@@ -720,12 +746,46 @@ def write_status_md(
     return out_path
 
 
+def _copy_latest_deliverables_to_dir(src_dir: Path, dst_dir: Path) -> list[str]:
+    """Replaces deliverables inside dst_dir with everything from src_dir."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for old_name in (
+        "final.mp4",
+        "description.md",
+        "qa_report.json",
+        "storyboard.html",
+        "contact_sheet.jpg",
+        "STATUS.md",
+        "README.txt",
+    ):
+        old_p = dst_dir / old_name
+        if old_p.exists():
+            old_p.unlink()
+    old_frames = dst_dir / "storyboard_frames"
+    if old_frames.exists():
+        shutil.rmtree(old_frames, ignore_errors=True)
+
+    mirrored: list[str] = []
+    for item in sorted(src_dir.iterdir(), key=lambda p: p.name):
+        target = dst_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+            mirrored.append(f"{item.name}/")
+        elif item.is_file():
+            shutil.copy2(item, target)
+            mirrored.append(item.name)
+    return mirrored
+
+
 def publish_to_latest(
     run_dir: Path | str,
     latest_dir: Path | str = "data/latest",
     manifest: dict[str, Any] | None = None,
+    mirror_dir: Path | str | None | Any = _UNSET,
+    config_dir: Path | str = "config",
 ) -> dict[str, Any]:
-    """Copies final deliverables into data/latest/ (replacing previous outputs) and writes README.txt."""
+    """Copies final deliverables into data/latest/ (replacing previous outputs), writes README.txt,
+    and mirrors everything in data/latest/ to outputs.mirror_dir if configured."""
     rdir = Path(run_dir)
     ldir = Path(latest_dir)
     ldir.mkdir(parents=True, exist_ok=True)
@@ -805,7 +865,7 @@ def publish_to_latest(
     qa_passed = qa_rep.get("passed", False)
     qa_warns = qa_rep.get("warnings", [])
     now_ktm = datetime.now(KATHMANDU_TZ).isoformat()
-    source_health_rows = compute_source_health(rdir, manifest=manifest)
+    source_health_rows = compute_source_health(rdir, manifest=manifest, config_dir=config_dir)
 
     readme_lines = [
         f"Nepal News Bot - Latest Output Package",
@@ -847,7 +907,26 @@ def publish_to_latest(
     readme_path.write_text("\n".join(readme_lines) + "\n", encoding="utf-8")
     copied.append("README.txt")
 
-    return {"latest_dir": str(ldir), "copied": copied, "readme": str(readme_path)}
+    if mirror_dir is _UNSET:
+        out_cfg = load_outputs_config(config_dir=config_dir)
+        resolved_mirror = out_cfg.get("mirror_dir")
+    else:
+        resolved_mirror = str(mirror_dir).strip() if mirror_dir else None
+
+    mirrored: list[str] = []
+    mirrored_to: str | None = None
+    if resolved_mirror:
+        mdir = Path(resolved_mirror)
+        mirrored = _copy_latest_deliverables_to_dir(ldir, mdir)
+        mirrored_to = str(mdir)
+
+    return {
+        "latest_dir": str(ldir),
+        "copied": copied,
+        "readme": str(readme_path),
+        "mirror_dir": mirrored_to,
+        "mirrored": mirrored,
+    }
 
 
 def _is_valid_dated_dir(p: Path) -> bool:
@@ -1423,7 +1502,7 @@ def run_doctor(
             name="Write permissions",
             status="FAIL",
             detail=f"Cannot write to: {', '.join(write_errs)}",
-            fix_hint="Check folder permissions or OneDrive/antivirus locks on data/ and logs/.",
+            fix_hint="Check folder permissions or Windows Defender/antivirus locks on data/ and logs/.",
         ))
     else:
         checks.append(DoctorCheck(

@@ -158,6 +158,19 @@ def test_finish_refuses_when_gate_fails(tmp_path: Path) -> None:
 def test_finish_runs_media_auto_status_and_latest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_dir = tmp_path / "config"
     _copy_configs(cfg_dir)
+    mirror_dir = tmp_path / "mirror_latest"
+    mirror_dir.mkdir(parents=True, exist_ok=True)
+    (mirror_dir / "final.mp4").write_bytes(b"stale_mirror")
+    (mirror_dir / "storyboard_frames").mkdir(parents=True, exist_ok=True)
+    (mirror_dir / "storyboard_frames" / "old_frame.jpg").write_bytes(b"OLD")
+
+    pipe_text = (cfg_dir / "pipeline.yaml").read_text(encoding="utf-8")
+    pipe_text = pipe_text.replace(
+        "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest",
+        mirror_dir.as_posix(),
+    )
+    (cfg_dir / "pipeline.yaml").write_text(pipe_text, encoding="utf-8")
+
     runs_dir = tmp_path / "runs"
     latest_dir = tmp_path / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
@@ -263,6 +276,14 @@ def test_finish_runs_media_auto_status_and_latest(tmp_path: Path, monkeypatch: p
     assert "Run Date:    2026-11-10" in readme_text
     assert "Source Health:" in readme_text
     assert readme_text.index("Source Health:") < readme_text.index("Files Included:")
+
+    # Check configured outputs.mirror_dir also received everything and purged stale frames
+    assert res["latest"]["mirror_dir"] == str(mirror_dir)
+    for fname in ("final.mp4", "description.md", "qa_report.json", "storyboard.html", "contact_sheet.jpg", "STATUS.md", "README.txt"):
+        assert (mirror_dir / fname).exists()
+    assert (mirror_dir / "final.mp4").read_bytes() == b"MP4NEW"
+    assert (mirror_dir / "storyboard_frames" / "frame_0000.jpg").read_bytes() == b"FRAME0"
+    assert not (mirror_dir / "storyboard_frames" / "old_frame.jpg").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1004,8 +1025,9 @@ def test_schedule_install_dry_run_powershell() -> None:
     assert "run_daily.py --morning" in out
     assert "logs\\morning_" in out
     assert "StartWhenAvailable" in out
+    assert "WakeToRun" in out
     assert "Interactive" in out
-    assert "PC must be turned ON" in out
+    assert "C:\\news-auto" in out
     assert "DRY RUN" in out
 
 
@@ -1096,6 +1118,13 @@ def test_morning_is_idempotent_two_runs_and_force_rescrapes(tmp_path: Path, monk
 def test_finish_is_idempotent_unless_forced_and_still_checks_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_dir = tmp_path / "config"
     _copy_configs(cfg_dir)
+    mirror_dir = tmp_path / "mirror_idempotent"
+    pipe_text = (cfg_dir / "pipeline.yaml").read_text(encoding="utf-8")
+    pipe_text = pipe_text.replace(
+        "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest",
+        mirror_dir.as_posix(),
+    )
+    (cfg_dir / "pipeline.yaml").write_text(pipe_text, encoding="utf-8")
     runs_dir = tmp_path / "runs"
     latest_dir = tmp_path / "latest"
 
@@ -1254,7 +1283,7 @@ def test_source_health_statuses_degraded_two_runs_and_non_blocking(tmp_path: Pat
 
     # data/latest/README.txt puts Source Health: at the top before Files Included:
     latest_dir = tmp_path / "latest"
-    publish_to_latest(r10, latest_dir=latest_dir)
+    publish_to_latest(r10, latest_dir=latest_dir, mirror_dir=None, config_dir=cfg_dir)
     readme = (latest_dir / "README.txt").read_text(encoding="utf-8")
     assert "Source Health:" in readme
     assert readme.index("Source Health:") < readme.index("Files Included:")
@@ -1370,3 +1399,48 @@ def test_source_health_statuses_degraded_two_runs_and_non_blocking(tmp_path: Pat
     by12 = {r["source"]: r for r in rows12}
     assert by12["StaleFeed"]["status"] == "STALE"
     assert by12["HealthyFeed"]["status"] == "OK"
+
+
+def test_publish_to_latest_mirrors_and_replaces_stale_files(tmp_path: Path) -> None:
+    from src.utils.daily_ops import load_outputs_config
+
+    cfg_dir = tmp_path / "config"
+    _copy_configs(cfg_dir)
+    mirror_dir = tmp_path / "OneDrive" / "NepalNewsBot" / "latest"
+    pipe_text = (cfg_dir / "pipeline.yaml").read_text(encoding="utf-8").replace(
+        "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest",
+        mirror_dir.as_posix(),
+    )
+    (cfg_dir / "pipeline.yaml").write_text(pipe_text, encoding="utf-8")
+
+    out_cfg = load_outputs_config(cfg_dir)
+    assert out_cfg["mirror_dir"] == mirror_dir.as_posix()
+
+    rdir = tmp_path / "runs" / "2026-11-08"
+    (rdir / "render").mkdir(parents=True, exist_ok=True)
+    (rdir / "qa" / "storyboard_frames").mkdir(parents=True, exist_ok=True)
+    (rdir / "render" / "final.mp4").write_bytes(b"MP4_V1")
+    (rdir / "render" / "description.md").write_text("# Desc\n", encoding="utf-8")
+    (rdir / "qa" / "qa_report.json").write_text('{"passed": true, "checks": [], "warnings": []}', encoding="utf-8")
+    (rdir / "qa" / "contact_sheet.jpg").write_bytes(b"CS")
+    (rdir / "qa" / "storyboard.html").write_text("<html>sb</html>", encoding="utf-8")
+    (rdir / "qa" / "storyboard_frames" / "frame_0000.jpg").write_bytes(b"F0")
+    (rdir / "manifest.json").write_text(
+        json.dumps({"run_id": "2026-11-08", "date": "2026-11-08", "run_kind": "test", "status": "done", "stages": {}}),
+        encoding="utf-8",
+    )
+
+    # Pre-seed stale files in mirror_dir (do not exist yet; create now)
+    mirror_dir.mkdir(parents=True, exist_ok=True)
+    (mirror_dir / "final.mp4").write_bytes(b"OLD")
+    (mirror_dir / "storyboard_frames").mkdir(parents=True, exist_ok=True)
+    (mirror_dir / "storyboard_frames" / "stale.jpg").write_bytes(b"STALE")
+
+    latest_dir = tmp_path / "data" / "latest"
+    res = publish_to_latest(rdir, latest_dir=latest_dir, config_dir=cfg_dir)
+    assert res["mirror_dir"] == str(mirror_dir)
+    for item in ("final.mp4", "description.md", "qa_report.json", "storyboard.html", "contact_sheet.jpg", "STATUS.md", "README.txt"):
+        assert (mirror_dir / item).exists()
+    assert (mirror_dir / "final.mp4").read_bytes() == b"MP4_V1"
+    assert (mirror_dir / "storyboard_frames" / "frame_0000.jpg").read_bytes() == b"F0"
+    assert not (mirror_dir / "storyboard_frames" / "stale.jpg").exists()

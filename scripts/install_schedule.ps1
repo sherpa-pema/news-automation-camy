@@ -3,17 +3,23 @@
     Installs (or previews with -DryRun) the Windows Scheduled Task "NepalNewsBot-Morning".
 
 .DESCRIPTION
-    Registers a daily scheduled task that runs at 07:00 local time:
-      .venv\Scripts\python.exe run_daily.py --morning
-    with WorkingDirectory set to the project root, stdout/stderr appended to:
+    Registers a daily scheduled task that runs at 07:00 local time from C:\news-auto:
+      C:\news-auto\.venv\Scripts\python.exe run_daily.py --morning
+    with WorkingDirectory set to C:\news-auto (or -ProjectRoot), stdout/stderr appended to:
       logs\morning_<YYYY-MM-DD>.log
-    configured to run as soon as possible after a missed start (-StartWhenAvailable),
-    and set to run only when the current user is logged on (LogonType Interactive).
+    configured to:
+      - wake the PC from sleep/hibernation to run (-WakeToRun),
+      - run as soon as possible after a missed start (-StartWhenAvailable),
+      - run on battery without stopping (-AllowStartIfOnBatteries / -DontStopIfGoingOnBatteries),
+      - run under the current user's signed-in session (LogonType Interactive).
 
     IMPORTANT REQUIREMENT:
-      Your PC must be powered ON and you must be SIGNED IN to your Windows account
-      for the task to run at 07:00 (or immediately after waking/signing in if missed).
-      Windows will NOT wake a powered-off PC or run this task while signed out.
+      - "-WakeToRun" can wake a PC from Windows Sleep/Modern Standby or Hibernation
+        if Windows Power Options ("Allow wake timers") and BIOS wake timers allow it.
+      - Windows CANNOT wake a completely powered-off (shut down) PC.
+      - Because LogonType is Interactive, you must remain signed into your Windows
+        account (screen locked is usually fine while signed in, unless wake requires logon
+        re-authentication or the account is completely signed out).
 
 .PARAMETER DryRun
     Prints the exact task definition that would be registered without creating or
@@ -24,17 +30,25 @@
 
 .PARAMETER Time
     Local daily run time in HH:mm format (default: "07:00").
+
+.PARAMETER ProjectRoot
+    Project directory containing run_daily.py and .venv (default: "C:\news-auto").
 #>
 [CmdletBinding()]
 param(
     [switch]$DryRun,
     [string]$TaskName = "NepalNewsBot-Morning",
-    [string]$Time = "07:00"
+    [string]$Time = "07:00",
+    [string]$ProjectRoot = "C:\news-auto"
 )
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if (Test-Path $ProjectRoot) {
+    $RepoRoot = (Resolve-Path $ProjectRoot).Path
+} else {
+    $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
 $PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $RunDailyPy = Join-Path $RepoRoot "run_daily.py"
 $LogsDir = Join-Path $RepoRoot "logs"
@@ -69,14 +83,15 @@ $PsCommand = (
 $ActionExecute = "powershell.exe"
 $ActionArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$PsCommand`""
 $Description = (
-    "Daily Nepal News Bot morning prep (.venv\Scripts\python.exe run_daily.py --morning). " +
-    "Requires PC powered on and user signed in (Interactive logon). Logs to logs\morning_<date>.log."
+    "Daily Nepal News Bot morning prep ($PythonExe run_daily.py --morning in $RepoRoot). " +
+    "WakeToRun enabled for sleep timers; requires signed-in Interactive session. Logs to logs\morning_<date>.log."
 )
 
 $Action = New-ScheduledTaskAction -Execute $ActionExecute -Argument $ActionArguments -WorkingDirectory $RepoRoot
 $Trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
+    -WakeToRun `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew `
@@ -90,11 +105,19 @@ if ($DryRun) {
     Write-Output "Task Name:         $TaskName"
     Write-Output "Schedule:          Daily at $Time (local PC time)"
     Write-Output "Missed Start:      StartWhenAvailable (runs as soon as possible)"
-    Write-Output "Logon Condition:   Interactive (runs ONLY while '$CurrentUser' is logged on)"
+    Write-Output "Wake PC:           WakeToRun (wakes PC from sleep if wake timers enabled)"
+    Write-Output "Logon Condition:   Interactive (runs ONLY while '$CurrentUser' is signed in)"
     Write-Output "Executable:        $PythonExe"
     Write-Output "Python Arguments:  run_daily.py --morning"
     Write-Output "Working Directory: $RepoRoot"
     Write-Output "Log File Pattern:  $LogsDir\morning_<YYYY-MM-DD>.log ($LogPattern)"
+    Write-Output ""
+    Write-Output "Task Scheduler Settings:"
+    Write-Output "  StartWhenAvailable:        $($Settings.StartWhenAvailable)"
+    Write-Output "  WakeToRun:                 $($Settings.WakeToRun)"
+    Write-Output "  AllowStartIfOnBatteries:   $($Settings.DisallowStartIfOnBatteries -eq $false)"
+    Write-Output "  DontStopIfGoingOnBatteries: $($Settings.StopIfGoingOnBatteries -eq $false)"
+    Write-Output "  ExecutionTimeLimit:        $($Settings.ExecutionTimeLimit)"
     Write-Output ""
     Write-Output "Task Scheduler Wrapper Action:"
     Write-Output "  Execute:          $($Action.Execute)"
@@ -102,8 +125,10 @@ if ($DryRun) {
     Write-Output "  WorkingDirectory: $($Action.WorkingDirectory)"
     Write-Output ""
     Write-Output "IMPORTANT REQUIREMENT:"
-    Write-Output "  The PC must be turned ON and you must be SIGNED IN to Windows for"
-    Write-Output "  this scheduled task to run at $Time (or ASAP after a missed start)."
+    Write-Output "  WakeToRun wakes the PC from Windows Sleep (when Power Options 'Allow wake timers'"
+    Write-Output "  and BIOS wake timers are enabled), but the PC must NOT be completely powered off"
+    Write-Output "  and '$CurrentUser' must be SIGNED IN to Windows for the Interactive task to run at $Time"
+    Write-Output "  (or ASAP after a missed start)."
     Write-Output "================================================================="
     Write-Output "[DRY RUN] No scheduled task was created or modified."
     exit 0
@@ -128,4 +153,5 @@ Write-Output "  Command:           $PythonExe run_daily.py --morning"
 Write-Output "  Working Directory: $RepoRoot"
 Write-Output "  Log File:          $LogsDir\morning_<YYYY-MM-DD>.log"
 Write-Output "  Missed Start:      StartWhenAvailable enabled"
-Write-Output "  Principal:         $CurrentUser (Interactive - PC must be ON and signed in)"
+Write-Output "  Wake PC:           WakeToRun enabled"
+Write-Output "  Principal:         $CurrentUser (Interactive - user session must be signed in)"

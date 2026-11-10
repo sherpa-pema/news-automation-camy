@@ -649,7 +649,12 @@ class Orchestrator:
         finally:
             self.media_auto = prev_media_auto
 
-        latest_info = publish_to_latest(self.run_dir, latest_dir=latest_dir, manifest=manifest)
+        latest_info = publish_to_latest(
+            self.run_dir,
+            latest_dir=latest_dir,
+            manifest=manifest,
+            config_dir=self.config_dir,
+        )
         next_action = get_next_action_text(self.run_dir, manifest, active_process=False)
         return {
             "ok": True,

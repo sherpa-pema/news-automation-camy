@@ -264,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Storyboard:    {res['storyboard_path']}")
         print(f"Status Report: {res['status_path']}")
         print(f"Latest Pack:   {res['latest']['latest_dir']} ({', '.join(res['latest']['copied'])})")
+        if res["latest"].get("mirror_dir"):
+            print(f"Mirror Pack:   {res['latest']['mirror_dir']} ({', '.join(res['latest'].get('mirrored', []))})")
         return 0
 
     # 6. Standard orchestrator run (--only or full DAG)

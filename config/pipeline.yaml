@@ -6,6 +6,9 @@ execution:
   default_run_kind: "test"
   keep_runs: 7
 
+outputs:
+  mirror_dir: "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest"
+
 stages:
   - id: "scraper"
     agent: "ScraperAgent"
