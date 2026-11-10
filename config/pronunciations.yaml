@@ -1,5 +1,48 @@
 # Pronunciation respelling dictionary (word -> phonetic respelling)
 # Applied as case-insensitive whole-word replacements before TTS synthesis.
-# Leave empty or add entries as needed, e.g.:
-# Birgunj: "Beer-gunj"
-{}
+pronunciations:
+  Birgunj:
+    respelling: "Beer-gunj"
+    verified: true
+  Bagmati:
+    respelling: "Bahg-mah-tee"
+    verified: true
+  Sindhupalchok:
+    respelling: "Sin-dhoo-pal-chowk"
+    verified: true
+  MBBS:
+    respelling: "M B B S"
+    verified: false
+  KC:
+    respelling: "K C"
+    verified: false
+  Antalya:
+    respelling: "An-tal-ya"
+    verified: true
+  Tihar:
+    respelling: "Tee-har"
+    verified: true
+  Bancharedanda:
+    respelling: "Ban-chare-dan-da"
+    verified: false
+  Sarita Rai:
+    respelling: "Sa-ree-ta Rye"
+    verified: false
+  Lumbini:
+    respelling: "Loom-bee-nee"
+    verified: true
+  Kirtipur:
+    respelling: "Keer-ti-pur"
+    verified: true
+  Kailali:
+    respelling: "Kai-la-li"
+    verified: true
+  Geta:
+    respelling: "Geh-tah"
+    verified: false
+  Dasharath:
+    respelling: "Dasha-rath"
+    verified: false
+  Pokharel:
+    respelling: "Pokha-rel"
+    verified: false

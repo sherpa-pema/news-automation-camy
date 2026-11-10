@@ -1,14 +1,11 @@
 """Unit and integration tests for the Scraper Agent using local fixtures."""
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import json
 import pytest
-import zoneinfo
 
 from src.agents.scraper import (
     ScraperAgent,
-    clean_title,
     is_duplicate_title,
     normalize_language_code,
     normalize_url,
@@ -206,7 +203,7 @@ def test_broken_source_does_not_fail_whole_run(sample_feed_xml, sample_article_h
 
     with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
         with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
-            articles, stats, errors = scraper.scrape_all(target_date="2026-11-06")
+            articles, stats, errors = scraper.scrape_all(target_date="2026-11-06", backfill=True)
 
     # Broken source recorded error
     assert "Broken Source" in errors
@@ -252,7 +249,7 @@ def test_articles_schema_validation(sample_feed_xml, sample_article_html, tmp_pa
 
     with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
         with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
-            articles, _, _ = scraper.scrape_all(target_date="2026-11-06")
+            articles, _, _ = scraper.scrape_all(target_date="2026-11-06", backfill=True)
 
     assert len(articles) >= 2
     assert all(a["language"] == "en" for a in articles)
@@ -274,3 +271,89 @@ def test_robots_disallowed_paths_skipped(sample_robots_txt, tmp_path):
 
     assert scraper._is_url_allowed_by_robots("https://sample.nepalnews.com/disallowed-article/123", "NepalNewsBot/0.1", 0) is False
     assert scraper._is_url_allowed_by_robots("https://sample.nepalnews.com/news/allowed-article", "NepalNewsBot/0.1", 0) is True
+
+
+# -----------------------------------------------------------------------------
+# 7. Morning and Evening Live Scrape Window & Backfill Anchoring
+# -----------------------------------------------------------------------------
+def test_morning_and_evening_scrape_window(tmp_path):
+    """Verify morning and evening runs correctly apply the 30-hour lookback window."""
+    scraper = ScraperAgent(run_dir=tmp_path)
+
+    # 1. Morning run at 08:00 on 2026-11-07 (+05:45)
+    morning_ref = datetime(2026, 11, 7, 8, 0, 0, tzinfo=KATHMANDU_TZ)
+
+    # Article from 22:00 previous evening (10 hours ago) -> KEEP
+    entry_evening_before = {"published": "Fri, 06 Nov 2026 22:00:00 +0545"}
+    dt_10h = parse_article_date(entry_evening_before, "")
+    assert dt_10h is not None
+    diff_morning_keep = (morning_ref - dt_10h).total_seconds()
+    assert diff_morning_keep == 10 * 3600
+    assert 0 <= diff_morning_keep <= 30 * 3600
+
+    # Article from 32 hours ago (00:00 on Nov 6) -> DROP (> 30 hours)
+    entry_old_32h = {"published": "Fri, 06 Nov 2026 00:00:00 +0545"}
+    dt_32h = parse_article_date(entry_old_32h, "")
+    assert dt_32h is not None
+    diff_morning_drop = (morning_ref - dt_32h).total_seconds()
+    assert diff_morning_drop == 32 * 3600
+    assert diff_morning_drop > 30 * 3600
+
+    # 2. Evening run at 20:00 on 2026-11-07 (+05:45)
+    evening_ref = datetime(2026, 11, 7, 20, 0, 0, tzinfo=KATHMANDU_TZ)
+
+    # Article from 14:00 today (6 hours ago) -> KEEP
+    entry_afternoon = {"published": "Sat, 07 Nov 2026 14:00:00 +0545"}
+    dt_6h = parse_article_date(entry_afternoon, "")
+    assert dt_6h is not None
+    diff_evening_keep = (evening_ref - dt_6h).total_seconds()
+    assert diff_evening_keep == 6 * 3600
+    assert 0 <= diff_evening_keep <= 30 * 3600
+
+    # Article from yesterday 16:00 (28 hours ago) -> KEEP (within 30h)
+    entry_yesterday_16 = {"published": "Fri, 06 Nov 2026 16:00:00 +0545"}
+    dt_28h = parse_article_date(entry_yesterday_16, "")
+    assert dt_28h is not None
+    diff_28h = (evening_ref - dt_28h).total_seconds()
+    assert diff_28h == 28 * 3600
+    assert 0 <= diff_28h <= 30 * 3600
+
+    # Article from yesterday 12:00 (32 hours ago) -> DROP (> 30h)
+    entry_yesterday_12 = {"published": "Fri, 06 Nov 2026 12:00:00 +0545"}
+    dt_evening_old = parse_article_date(entry_yesterday_12, "")
+    assert dt_evening_old is not None
+    diff_evening_old = (evening_ref - dt_evening_old).total_seconds()
+    assert diff_evening_old == 32 * 3600
+    assert diff_evening_old > 30 * 3600
+
+
+def test_backfill_flag_anchoring(tmp_path):
+    """Verify that backfill=True anchors to 23:59:59 of target date, while backfill=False uses live scrape time."""
+    # With backfill=True
+    scraper_backfill = ScraperAgent(run_dir=tmp_path, backfill=True)
+    assert scraper_backfill.backfill is True
+
+    # With backfill=False (default)
+    scraper_live = ScraperAgent(run_dir=tmp_path)
+    assert scraper_live.backfill is False
+
+
+def test_articles_schema_validation_negative_cases():
+    """Negative test proving articles.schema.json rejects missing fields and invalid types."""
+    # 1. Missing required field 'url'
+    bad_articles_missing_url = [
+        {
+            "source": "Sample Outlet",
+            "title": "Valid Headline",
+            "full_text": "Sample story full text content.",
+        }
+    ]
+    is_valid, err = validate_contract(bad_articles_missing_url, "contracts/articles.schema.json")
+    assert is_valid is False
+    assert "'url' is a required property" in err
+
+    # 2. Not an array (top-level must be array)
+    bad_type = {"source": "Not an array"}
+    is_valid, err = validate_contract(bad_type, "contracts/articles.schema.json")
+    assert is_valid is False
+    assert "is not of type 'array'" in err

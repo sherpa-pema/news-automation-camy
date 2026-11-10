@@ -13,9 +13,28 @@
       "format": "date",
       "description": "Run date in YYYY-MM-DD format"
     },
+    "run_kind": {
+      "type": "string",
+      "description": "Kind of run (e.g. test, production, fixture)"
+    },
+    "manual_edits": {
+      "type": "array",
+      "description": "Log of manual edits made to run files",
+      "items": {
+        "type": "object",
+        "required": ["file", "what", "why", "timestamp"],
+        "properties": {
+          "file": { "type": "string" },
+          "what": { "type": "string" },
+          "why": { "type": "string" },
+          "timestamp": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
     "status": {
       "type": "string",
-      "enum": ["pending", "running", "done", "failed"],
+      "enum": ["pending", "running", "paused", "done", "failed", "abandoned"],
       "description": "Overall pipeline execution status"
     },
     "created_at": {
@@ -33,7 +52,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["pending", "running", "done", "failed"]
+            "enum": ["pending", "running", "prepared", "needs_revision", "awaiting_approval", "done", "failed"]
           },
           "start_time": {
             "type": ["string", "null"]

@@ -1,5 +1,4 @@
 """Tests Ming-3.0-tts zero-shot voice cloning using config/voice/reference.wav."""
-import os
 import sys
 import time
 from pathlib import Path

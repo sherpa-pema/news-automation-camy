@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 import time
@@ -19,11 +18,11 @@ import yaml
 from src.agents.base import BaseAgent
 from src.agents.voice import load_pronunciations, split_into_sentences
 from src.utils.logging import setup_logger
-from src.utils.manifest import load_manifest, save_manifest, update_stage_status
+from src.utils.manifest import load_manifest, save_manifest
 from src.utils.schema_validate import validate_contract
 from src.utils.timeline import (
-    FakeAligner,
-    MMSAligner,
+    FakeAligner as FakeAligner,
+    MMSAligner as MMSAligner,
     build_srt_content,
     chunk_scene_words_into_captions,
     generate_timeline_preview_video,
@@ -99,7 +98,7 @@ class TimelineAgent(BaseAgent):
         min_gap_sec = float(stage_cfg.get("min_gap_sec", 0.04))
 
         # Paths
-        script_file = self.run_dir / "script.json"
+        script_file = self.run_dir / "script" / "script.json"
         if not script_file.exists():
             raise FileNotFoundError(f"Missing required script file: {script_file}")
 
@@ -114,6 +113,30 @@ class TimelineAgent(BaseAgent):
         # 1. Read input metadata
         with open(script_file, "r", encoding="utf-8") as f:
             script_data = json.load(f)
+
+        origin = script_data.get("origin", "editor")
+        if origin != "fixture":
+            approval_file = self.run_dir / "script" / "approval.json"
+            if not approval_file.exists():
+                raise ValueError("script changed after approval, re-run validate and approve")
+            with open(approval_file, "r", encoding="utf-8") as f:
+                app_data = json.load(f)
+            import hashlib
+            curr_hash = hashlib.sha256(script_file.read_bytes()).hexdigest()
+            if app_data.get("script_sha256") != curr_hash:
+                raise ValueError("script changed after approval, re-run validate and approve")
+            from src.utils.editor_validator import compute_validator_fingerprint, extract_script_validation_fingerprint
+            curr_fp = extract_script_validation_fingerprint(compute_validator_fingerprint())
+            app_fp = extract_script_validation_fingerprint(app_data.get("validator_fingerprint"))
+            if app_fp and app_fp != curr_fp:
+                raise ValueError("validator or editor config changed after approval, re-run validate and approve")
+            rep_file = self.run_dir / "script" / "validation_report.json"
+            if rep_file.exists():
+                with open(rep_file, "r", encoding="utf-8") as rf:
+                    rep_data = json.load(rf)
+                rep_fp = extract_script_validation_fingerprint(rep_data.get("validator_fingerprint"))
+                if rep_fp and rep_fp != curr_fp:
+                    raise ValueError("validator or editor config changed since validation, re-run validate and approve")
 
         with open(scene_durations_file, "r", encoding="utf-8") as f:
             scene_durations: list[dict[str, Any]] = json.load(f)

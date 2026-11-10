@@ -5,9 +5,6 @@ Runs purely with FakeAligner and synthetic fixtures. No GPU or model required.
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
-import wave
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +35,9 @@ def sample_script_dict() -> dict[str, Any]:
 def mock_timeline_run_dir(tmp_path: Path, sample_script_dict: dict[str, Any]) -> Path:
     """Sets up a complete run directory fixture with audio, durations, and script."""
     # Write script.json
-    script_file = tmp_path / "script.json"
+    script_dir = tmp_path / "script"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script_file = script_dir / "script.json"
     with open(script_file, "w", encoding="utf-8") as f:
         json.dump(sample_script_dict, f, indent=2)
 
@@ -293,3 +292,86 @@ def test_end_to_end_timeline_agent_run(mock_timeline_run_dir: Path):
         srt_content = f.read()
     valid_srt, srt_err = validate_srt_syntax(srt_content)
     assert valid_srt is True, f"SRT syntax error: {srt_err}"
+
+
+def test_timeline_schema_validation_negative_cases():
+    """Negative test proving timeline.schema.json rejects missing fields and invalid structures."""
+    # 1. Missing required field 'scenes'
+    bad_timeline = {
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 120.5,
+    }
+    is_valid, err = validate_contract(bad_timeline, "contracts/timeline.schema.json")
+    assert is_valid is False
+    assert "'scenes' is a required property" in err
+
+    # 2. Scene missing required field 'words'
+    bad_scene_timeline = {
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 120.5,
+        "scenes": [
+            {
+                "id": "intro",
+                "start": 0.0,
+                "end": 10.0,
+                # missing 'words'
+            }
+        ]
+    }
+    is_valid, err = validate_contract(bad_scene_timeline, "contracts/timeline.schema.json")
+    assert is_valid is False
+    assert "'words' is a required property" in err
+
+
+def test_timeline_agent_run_approval_fingerprint_gate(tmp_path):
+    """TimelineAgent.run must execute the approval and validator fingerprint gate without NameError."""
+    import hashlib
+    import wave
+    from src.agents.timeline import TimelineAgent
+    from src.utils.editor_validator import compute_validator_fingerprint
+
+    run_dir = tmp_path / "2026-11-08"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir = run_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    script_data = {
+        "language": "English",
+        "origin": "editor",
+        "scenes": [],
+    }
+    script_path = script_dir / "script.json"
+    script_bytes = json.dumps(script_data).encode("utf-8")
+    script_path.write_bytes(script_bytes)
+    script_hash = hashlib.sha256(script_bytes).hexdigest()
+
+    curr_fp = compute_validator_fingerprint()
+    approval_data = {
+        "approved_at": "2026-11-08T10:00:00Z",
+        "script_sha256": script_hash,
+        "approved_by": "user",
+        "validator_fingerprint": curr_fp,
+    }
+    (script_dir / "approval.json").write_text(json.dumps(approval_data), encoding="utf-8")
+    (script_dir / "validation_report.json").write_text(
+        json.dumps({"is_valid": True, "errors": [], "validator_fingerprint": curr_fp}),
+        encoding="utf-8",
+    )
+
+    (audio_dir / "scene_durations.json").write_text(json.dumps([]), encoding="utf-8")
+    wav_path = audio_dir / "narration.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(b"")
+
+    manifest = {"stages": {"timeline": {"status": "pending", "retry_count": 0, "input_files": [], "output_files": []}}}
+
+    agent = TimelineAgent(run_dir, config={"stages": [{"id": "timeline", "aligner": "fake"}]})
+    # The approval & fingerprint gate executes first (verifying hashes & fingerprint without NameError).
+    # Since scenes is empty, it proceeds past alignment to schema validation requiring non-empty scenes.
+    with pytest.raises(ValueError, match="should be non-empty"):
+        agent.run(manifest)
+

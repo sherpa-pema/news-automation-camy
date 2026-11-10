@@ -5,8 +5,6 @@ Runs purely with FakeTTS and mock components. No model weights or .venv-tts requ
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +20,6 @@ from src.agents.voice import (
 from src.utils.tts import (
     FakeTTS,
     assemble_scene_audio,
-    concatenate_scenes,
     create_silence_wav,
     read_wav_info,
 )
@@ -36,7 +33,9 @@ def sample_script_dict() -> dict[str, Any]:
 
 @pytest.fixture
 def mock_run_dir(tmp_path: Path, sample_script_dict: dict[str, Any]) -> Path:
-    script_file = tmp_path / "script.json"
+    script_dir = tmp_path / "script"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script_file = script_dir / "script.json"
     with open(script_file, "w", encoding="utf-8") as f:
         json.dump(sample_script_dict, f, indent=2)
     return tmp_path
@@ -226,7 +225,7 @@ def test_speaker_consistency_gate_passes_and_reports(mock_run_dir: Path):
 
 def test_speaker_consistency_gate_fails_on_low_similarity(mock_run_dir: Path):
     """Validation fails if an item falls below the speaker embedding similarity threshold."""
-    script_file = mock_run_dir / "script.json"
+    script_file = mock_run_dir / "script" / "script.json"
     with open(script_file, "r", encoding="utf-8") as f:
         script = json.load(f)
     # Inject low similarity trigger into first scene
@@ -248,7 +247,7 @@ def test_speaker_consistency_gate_fails_on_low_similarity(mock_run_dir: Path):
 
 def test_speaker_consistency_gate_fails_on_pitch_deviation(mock_run_dir: Path):
     """Validation fails if median F0 deviates beyond f0_tolerance_pct."""
-    script_file = mock_run_dir / "script.json"
+    script_file = mock_run_dir / "script" / "script.json"
     with open(script_file, "r", encoding="utf-8") as f:
         script = json.load(f)
     script["scenes"][0]["narration"] = "Good evening TRIGGER_HIGH_PITCH. Welcome to the broadcast."
@@ -283,4 +282,92 @@ def test_speaker_consistency_gate_fails_on_pitch_deviation(mock_run_dir: Path):
     assert not is_valid
     assert "Speaker pitch gate failed" in err
     assert "350.0Hz differs from reference 216.0Hz" in err
+
+
+def test_pronunciation_verification_tags_and_unverified_tracking(tmp_path):
+    """Verify pronunciation dictionary supports verified boolean and tracks unverified applications."""
+    from src.agents.voice import load_pronunciations, load_pronunciations_with_metadata, get_unverified_pronunciations_applied
+
+    test_yaml = tmp_path / "pronunciations.yaml"
+    test_yaml.write_text(
+        """
+pronunciations:
+  Birgunj:
+    respelling: "Beer-gunj"
+    verified: true
+  MBBS:
+    respelling: "M B B S"
+    verified: false
+  Lumbini:
+    respelling: "Loom-bee-nee"
+    verified: false
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Plain dictionary mapping returns string respellings
+    plain = load_pronunciations(test_yaml)
+    assert plain["Birgunj"] == "Beer-gunj"
+    assert plain["MBBS"] == "M B B S"
+    assert plain["Lumbini"] == "Loom-bee-nee"
+
+    # 2. Metadata returns verified boolean
+    meta = load_pronunciations_with_metadata(test_yaml)
+    assert meta["Birgunj"]["verified"] is True
+    assert meta["MBBS"]["verified"] is False
+    assert meta["Lumbini"]["verified"] is False
+
+    # 3. get_unverified_pronunciations_applied identifies unverified words in scenes
+    scenes = [
+        {"id": "scene_01", "narration": "Students registered for the MBBS course in Birgunj."},
+        {"id": "scene_02", "narration": "Lumbini hosted thousands of visitors today."},
+    ]
+    unverified_applied = get_unverified_pronunciations_applied(scenes, test_yaml)
+    words_applied = {item["word"] for item in unverified_applied}
+    assert "MBBS" in words_applied
+    assert "Lumbini" in words_applied
+    assert "Birgunj" not in words_applied  # Because Birgunj is verified: true
+
+
+def test_voice_agent_run_approval_fingerprint_gate(tmp_path):
+    """VoiceAgent.run must execute the approval and validator fingerprint gate without NameError."""
+    import hashlib
+    from src.agents.voice import VoiceAgent
+    from src.utils.editor_validator import compute_validator_fingerprint
+
+    run_dir = tmp_path / "2026-11-08"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True, exist_ok=True)
+
+    script_data = {
+        "language": "English",
+        "origin": "editor",
+        "scenes": [],
+    }
+    script_path = script_dir / "script.json"
+    script_bytes = json.dumps(script_data).encode("utf-8")
+    script_path.write_bytes(script_bytes)
+    script_hash = hashlib.sha256(script_bytes).hexdigest()
+
+    curr_fp = compute_validator_fingerprint()
+    approval_data = {
+        "approved_at": "2026-11-08T10:00:00Z",
+        "script_sha256": script_hash,
+        "approved_by": "user",
+        "validator_fingerprint": curr_fp,
+    }
+    (script_dir / "approval.json").write_text(json.dumps(approval_data), encoding="utf-8")
+    (script_dir / "validation_report.json").write_text(
+        json.dumps({"is_valid": True, "errors": [], "validator_fingerprint": curr_fp}),
+        encoding="utf-8",
+    )
+
+    manifest = {"stages": {"voice": {"status": "pending", "retry_count": 0, "input_files": [], "output_files": []}}}
+
+    agent = VoiceAgent(run_dir)
+    # The approval & fingerprint gate executes first (verifying hashes & fingerprint without NameError).
+    # Since scenes is empty, it proceeds past the gate and raises ValueError for no scenes.
+    with pytest.raises(ValueError, match="contains no scenes to synthesize"):
+        agent.run(manifest)
+
 

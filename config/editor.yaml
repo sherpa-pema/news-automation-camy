@@ -1,0 +1,181 @@
+# Editor Agent configuration
+
+allow_opinion: false
+allow_stale_preview: false
+
+clustering:
+  min_full_text_words: 60
+  title_similarity_threshold: 0.55
+  token_overlap_threshold: 0.35
+  top_clusters_limit: 12
+
+budget:
+  min_duration_sec: 120.0
+  max_duration_sec: 180.0
+  target_duration_sec: 150.0
+  default_words_per_sec: 2.15
+  tolerance_pct: 0.10
+  scenes:
+    intro_min_words: 15
+    intro_max_words: 40
+    story_min_words: 20
+    story_max_words: 60
+    outro_min_words: 15
+    outro_max_words: 40
+
+sensitive_triggers:
+  - "death"
+  - "dead"
+  - "killed"
+  - "die"
+  - "died"
+  - "fatal"
+  - "fatality"
+  - "casualty"
+  - "casualties"
+  - "murder"
+  - "murdered"
+  - "homicide"
+  - "arrested"
+  - "arrest"
+  - "custody"
+  - "rape"
+  - "raped"
+  - "assault"
+  - "assaulted"
+  - "abuse"
+  - "abused"
+  - "suicide"
+  - "minor"
+  - "minors"
+  - "child"
+  - "children"
+  - "juvenile"
+  - "accident"
+  - "accidents"
+  - "crash"
+  - "crashed"
+  - "collision"
+  - "overturn"
+  - "overturned"
+  - "drown"
+  - "drowned"
+
+categories:
+  politics:
+    - "parliament"
+    - "minister"
+    - "ministry"
+    - "government"
+    - "election"
+    - "political"
+    - "party"
+    - "coalition"
+    - "constitution"
+    - "bill"
+    - "cabinet"
+  economy:
+    - "economy"
+    - "economic"
+    - "inflation"
+    - "budget"
+    - "revenue"
+    - "bank"
+    - "banking"
+    - "rupee"
+    - "tax"
+    - "trade"
+    - "export"
+    - "import"
+    - "market"
+    - "finance"
+    - "monetary"
+  weather:
+    - "weather"
+    - "rain"
+    - "rainfall"
+    - "monsoon"
+    - "storm"
+    - "temperature"
+    - "cold"
+    - "heat"
+    - "fog"
+  climate:
+    - "climate"
+    - "glacier"
+    - "warming"
+    - "emissions"
+    - "carbon"
+  disaster:
+    - "flood"
+    - "landslide"
+    - "earthquake"
+    - "avalanche"
+    - "fire"
+    - "disaster"
+    - "inundation"
+  health:
+    - "health"
+    - "hospital"
+    - "doctor"
+    - "patient"
+    - "disease"
+    - "virus"
+    - "dengue"
+    - "medicine"
+    - "medical"
+    - "vaccine"
+  transport:
+    - "transport"
+    - "highway"
+    - "road"
+    - "traffic"
+    - "transit"
+    - "airline"
+    - "flight"
+    - "airport"
+    - "vehicle"
+    - "bus"
+  crime:
+    - "crime"
+    - "police"
+    - "smuggling"
+    - "fraud"
+    - "scam"
+    - "theft"
+    - "bribe"
+    - "corruption"
+    - "investigation"
+  environment:
+    - "environment"
+    - "forest"
+    - "river"
+    - "wildlife"
+    - "conservation"
+    - "pollution"
+    - "air quality"
+    - "waste"
+  tourism:
+    - "tourism"
+    - "tourist"
+    - "trekking"
+    - "mountaineering"
+    - "hotel"
+    - "resort"
+    - "hospitality"
+  technology:
+    - "technology"
+    - "digital"
+    - "internet"
+    - "cyber"
+    - "telecom"
+    - "software"
+    - "ai"
+  society:
+    - "festival"
+    - "culture"
+    - "heritage"
+    - "education"
+    - "school"
+    - "university"
+    - "community"

@@ -1,0 +1,91 @@
+# Style configuration for Nepal News Bot video generation
+video:
+  resolution: [1920, 1080]
+  fps: 30
+  codec: "libx264"
+  pix_fmt: "yuv420p"
+  crf: 20
+  preset: "veryfast"
+  faststart: true
+
+preview:
+  resolution: [960, 540]
+  crf: 30
+  preset: "ultrafast"
+
+audio:
+  codec: "aac"
+  bitrate: "192k"
+  sample_rate: 48000
+  channels: 2
+
+music:
+  enabled: false
+  volume: 0.15
+
+palette:
+  navy_panel: "#0B1F3A"
+  navy_panel_rgba: [11, 31, 58, 235]
+  white_text: "#FFFFFF"
+  amber_accent: "#F5A623"
+  dark_shadow: [0, 0, 0, 128]
+  test_tag_bg: [217, 83, 79, 235]
+  illustrative_tag_bg: [11, 31, 58, 220]
+
+fonts:
+  primary_candidates:
+    - "C:\\Windows\\Fonts\\segoeuib.ttf"
+    - "C:\\Windows\\Fonts\\arialbd.ttf"
+  regular_candidates:
+    - "C:\\Windows\\Fonts\\segoeui.ttf"
+    - "C:\\Windows\\Fonts\\arial.ttf"
+
+safe_margin_pct: 0.05
+
+layout_rectangles:
+  # Safe zone in 1920x1080 is x: 96..1824, y: 54..1026
+  caption_band:
+    x: 160
+    y: 910
+    w: 1600
+    h: 110
+  lower_third:
+    x: 96
+    y: 730
+    w: 1320
+    h: 155
+  title_card:
+    x: 260
+    y: 280
+    w: 1400
+    h: 460
+  outro_card:
+    x: 260
+    y: 280
+    w: 1400
+    h: 460
+  test_run_tag:
+    x: 96
+    y: 54
+    w: 180
+    h: 44
+  illustrative_tag:
+    x: 1540
+    y: 54
+    w: 284
+    h: 44
+
+transitions:
+  scene_boundary:
+    type: "dip_to_black"
+    duration_sec: 0.2
+    fade_out_sec: 0.1
+    fade_in_sec: 0.1
+  intra_scene:
+    type: "cut"
+  still_zoom:
+    start_scale: 1.00
+    end_scale: 1.08
+    slow_zoom: true
+
+watermark_test_runs: true

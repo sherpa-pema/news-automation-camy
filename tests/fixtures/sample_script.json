@@ -1,5 +1,6 @@
 {
   "language": "English",
+  "origin": "fixture",
   "total_estimated_duration_sec": 150.0,
   "scenes": [
     {
@@ -7,49 +8,173 @@
       "headline": "Nepal Daily News Briefing",
       "narration": "Good evening. Welcome to the Nepal Daily Briefing for Thursday, November 6, 2026. Here are the top stories shaping the nation today from across the Kathmandu Valley and the provinces.",
       "source": "Nepal News Desk",
-      "visual_keywords": ["Kathmandu valley", "news studio", "broadcast title", "map of Nepal"]
+      "visual_keywords": [
+        "Kathmandu valley",
+        "news studio",
+        "broadcast title",
+        "map of Nepal"
+      ],
+      "type": "intro",
+      "category": null,
+      "sensitive": false,
+      "source_urls": [
+        "https://example.com/intro"
+      ],
+      "evidence": [
+        {
+          "sentence_index": 0,
+          "source_url": "https://example.com/intro"
+        }
+      ],
+      "est_duration_sec": 14.3
     },
     {
       "id": "scene_01",
       "headline": "Bagmati River Cleanup Initiative Reaches Key Milestone",
       "narration": "In Kathmandu, environmental authorities announced the completion of a major riverbank restoration phase along the Bagmati corridor. Officials confirmed that advanced biological treatment facilities are now operational, noticeably reducing pollutants near historic heritage sites. Community volunteers gathered in large numbers to plant native shrubs along the embankments.",
       "source": "The Kathmandu Post",
-      "visual_keywords": ["Bagmati river", "cleanup drive", "Kathmandu city", "volunteers planting trees"]
+      "visual_keywords": [
+        "Bagmati river",
+        "cleanup drive",
+        "Kathmandu city",
+        "volunteers planting trees"
+      ],
+      "type": "story",
+      "category": "environment",
+      "sensitive": false,
+      "source_urls": [
+        "https://example.com/scene_01"
+      ],
+      "evidence": [
+        {
+          "sentence_index": 0,
+          "source_url": "https://example.com/scene_01"
+        }
+      ],
+      "est_duration_sec": 22.4
     },
     {
       "id": "scene_02",
       "headline": "Pokhara Tourism Sector Reports Autumn Inflow",
       "narration": "Over in Pokhara, the autumn trekking season is reaching its peak. Hospitality operators around Phewa Lake report over eighty percent hotel occupancy, driven by both international mountaineers and domestic holidaymakers. Aviation regulators noted a steady increase in daily scheduled flights connecting the tourist hub with western mountain circuits.",
       "source": "The Himalayan Times",
-      "visual_keywords": ["Pokhara", "Phewa lake", "Annapurna mountains", "tourists trekking"]
+      "visual_keywords": [
+        "Pokhara",
+        "Phewa lake",
+        "Annapurna mountains",
+        "tourists trekking"
+      ],
+      "type": "story",
+      "category": "tourism",
+      "sensitive": false,
+      "source_urls": [
+        "https://example.com/scene_02"
+      ],
+      "evidence": [
+        {
+          "sentence_index": 0,
+          "source_url": "https://example.com/scene_02"
+        }
+      ],
+      "est_duration_sec": 22.9
     },
     {
       "id": "scene_03",
       "headline": "Sindhupalchok Highway Upgrade Speeds Up Northern Commerce",
       "narration": "Moving north to Sindhupalchok, the Department of Roads has completed slope stabilization and resurfacing works along the critical cross-border trade route. Freight carriers have welcomed the smoother transit, which cuts driving times significantly and lowers the risk of seasonal landslides during heavy monsoon downpours.",
       "source": "Onlinekhabar English",
-      "visual_keywords": ["Sindhupalchok", "mountain highway", "cargo trucks", "road construction"]
+      "visual_keywords": [
+        "Sindhupalchok",
+        "mountain highway",
+        "cargo trucks",
+        "road construction"
+      ],
+      "type": "story",
+      "category": "transport",
+      "sensitive": false,
+      "source_urls": [
+        "https://example.com/scene_03"
+      ],
+      "evidence": [
+        {
+          "sentence_index": 0,
+          "source_url": "https://example.com/scene_03"
+        }
+      ],
+      "est_duration_sec": 21.0
     },
     {
       "id": "scene_04",
       "headline": "Birgunj Integrated Check Post Handles Record Cargo",
       "narration": "Down south at Birgunj, customs authorities reported record commercial freight clearance through the Integrated Check Post this quarter. Enhanced digital scanning systems and automated gate passes have cleared container backlogs, expediting essential petroleum, raw materials, and agricultural shipments headed toward central industrial corridors.",
       "source": "Nagrik Network",
-      "visual_keywords": ["Birgunj", "dry port", "customs checkpoint", "container cargo"]
+      "visual_keywords": [
+        "Birgunj",
+        "dry port",
+        "customs checkpoint",
+        "container cargo"
+      ],
+      "type": "story",
+      "category": "economy",
+      "sensitive": false,
+      "source_urls": [
+        "https://example.com/scene_04"
+      ],
+      "evidence": [
+        {
+          "sentence_index": 0,
+          "source_url": "https://example.com/scene_04"
+        }
+      ],
+      "est_duration_sec": 20.5
     },
     {
       "id": "scene_05",
       "headline": "National Grid Adds New Clean Hydropower Capacity",
       "narration": "In the energy sector, the national power grid synchronized fifty megawatts of fresh hydroelectric capacity today. Nepal Electricity Authority engineers confirmed that surplus energy exports to regional power exchanges remain robust, cementing the country's transition toward clean, sustainable domestic energy security.",
       "source": "Nepali Times",
-      "visual_keywords": ["hydroelectric dam", "power transmission lines", "substation control room"]
+      "visual_keywords": [
+        "hydroelectric dam",
+        "power transmission lines",
+        "substation control room"
+      ],
+      "type": "story",
+      "category": "economy",
+      "sensitive": false,
+      "source_urls": [
+        "https://example.com/scene_05"
+      ],
+      "evidence": [
+        {
+          "sentence_index": 0,
+          "source_url": "https://example.com/scene_05"
+        }
+      ],
+      "est_duration_sec": 19.5
     },
     {
       "id": "outro",
       "headline": "Thank You for Tuning In",
       "narration": "That wraps up our prime news broadcast for tonight. Thank you for joining us on the Nepal Daily Briefing. Stay informed, stay safe, and have a pleasant evening.",
       "source": "Nepal News Desk",
-      "visual_keywords": ["Kathmandu night skyline", "studio anchor", "closing credits"]
+      "visual_keywords": [
+        "Kathmandu night skyline",
+        "studio anchor",
+        "closing credits"
+      ],
+      "type": "outro",
+      "category": null,
+      "sensitive": false,
+      "source_urls": [
+        "https://example.com/outro"
+      ],
+      "evidence": [
+        {
+          "sentence_index": 0,
+          "source_url": "https://example.com/outro"
+        }
+      ],
+      "est_duration_sec": 13.3
     }
   ]
 }

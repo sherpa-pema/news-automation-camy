@@ -27,7 +27,7 @@ stages:
     inputs:
       - "raw/articles.json"
     outputs:
-      - "script.json"
+      - "script/script.json"
     model: "TODO: LLM for broadcast rewriting (e.g. Gemini 1.5 Pro / Claude 3.5 Sonnet / Llama 3)"
     notes: "Selects top 5 stories, dedupes, rewrites into broadcast narration with source credits."
 
@@ -38,7 +38,7 @@ stages:
     retries: 2
     timeout_seconds: 3600
     inputs:
-      - "script.json"
+      - "script/script.json"
     outputs:
       - "audio/narration.wav"
       - "audio/scene_durations.json"
@@ -72,15 +72,20 @@ stages:
 
   - id: "media"
     agent: "MediaAgent"
-    depends_on: ["editor"]
-    can_run_parallel_with: ["voice", "timeline"]
+    depends_on: ["timeline", "editor"]
     retries: 2
     timeout_seconds: 300
+    fps: 30
+    orientation: "landscape"
+    resolution: [1920, 1080]
     inputs:
-      - "script.json"
+      - "script/script.json"
+      - "timeline.json"
     outputs:
-      - "media_manifest.json"
-    tool: "Free/licensed media APIs (Pexels, Pixabay, Wikimedia Commons) + yt-dlp (CC license only)"
+      - "media/media_manifest.json"
+      - "media/credits.md"
+      - "media/shot_plan.json"
+    tool: "Free/licensed media APIs (Local Library, Wikimedia, Pixabay, Openverse, NASA) + ffmpeg"
     notes: "Collects verified public domain / CC visuals. Strictly avoids news-outlet media."
 
   - id: "timeline"
@@ -92,7 +97,7 @@ stages:
     inputs:
       - "audio/narration.wav"
       - "audio/scene_durations.json"
-      - "script.json"
+      - "script/script.json"
     outputs:
       - "timeline/timeline.json"
       - "timeline/captions.srt"
@@ -126,29 +131,29 @@ stages:
     agent: "MotionAgent"
     depends_on: ["timeline", "media"]
     retries: 2
-    timeout_seconds: 120
+    timeout_seconds: 180
     inputs:
-      - "timeline.json"
-      - "media_manifest.json"
-      - "script.json"
+      - "timeline/timeline.json"
+      - "timeline/captions.json"
+      - "media/media_manifest.json"
+      - "script/script.json"
     outputs:
-      - "render_plan.json"
-    model: "TODO: LLM / Design Rule Engine (Remotion/HTML5/FFmpeg motion templates)"
+      - "motion/render_plan.json"
+      - "motion/captions.ass"
     notes: "Composes scene layouts, lower-thirds, captions, source tags, and transitions."
 
   - id: "render"
     agent: "RenderAgent"
-    depends_on: ["motion", "media", "voice", "timeline"]
+    depends_on: ["motion"]
     retries: 2
-    timeout_seconds: 600
+    timeout_seconds: 1800
     inputs:
-      - "render_plan.json"
-      - "timeline.json"
-      - "media_manifest.json"
+      - "motion/render_plan.json"
+      - "motion/captions.ass"
       - "audio/narration.wav"
-      - "captions.srt"
     outputs:
-      - "final.mp4"
+      - "render/final.mp4"
+      - "render/description.md"
     tool: "ffmpeg"
     notes: "Stitches media, narration, overlays, and captions into final MP4 video."
 
@@ -156,15 +161,14 @@ stages:
     agent: "QAAgent"
     depends_on: ["render"]
     retries: 2
-    timeout_seconds: 120
+    timeout_seconds: 180
     inputs:
-      - "final.mp4"
+      - "render/final.mp4"
       - "audio/narration.wav"
-      - "timeline.json"
-      - "captions.srt"
-      - "media_manifest.json"
-      - "script.json"
+      - "motion/render_plan.json"
+      - "render/description.md"
     outputs:
-      - "qa_report.json"
+      - "qa/qa_report.json"
+      - "qa/contact_sheet.jpg"
     tool: "ffprobe + python automated checks"
     notes: "Validates duration sync, loudness, black frames, attribution, and returns pass/fail."

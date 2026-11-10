@@ -45,11 +45,16 @@ def load_manifest(manifest_path: Path | str) -> dict[str, Any]:
 
 
 def save_manifest(manifest: dict[str, Any], manifest_path: Path | str) -> None:
-    """Atomically writes the manifest to disk and updates updated_at timestamp.
-
-    TODO: Use tempfile + atomic rename to prevent corruption during concurrent reads.
-    """
-    manifest["updated_at"] = datetime.now().astimezone().isoformat()
+    """Atomically writes the manifest to disk and updates updated_at timestamp."""
+    now_iso = datetime.now().astimezone().isoformat()
+    manifest["updated_at"] = now_iso
+    if "created_at" not in manifest:
+        manifest["created_at"] = now_iso
+    schema_path = Path("contracts/manifest.schema.json")
+    if schema_path.exists():
+        is_valid, err = validate_contract(manifest, schema_path)
+        if not is_valid:
+            raise ValueError(f"manifest.json schema validation failed: {err}")
     path = Path(manifest_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -86,3 +91,22 @@ def update_stage_status(
         stage["metrics"] = metrics
     if source_errors is not None:
         stage["source_errors"] = source_errors
+
+
+def record_manual_edit(
+    manifest: dict[str, Any],
+    file: str,
+    what: str,
+    why: str,
+    timestamp: str | None = None,
+) -> None:
+    """Records a manual edit entry to the manifest's manual_edits list."""
+    if "manual_edits" not in manifest:
+        manifest["manual_edits"] = []
+    manifest["manual_edits"].append({
+        "file": file,
+        "what": what,
+        "why": why,
+        "timestamp": timestamp or datetime.now().astimezone().isoformat(),
+    })
+

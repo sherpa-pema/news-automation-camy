@@ -45,6 +45,14 @@
         "type": "integer",
         "minimum": 0,
         "description": "Word count of the extracted full text"
+      },
+      "scraped_at": {
+        "type": "string",
+        "description": "ISO 8601 timestamp when article was scraped"
+      },
+      "age_hours": {
+        "type": ["number", "null"],
+        "description": "Age of the article in hours relative to scrape reference time"
       }
     },
     "required": ["source", "title", "url", "published_at", "text_summary"],

@@ -1,44 +1,179 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "MediaManifestHandoff",
-  "description": "Output of the Media Agent tracking licensed visual assets retrieved for each scene.",
-  "type": "array",
-  "items": {
-    "type": "object",
-    "properties": {
-      "scene_id": {
-        "type": "string",
-        "description": "Scene identifier corresponding to script.json scene id"
-      },
-      "file": {
-        "type": "string",
-        "description": "Relative path to the locally saved media file"
-      },
-      "type": {
-        "type": "string",
-        "enum": ["video", "image", "motion_graphic"],
-        "description": "Media type of the asset"
-      },
-      "origin_url": {
-        "type": "string",
-        "format": "uri",
-        "description": "Source URL where the media was obtained"
-      },
-      "license": {
-        "type": "string",
-        "description": "Verified license type (e.g., CC0, CC-BY-4.0, Pexels License, Pixabay License)"
-      },
-      "attribution": {
-        "type": "string",
-        "description": "Mandatory creator/author credit and attribution string"
-      },
-      "duration_sec": {
-        "type": "number",
-        "minimum": 0,
-        "description": "Duration in seconds if video asset"
+  "title": "MediaManifest",
+  "description": "Output of the Media Agent tracking licensed visual shots retrieved for each scene.",
+  "type": "object",
+  "properties": {
+    "date": {
+      "type": "string",
+      "format": "date",
+      "description": "Run date in YYYY-MM-DD format"
+    },
+    "orientation": {
+      "type": "string",
+      "enum": ["landscape", "vertical"],
+      "description": "Video composition orientation"
+    },
+    "resolution": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "Target width and height in pixels"
+    },
+    "fps": {
+      "type": "number",
+      "minimum": 1,
+      "description": "Target frame rate"
+    },
+    "illustrative_label": {
+      "type": "boolean",
+      "description": "Whether to display illustrative visuals label on screen"
+    },
+    "disclose_synthetic_voice": {
+      "type": "boolean",
+      "description": "Whether AI voice generation disclosure is required"
+    },
+    "script_origin": {
+      "type": "string",
+      "enum": ["editor", "fixture"],
+      "description": "Provenance of the script driving this media manifest"
+    },
+    "shots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "scene_id": {
+            "type": "string",
+            "description": "Scene identifier corresponding to script.json"
+          },
+          "shot_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero-indexed shot sequence number within the scene"
+          },
+          "start": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Absolute start time in seconds in the narration audio"
+          },
+          "end": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Absolute end time in seconds in the narration audio"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["video", "image", "fallback", "card"],
+            "description": "Media type of the shot"
+          },
+          "card_text": {
+            "type": ["string", "null"],
+            "description": "Text displayed on graphic card if type is card"
+          },
+          "file": {
+            "type": ["string", "null"],
+            "description": "Relative path to local media file, or null if fallback"
+          },
+          "source": {
+            "type": "string",
+            "description": "Name of the source provider (e.g. user-provided, pixabay, wikimedia)"
+          },
+          "origin_url": {
+            "type": ["string", "null"],
+            "description": "Web URL where the media originated, or null"
+          },
+          "license": {
+            "type": "string",
+            "description": "License name"
+          },
+          "license_url": {
+            "type": ["string", "null"],
+            "description": "Link to license terms, or null"
+          },
+          "author": {
+            "type": "string",
+            "description": "Author or creator name"
+          },
+          "attribution_text": {
+            "type": "string",
+            "description": "Full formatted attribution string for credits"
+          },
+          "attribution_required": {
+            "type": "boolean",
+            "description": "Whether attribution is legally required by license terms"
+          },
+          "width": {
+            "type": ["integer", "null"],
+            "description": "Pixel width of media asset, or null if fallback"
+          },
+          "height": {
+            "type": ["integer", "null"],
+            "description": "Pixel height of media asset, or null if fallback"
+          },
+          "duration_sec": {
+            "type": ["number", "null"],
+            "description": "Duration in seconds of the shot asset"
+          },
+          "sha256": {
+            "type": ["string", "null"],
+            "description": "SHA256 hash of the normalized media file, or null if fallback"
+          },
+          "query": {
+            "type": ["string", "null"],
+            "description": "Search keyword query used to discover this shot"
+          },
+          "motion": {
+            "type": ["string", "null"],
+            "description": "Motion instruction for Motion Agent (e.g. ken_burns for stills)"
+          },
+          "sensitive_scene": {
+            "type": "boolean",
+            "description": "Whether this shot is in a sensitive news scene"
+          },
+          "style": {
+            "type": ["string", "null"],
+            "description": "Fallback style name if type is fallback"
+          }
+        },
+        "required": [
+          "scene_id",
+          "shot_index",
+          "start",
+          "end",
+          "type",
+          "file",
+          "source",
+          "origin_url",
+          "license",
+          "license_url",
+          "author",
+          "attribution_text",
+          "attribution_required",
+          "width",
+          "height",
+          "sha256",
+          "query",
+          "motion",
+          "sensitive_scene"
+        ],
+        "additionalProperties": false
       }
     },
-    "required": ["scene_id", "file", "type", "origin_url", "license", "attribution"],
-    "additionalProperties": false
-  }
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of warnings generated during media retrieval and normalization"
+    }
+  },
+  "required": [
+    "date",
+    "orientation",
+    "resolution",
+    "fps",
+    "shots",
+    "warnings"
+  ],
+  "additionalProperties": false
 }

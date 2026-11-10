@@ -15,6 +15,51 @@
       "maximum": 60,
       "description": "Frames per second (e.g., 30)"
     },
+    "audio_file": {
+      "type": "string",
+      "description": "Relative path to master audio narration file"
+    },
+    "duration_sec": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Total duration in seconds"
+    },
+    "duration": {
+      "type": "number",
+      "minimum": 0
+    },
+    "captions_ass": {
+      "type": "string",
+      "description": "Relative path to generated ASS subtitle file"
+    },
+    "overlays": {
+      "type": "array",
+      "description": "Global or scene-specific graphics overlays",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "scene_id": { "type": ["string", "null"] },
+          "type": { "type": "string" },
+          "png": { "type": "string" },
+          "start": { "type": "number", "minimum": 0 },
+          "end": { "type": "number", "minimum": 0 },
+          "x": { "type": "integer" },
+          "y": { "type": "integer" },
+          "w": { "type": "integer" },
+          "h": { "type": "integer" },
+          "animation": { "type": ["string", "null"] },
+          "fade_in": { "type": "number", "minimum": 0 },
+          "fade_out": { "type": "number", "minimum": 0 }
+        },
+        "required": ["id", "type", "png", "start", "end", "x", "y", "w", "h"],
+        "additionalProperties": true
+      }
+    },
+    "transitions": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "scenes": {
       "type": "array",
       "minItems": 1,
@@ -25,9 +70,36 @@
             "type": "string",
             "description": "Scene identifier corresponding to script.json scene id"
           },
+          "start": {
+            "type": "number",
+            "minimum": 0
+          },
+          "end": {
+            "type": "number",
+            "minimum": 0
+          },
           "media": {
             "type": "string",
             "description": "Path to primary background media or graphic asset for this scene"
+          },
+          "shots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "file": { "type": "string" },
+                "start": { "type": "number", "minimum": 0 },
+                "end": { "type": "number", "minimum": 0 },
+                "type": { "type": "string" },
+                "motion": { "type": ["string", "null"] }
+              },
+              "required": ["file", "start", "end", "type"],
+              "additionalProperties": true
+            }
+          },
+          "overlays": {
+            "type": "array",
+            "items": { "type": "object" }
           },
           "lower_third": {
             "type": "object",
@@ -37,7 +109,7 @@
               "style": { "type": "string" }
             },
             "required": ["headline", "source_credit"],
-            "additionalProperties": false
+            "additionalProperties": true
           },
           "caption_style": {
             "type": "object",
@@ -53,18 +125,18 @@
           "transition": {
             "type": "object",
             "properties": {
-              "type": { "type": "string", "enum": ["cut", "fade", "crossfade", "slide_left", "slide_right", "zoom_in"] },
+              "type": { "type": "string" },
               "duration_sec": { "type": "number", "minimum": 0 }
             },
             "required": ["type", "duration_sec"],
-            "additionalProperties": false
+            "additionalProperties": true
           }
         },
         "required": ["id", "media", "lower_third", "caption_style", "transition"],
-        "additionalProperties": false
+        "additionalProperties": true
       }
     }
   },
   "required": ["resolution", "fps", "scenes"],
-  "additionalProperties": false
+  "additionalProperties": true
 }

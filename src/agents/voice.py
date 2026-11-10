@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -23,8 +22,8 @@ from src.agents.base import BaseAgent
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest, save_manifest, update_stage_status
 from src.utils.tts import (
-    FakeTTS,
-    MingEngine,
+    FakeTTS as FakeTTS,
+    MingEngine as MingEngine,
     assemble_scene_audio,
     concatenate_scenes,
     get_tts_engine,
@@ -40,7 +39,65 @@ def load_pronunciations(pronunciations_file: Path | str = "config/pronunciations
         return {}
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    if "pronunciations" in data and isinstance(data["pronunciations"], dict):
+        data = data["pronunciations"]
+    res = {}
+    for word, val in data.items():
+        if isinstance(val, dict):
+            res[word] = val.get("respelling", "")
+        else:
+            res[word] = str(val)
+    return res
+
+
+def load_pronunciations_with_metadata(pronunciations_file: Path | str = "config/pronunciations.yaml") -> dict[str, dict[str, Any]]:
+    """Loads phonetic respellings with verification metadata from config/pronunciations.yaml."""
+    path = Path(pronunciations_file)
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        return {}
+    if "pronunciations" in data and isinstance(data["pronunciations"], dict):
+        data = data["pronunciations"]
+    res = {}
+    for word, val in data.items():
+        if isinstance(val, dict):
+            res[word] = {
+                "respelling": val.get("respelling", ""),
+                "verified": bool(val.get("verified", False)),
+            }
+        else:
+            res[word] = {
+                "respelling": str(val),
+                "verified": False,
+            }
+    return res
+
+
+def get_unverified_pronunciations_applied(
+    scenes: list[dict[str, Any]],
+    pronunciations_file: Path | str = "config/pronunciations.yaml",
+) -> list[dict[str, Any]]:
+    """Identifies which unverified pronunciation respellings were matched and applied across scenes."""
+    meta = load_pronunciations_with_metadata(pronunciations_file)
+    unverified_applied = []
+    for word, info in meta.items():
+        if not info.get("verified", False):
+            pattern = re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)
+            for sc in scenes:
+                raw_text = sc.get("narration", "")
+                if pattern.search(raw_text):
+                    unverified_applied.append({
+                        "word": word,
+                        "respelling": info["respelling"],
+                        "scene_id": sc.get("id"),
+                    })
+                    break
+    return unverified_applied
 
 
 def clean_narration_text(text: str, pronunciations: dict[str, str] | None = None) -> str:
@@ -206,22 +263,38 @@ class VoiceAgent(BaseAgent):
         output_sample_rate = int(voice_cfg.get("output_sample_rate", 48000))
         disclose_synthetic_voice = bool(voice_cfg.get("disclose_synthetic_voice", True))
 
-        # Check for script.json input
-        script_path = self.run_dir / "script.json"
+        # Check for script/script.json input
+        script_path = self.run_dir / "script" / "script.json"
         if not script_path.exists():
-            fixture_sample = Path("tests/fixtures/sample_script.json")
-            if fixture_sample.exists():
-                self.logger.warning(
-                    f"script.json not found in {self.run_dir}. Using fixture {fixture_sample}."
-                )
-                shutil.copyfile(fixture_sample, script_path)
-            else:
-                raise FileNotFoundError(
-                    f"Required script input missing: {script_path} (and fixture not found at {fixture_sample})"
-                )
+            raise FileNotFoundError(f"Missing required script file: {script_path}")
 
         with open(script_path, "r", encoding="utf-8") as f:
             script_data = json.load(f)
+
+        # Verify approval if origin is editor
+        origin = script_data.get("origin", "editor")
+        if origin != "fixture":
+            approval_file = self.run_dir / "script" / "approval.json"
+            if not approval_file.exists():
+                raise ValueError("script changed after approval, re-run validate and approve")
+            with open(approval_file, "r", encoding="utf-8") as f:
+                app_data = json.load(f)
+            import hashlib
+            curr_hash = hashlib.sha256(script_path.read_bytes()).hexdigest()
+            if app_data.get("script_sha256") != curr_hash:
+                raise ValueError("script changed after approval, re-run validate and approve")
+            from src.utils.editor_validator import compute_validator_fingerprint, extract_script_validation_fingerprint
+            curr_fp = extract_script_validation_fingerprint(compute_validator_fingerprint())
+            app_fp = extract_script_validation_fingerprint(app_data.get("validator_fingerprint"))
+            if app_fp and app_fp != curr_fp:
+                raise ValueError("validator or editor config changed after approval, re-run validate and approve")
+            rep_file = self.run_dir / "script" / "validation_report.json"
+            if rep_file.exists():
+                with open(rep_file, "r", encoding="utf-8") as rf:
+                    rep_data = json.load(rf)
+                rep_fp = extract_script_validation_fingerprint(rep_data.get("validator_fingerprint"))
+                if rep_fp and rep_fp != curr_fp:
+                    raise ValueError("validator or editor config changed since validation, re-run validate and approve")
 
         scenes = script_data.get("scenes", [])
         if not scenes:
@@ -428,6 +501,7 @@ class VoiceAgent(BaseAgent):
         rtf = round(total_synthesis_time / final_duration_sec, 2) if final_duration_sec > 0 else 0.0
 
         # Build voice_report.json
+        unverified_applied = get_unverified_pronunciations_applied(scenes)
         voice_report = {
             "engine": engine_name,
             "model": model_path,
@@ -450,6 +524,7 @@ class VoiceAgent(BaseAgent):
             },
             "loudnorm": master_stats,
             "scenes": scene_metrics,
+            "unverified_pronunciations_applied": unverified_applied,
         }
         report_json_path = audio_dir / "voice_report.json"
         with open(report_json_path, "w", encoding="utf-8") as f:

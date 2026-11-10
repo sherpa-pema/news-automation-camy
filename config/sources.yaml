@@ -5,13 +5,14 @@ settings:
   user_agent: "NepalNewsBot/0.1 (personal project)"
   request_delay_seconds: 2
   timezone: "Asia/Kathmandu"
+  lookback_hours: 30
 
 sources:
   - name: "Onlinekhabar English"
     homepage: "https://english.onlinekhabar.com"
     rss: "https://english.onlinekhabar.com/feed"
     method: "rss"
-    max_articles: 10
+    max_articles: 20
     robots_ok: true
     enabled: true
     notes: "Verified working. RSS 2.0 with 20 entries containing title, link, and publication timestamp. robots.txt only disallows /wp-admin/."
@@ -20,7 +21,7 @@ sources:
     homepage: "https://kathmandupost.com"
     rss: "https://kathmandupost.com/rss"
     method: "rss"
-    max_articles: 10
+    max_articles: 20
     robots_ok: true
     enabled: true
     notes: "Verified working. RSS feed returns 40 entries with title, link, and summary. robots.txt allows all crawling. Publication date embedded in article URL structure."
@@ -29,7 +30,7 @@ sources:
     homepage: "https://myrepublica.nagariknetwork.com"
     rss: "https://myrepublica.nagariknetwork.com/feeds"
     method: "rss"
-    max_articles: 10
+    max_articles: 20
     robots_ok: true
     enabled: true
     notes: "Verified working. RSS feed returns 30 entries with title, link, and published date. robots.txt allows all crawling."
@@ -38,7 +39,7 @@ sources:
     homepage: "https://thehimalayantimes.com"
     rss: "https://thehimalayantimes.com/rssFeed/0"
     method: "rss"
-    max_articles: 10
+    max_articles: 20
     robots_ok: true
     enabled: true
     notes: "Verified working. General site-wide latest news feed at /rssFeed/0 returns 50 entries across all sections (Kathmandu, Nepal, etc.) with full titles, links, and timestamps. (Category feed #15 also available)."
@@ -47,7 +48,7 @@ sources:
     homepage: "https://en.setopati.com"
     rss: null
     method: "html_only"
-    max_articles: 5
+    max_articles: 20
     robots_ok: true
     enabled: false
     notes: "Feed endpoint https://en.setopati.com/feed returns HTTP 500 internal server error. Disabled for RSS-first ingestion until feed is restored or HTML fallback is permitted."

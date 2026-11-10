@@ -24,6 +24,7 @@ data/tts_tests/
 # Run Data & Media
 data/runs/*
 !data/runs/.gitkeep
+data/media_cache/
 
 # IDE & OS
 .idea/

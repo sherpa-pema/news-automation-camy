@@ -20,7 +20,6 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from src.agents.voice import clean_narration_text, split_into_sentences
 
 
 # Weak words that should be avoided at the end of a subtitle line

@@ -31,6 +31,11 @@
         "additionalProperties": false
       }
     },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Non-fatal warnings detected during QA checks"
+    },
     "redo_stage": {
       "type": ["string", "null"],
       "description": "The specific pipeline stage ID to re-run on failure, or null if passed"
@@ -42,5 +47,5 @@
     }
   },
   "required": ["passed", "checks", "redo_stage"],
-  "additionalProperties": false
+  "additionalProperties": true
 }

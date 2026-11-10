@@ -1,9 +1,8 @@
 """Scraper Agent implementation for nepal-news-bot."""
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import difflib
 import json
-import logging
 from pathlib import Path
 import re
 import sys
@@ -178,6 +177,8 @@ class ScraperAgent(BaseAgent):
         config: dict[str, Any] | None = None,
         sources_path: Path | str = "config/sources.yaml",
         pipeline_path: Path | str = "config/pipeline.yaml",
+        backfill: bool = False,
+        lookback_hours: float | None = None,
     ) -> None:
         super().__init__(run_dir, config)
         self.sources_path = Path(sources_path)
@@ -185,6 +186,8 @@ class ScraperAgent(BaseAgent):
         self.logger = setup_logger("scraper")
         self.last_domain_request: dict[str, float] = {}
         self.robot_parsers: dict[str, urllib.robotparser.RobotFileParser] = {}
+        self.backfill = backfill or (self.config.get("backfill", False) if self.config else False)
+        self.lookback_hours = lookback_hours if lookback_hours is not None else (self.config.get("lookback_hours") if self.config else None)
 
     @property
     def name(self) -> str:
@@ -309,6 +312,7 @@ class ScraperAgent(BaseAgent):
         seen_urls: set[str],
         seen_titles: list[str],
         default_language: str = "en",
+        lookback_seconds: float = 30 * 3600,
     ) -> tuple[list[dict[str, Any]], dict[str, int], str | None]:
         """Fetches and processes an RSS source."""
         stats = {"found": 0, "kept_filter": 0, "extracted_ok": 0, "dropped": 0}
@@ -320,7 +324,7 @@ class ScraperAgent(BaseAgent):
             return articles, stats, "Missing RSS endpoint"
 
         source_name = source["name"]
-        max_articles = source.get("max_articles", 10)
+        max_articles = source.get("max_articles", 20)
         source_lang = normalize_language_code(source.get("language") or default_language)
 
         self.logger.info(f"Fetching RSS for {source_name}: {rss_url}")
@@ -356,13 +360,15 @@ class ScraperAgent(BaseAgent):
                 stats["dropped"] += 1
                 continue
 
-            # Parse date & apply 24h filter
+            # Parse date & apply lookback filter
             pub_dt = parse_article_date(entry, norm_url)
+            age_hours = None
             if pub_dt is not None:
                 diff_seconds = (ref_time - pub_dt).total_seconds()
-                # If older than 24h (86400s) or more than 1h in the future (-3600s)
-                if diff_seconds > 86400 or diff_seconds < -3600:
-                    self.logger.debug(f"Dropping article outside 24h window ({pub_dt.isoformat()}): {title}")
+                age_hours = round(diff_seconds / 3600.0, 2)
+                # If older than lookback window or more than 1h in the future (-3600s)
+                if diff_seconds > lookback_seconds or diff_seconds < -3600:
+                    self.logger.debug(f"Dropping article outside lookback window ({pub_dt.isoformat()}): {title}")
                     stats["dropped"] += 1
                     continue
                 pub_iso = pub_dt.isoformat()
@@ -382,6 +388,8 @@ class ScraperAgent(BaseAgent):
                 user_agent=user_agent,
                 delay_seconds=delay_seconds,
                 language=source_lang,
+                scraped_at=ref_time.isoformat(),
+                age_hours=age_hours,
             )
 
             if article:
@@ -471,6 +479,8 @@ class ScraperAgent(BaseAgent):
                 user_agent=user_agent,
                 delay_seconds=delay_seconds,
                 language=source_lang,
+                scraped_at=ref_time.isoformat(),
+                age_hours=None,
             )
 
             if article:
@@ -500,6 +510,8 @@ class ScraperAgent(BaseAgent):
         user_agent: str,
         delay_seconds: float,
         language: str = "en",
+        scraped_at: str | None = None,
+        age_hours: float | None = None,
     ) -> dict[str, Any] | None:
         """Extracts article text with trafilatura and falls back to RSS description if needed."""
         extracted_text = ""
@@ -577,6 +589,8 @@ class ScraperAgent(BaseAgent):
             "language": normalize_language_code(language),
             "word_count": word_count,
             "author": author if author else None,
+            "scraped_at": scraped_at or datetime.now(timezone.utc).isoformat(),
+            "age_hours": age_hours,
         }
         return article
 
@@ -584,6 +598,9 @@ class ScraperAgent(BaseAgent):
         self,
         target_date: str | None = None,
         source_filter: str | None = None,
+        backfill: bool | None = None,
+        lookback_hours: float | None = None,
+        ref_time: datetime | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]], dict[str, str]]:
         """Executes scraping for all active sources (or a single filtered source).
 
@@ -596,8 +613,18 @@ class ScraperAgent(BaseAgent):
         delay_seconds = float(settings.get("request_delay_seconds", 2))
         default_language = normalize_language_code(settings.get("language", "en"))
 
+        is_backfill = self.backfill if backfill is None else backfill
+        effective_lookback_hours = (
+            lookback_hours
+            if lookback_hours is not None
+            else (self.lookback_hours if self.lookback_hours is not None else settings.get("lookback_hours", 30))
+        )
+        lookback_seconds = float(effective_lookback_hours) * 3600
+
         # Establish reference time
-        if target_date:
+        if ref_time is not None:
+            pass
+        elif is_backfill and target_date:
             try:
                 y, m, d = map(int, target_date.split("-"))
                 ref_time = datetime(y, m, d, 23, 59, 59, tzinfo=KATHMANDU_TZ)
@@ -606,7 +633,10 @@ class ScraperAgent(BaseAgent):
         else:
             ref_time = datetime.now(KATHMANDU_TZ)
 
-        self.logger.info(f"Scraper reference time: {ref_time.isoformat()} (Asia/Kathmandu)")
+        self.logger.info(
+            f"Scraper reference time: {ref_time.isoformat()} (Asia/Kathmandu) | "
+            f"lookback: {lookback_seconds/3600:.1f}h | backfill: {is_backfill}"
+        )
 
         all_articles: list[dict[str, Any]] = []
         per_source_stats: dict[str, dict[str, int]] = {}
@@ -631,7 +661,14 @@ class ScraperAgent(BaseAgent):
             method = src.get("method", "rss")
             if method == "rss":
                 src_articles, stats, err = self._fetch_rss_source(
-                    src, user_agent, delay_seconds, ref_time, seen_urls, seen_titles, default_language=default_language
+                    src,
+                    user_agent,
+                    delay_seconds,
+                    ref_time,
+                    seen_urls,
+                    seen_titles,
+                    default_language=default_language,
+                    lookback_seconds=lookback_seconds,
                 )
             elif method == "html_only":
                 src_articles, stats, err = self._fetch_html_source(
@@ -662,7 +699,11 @@ class ScraperAgent(BaseAgent):
 
         self.logger.info(f"Running Scraper Agent for run date: {target_date} (min_articles={min_articles})")
 
-        articles, stats, errors = self.scrape_all(target_date=target_date)
+        articles, stats, errors = self.scrape_all(
+            target_date=target_date,
+            backfill=self.backfill,
+            lookback_hours=self.lookback_hours,
+        )
 
         # Check minimum articles threshold
         if len(articles) < min_articles:
@@ -775,20 +816,32 @@ def main() -> int:
     parser.add_argument("--date", default=str(datetime.now().date()), help="Target run date (YYYY-MM-DD)")
     parser.add_argument("--source", default=None, help="Limit scraping to one specific source name")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without saving outputs to disk")
+    parser.add_argument("--backfill", action="store_true", help="Anchor lookback window to 23:59:59 of target date instead of current scrape time")
+    parser.add_argument("--lookback-hours", type=float, default=None, help="Lookback window in hours (default: config value or 30)")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent.parent
     run_dir = repo_root / "data" / "runs" / args.date
 
-    scraper = ScraperAgent(run_dir=run_dir)
+    scraper = ScraperAgent(
+        run_dir=run_dir,
+        backfill=args.backfill,
+        lookback_hours=args.lookback_hours,
+    )
     print(f"\n========================================================")
     print(f" Nepal News Bot — Scraper Agent Standalone")
     print(f" Target Date: {args.date} | Dry Run: {args.dry_run}")
+    print(f" Backfill:    {args.backfill} | Lookback: {args.lookback_hours or 'default'}")
     if args.source:
         print(f" Filter Source: {args.source}")
     print(f"========================================================\n")
 
-    articles, stats, errors = scraper.scrape_all(target_date=args.date, source_filter=args.source)
+    articles, stats, errors = scraper.scrape_all(
+        target_date=args.date,
+        source_filter=args.source,
+        backfill=args.backfill,
+        lookback_hours=args.lookback_hours,
+    )
 
     print("\n---------------- INGESTION STATS ----------------")
     print(f"{'Source':<26} | {'Found':<6} | {'Filtered':<8} | {'Extracted':<9} | {'Dropped':<7}")

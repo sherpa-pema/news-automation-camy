@@ -1,5 +1,4 @@
 """Benchmark Chunking A (sentence-by-sentence) vs Chunking B (scene-by-scene)."""
-import os
 import sys
 import time
 from pathlib import Path
