@@ -3,6 +3,8 @@ execution:
   runs_dir: "data/runs"
   default_retries: 2
   allow_parallel: true
+  default_run_kind: "test"
+  keep_runs: 7
 
 stages:
   - id: "scraper"
@@ -170,5 +172,6 @@ stages:
     outputs:
       - "qa/qa_report.json"
       - "qa/contact_sheet.jpg"
+      - "qa/storyboard.html"
     tool: "ffprobe + python automated checks"
     notes: "Validates duration sync, loudness, black frames, attribution, and returns pass/fail."

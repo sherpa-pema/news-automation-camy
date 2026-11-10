@@ -164,6 +164,7 @@ class MediaCacheManager:
         runs_dir: Path | str = "data/runs",
         max_gb: float = 5.0,
         keep_days: int = 7,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Prunes cached downloads not referenced by retained runs and older than keep_days.
 
@@ -187,7 +188,7 @@ class MediaCacheManager:
 
         # Scan downloads dir
         if not self.downloads_dir.exists():
-            return {"deleted_count": 0, "freed_mb": 0.0, "remaining_mb": 0.0}
+            return {"deleted_count": 0, "freed_mb": 0.0, "remaining_mb": 0.0, "files": [], "dry_run": dry_run}
 
         now = time.time()
         max_bytes = int(max_gb * 1024 * 1024 * 1024)
@@ -210,6 +211,7 @@ class MediaCacheManager:
 
         deleted_count = 0
         freed_bytes = 0
+        target_files: list[str] = []
 
         for f_path, f_size, mtime in cached_files:
             age_sec = now - mtime
@@ -222,17 +224,25 @@ class MediaCacheManager:
                 continue
 
             if is_stale or is_over_cap:
-                try:
-                    f_path.unlink()
+                if dry_run:
                     deleted_count += 1
                     freed_bytes += f_size
-                    logger.info(f"Pruned cached download: {f_path.name} ({f_size / (1024*1024):.2f} MB)")
-                except Exception as e:
-                    logger.warning(f"Failed to delete {f_path}: {e}")
+                    target_files.append(str(f_path))
+                else:
+                    try:
+                        f_path.unlink()
+                        deleted_count += 1
+                        freed_bytes += f_size
+                        target_files.append(str(f_path))
+                        logger.info(f"Pruned cached download: {f_path.name} ({f_size / (1024*1024):.2f} MB)")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete {f_path}: {e}")
 
         remaining_bytes = max(0, total_size - freed_bytes)
         return {
             "deleted_count": deleted_count,
             "freed_mb": round(freed_bytes / (1024 * 1024), 2),
             "remaining_mb": round(remaining_bytes / (1024 * 1024), 2),
+            "files": target_files,
+            "dry_run": dry_run,
         }

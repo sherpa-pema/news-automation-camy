@@ -34,7 +34,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["pending", "running", "paused", "done", "failed", "abandoned"],
+      "enum": ["pending", "running", "paused", "done", "failed", "interrupted", "abandoned"],
       "description": "Overall pipeline execution status"
     },
     "created_at": {

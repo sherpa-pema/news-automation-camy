@@ -24,7 +24,13 @@ data/tts_tests/
 # Run Data & Media
 data/runs/*
 !data/runs/.gitkeep
+data/latest/
 data/media_cache/
+data/media_library/*
+!data/media_library/.gitkeep
+data/test_cache/
+data/test_media_library/
+logs/
 
 # IDE & OS
 .idea/

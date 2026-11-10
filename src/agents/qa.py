@@ -18,6 +18,7 @@ from src.utils.editor_validator import (
 )
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest
+from src.utils.storyboard import generate_storyboard
 
 logger = logging.getLogger("qa")
 
@@ -373,14 +374,28 @@ class QAAgent(BaseAgent):
         # ----------------------------------------------------------------------
         # Check 5: Freeze detection (reported as warnings)
         # ----------------------------------------------------------------------
+        freeze_events: list[dict[str, float]] = []
         try:
             fz_cmd = ["ffmpeg", "-i", str(final_mp4), "-vf", "freezedetect=n=0.003:d=3.0", "-f", "null", "-"]
             fz_res = subprocess.run(fz_cmd, capture_output=True, text=True)
             freeze_starts = re.findall(r"lavfi\.freezedetect\.freeze_start:\s+([-\d.]+)", fz_res.stderr)
+            freeze_ends = re.findall(r"lavfi\.freezedetect\.freeze_end:\s+([-\d.]+)", fz_res.stderr)
+            freeze_durs = re.findall(r"lavfi\.freezedetect\.freeze_duration:\s+([-\d.]+)", fz_res.stderr)
+            vid_dur_val = float(metrics.get("video_duration_sec", 0.0))
+            for i, f_start_s in enumerate(freeze_starts):
+                f_start = float(f_start_s)
+                f_end = float(freeze_ends[i]) if i < len(freeze_ends) else vid_dur_val
+                f_dur = float(freeze_durs[i]) if i < len(freeze_durs) else max(0.0, f_end - f_start)
+                freeze_events.append({
+                    "start": round(f_start, 3),
+                    "end": round(f_end, 3),
+                    "duration": round(f_dur, 3),
+                })
             if freeze_starts:
                 warnings.append(f"Detected {len(freeze_starts)} frozen video stretch(es) > 3.0s (e.g. at {freeze_starts[:3]}s)")
         except Exception:
             pass
+        metrics["freeze_events"] = freeze_events
 
         # ----------------------------------------------------------------------
         # Check 6: Story Lower Thirds and Illustrative Tags
@@ -576,11 +591,14 @@ class QAAgent(BaseAgent):
             redo_stage = "render"
 
         # ----------------------------------------------------------------------
-        # Contact sheet generation
+        # Contact sheet & Storyboard generation
         # ----------------------------------------------------------------------
         contact_sheet_path = qa_dir / "contact_sheet.jpg"
-        with open(timeline_file, "r", encoding="utf-8") as tf:
-            tl_scenes = json.load(tf).get("scenes", [])
+        tl_data_loaded: dict[str, Any] = {}
+        if timeline_file.exists():
+            with open(timeline_file, "r", encoding="utf-8") as tf:
+                tl_data_loaded = json.load(tf)
+        tl_scenes = tl_data_loaded.get("scenes", [])
         self._generate_contact_sheet(final_mp4, tl_scenes, contact_sheet_path)
 
         # ----------------------------------------------------------------------
@@ -608,9 +626,30 @@ class QAAgent(BaseAgent):
         with open(root_report, "w", encoding="utf-8") as f:
             json.dump(qa_report, f, indent=2)
 
+        # Generate self-contained HTML storyboard
+        def _safe_load_json(p: Path, default: Any) -> Any:
+            if p.exists():
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    return default
+            return default
+
+        storyboard_path, _storyboard_frames = generate_storyboard(
+            final_mp4=final_mp4,
+            qa_dir=qa_dir,
+            script_data=_safe_load_json(script_file, {}),
+            timeline_data=tl_data_loaded,
+            media_data=_safe_load_json(media_file, {}),
+            render_plan=_safe_load_json(render_plan_file, {}),
+            captions_data=_safe_load_json(captions_file, []),
+            qa_report=qa_report,
+        )
+
         outputs = [
             "qa/qa_report.json",
             "qa/contact_sheet.jpg",
+            "qa/storyboard.html",
             "qa_report.json",
         ]
 

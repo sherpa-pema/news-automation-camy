@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from src.agents.base import BaseAgent
+from src.agents.motion import sync_render_plan_data
 from src.utils.editor_validator import (
     compute_validator_fingerprint,
     extract_script_validation_fingerprint,
@@ -46,6 +47,7 @@ def compute_scene_cache_key(sc: dict[str, Any], style_hash: str) -> str:
                 "duration": s.get("duration"),
                 "type": s.get("type"),
                 "motion": s.get("motion"),
+                "sha256": s.get("sha256"),
             }
             for s in sc.get("shots", [])
         ],
@@ -62,6 +64,7 @@ def compute_scene_cache_key(sc: dict[str, Any], style_hash: str) -> str:
         ],
         "transition": sc.get("transition"),
         "style_hash": style_hash,
+        "zoom_mode": "linear_v2",
     }
     raw = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
@@ -157,8 +160,10 @@ class RenderAgent(BaseAgent):
             filter_parts.append(f"color=c=navy:s={tw}x{th}:d={sc_dur:.3f}:r={fps}[sc_bg];")
         else:
             for idx, shot in enumerate(shots):
-                shot_path = self.run_dir / shot["file"]
-                if not shot_path.exists():
+                shot_rel = shot.get("file")
+                shot_path = (self.run_dir / shot_rel) if shot_rel else None
+                has_file = shot_path is not None and shot_path.exists()
+                if not has_file:
                     # Generate solid color fallback for missing shot
                     shot_path_str = f"color=c=navy:s={tw}x{th}:d={shot.get('duration', 5.0):.3f}:r={fps}"
                     inputs.extend(["-f", "lavfi", "-i", shot_path_str])
@@ -166,19 +171,38 @@ class RenderAgent(BaseAgent):
                     inputs.extend(["-i", str(shot_path)])
 
                 shot_dur = float(shot.get("duration", 5.0))
-                shot_frames = int(round(shot_dur * fps))
-                is_image = shot.get("type") == "image" or str(shot_path).lower().endswith((".jpg", ".jpeg", ".png"))
+                shot_frames = max(1, int(round(shot_dur * fps)))
+                is_image = has_file and (
+                    shot.get("type") in ("image", "card")
+                    or str(shot_path).lower().endswith((".jpg", ".jpeg", ".png"))
+                )
 
                 if is_image:
+                    still_zoom_cfg = self.style_config.get("transitions", {}).get("still_zoom", {})
+                    slow_zoom_enabled = bool(still_zoom_cfg.get("slow_zoom", True))
+                    start_scale = float(still_zoom_cfg.get("start_scale", 1.00))
+                    end_scale = float(still_zoom_cfg.get("end_scale", 1.08))
+                    motion_name = shot.get("motion")
+
+                    if slow_zoom_enabled and shot_frames > 1 and motion_name != "none":
+                        scale_delta = end_scale - start_scale
+                        denom = max(1, shot_frames - 1)
+                        if motion_name == "zoom_out":
+                            z_expr = f"{end_scale:.4f}-{scale_delta:.4f}*(on/{denom})"
+                        else:
+                            z_expr = f"{start_scale:.4f}+{scale_delta:.4f}*(on/{denom})"
+                    else:
+                        z_expr = f"{start_scale:.4f}"
+
                     filter_parts.append(
                         f"[{idx}:v]scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
-                        f"zoompan=z='min(zoom+0.0006,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={shot_frames}:s={tw}x{th}:fps={fps},"
-                        f"trim=duration={shot_dur:.3f},setpts=PTS-STARTPTS[shot_{idx}];"
+                        f"zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={shot_frames}:s={tw}x{th}:fps={fps},"
+                        f"trim=duration={shot_dur:.3f},setpts=PTS-STARTPTS,format=yuv420p[shot_{idx}];"
                     )
                 else:
                     filter_parts.append(
                         f"[{idx}:v]scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},"
-                        f"trim=duration={shot_dur:.3f},setpts=PTS-STARTPTS[shot_{idx}];"
+                        f"trim=duration={shot_dur:.3f},setpts=PTS-STARTPTS,format=yuv420p[shot_{idx}];"
                     )
 
             concat_inputs = "".join(f"[shot_{i}]" for i in range(len(shots)))
@@ -246,11 +270,22 @@ class RenderAgent(BaseAgent):
         media_data: dict[str, Any],
         timeline_data: dict[str, Any],
         output_path: Path,
+        manifest: dict[str, Any] | None = None,
     ) -> None:
         """Generates publish pack render/description.md with chapters, sources, and credits."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
         channel_name = self.channel_config.get("channel_name", "Nepal Daily Briefing")
-        run_kind = script_data.get("run_kind", "production")
+        run_kind = script_data.get("run_kind")
+        if not run_kind and manifest:
+            run_kind = manifest.get("run_kind")
+        if not run_kind:
+            m_path = self.run_dir / "manifest.json"
+            if m_path.exists():
+                try:
+                    run_kind = load_manifest(m_path).get("run_kind")
+                except Exception:
+                    pass
+        run_kind = run_kind or "production"
         date_str = script_data.get("date", datetime.now().strftime("%Y-%m-%d"))
 
         try:
@@ -320,11 +355,16 @@ class RenderAgent(BaseAgent):
         shots = media_data.get("shots", [])
         cc_shots = [s for s in shots if s.get("attribution_required")]
         if cc_shots:
+            seen_credits: set[tuple[str, str, str]] = set()
             for s in cc_shots:
                 attr = s.get("attribution_text") or f"File by {s.get('author')} via {s.get('source')}"
                 lic = s.get("license", "CC")
                 lic_url = s.get("license_url", "")
                 pg_url = s.get("origin_url", "")
+                credit_key = (attr, lic, pg_url or "")
+                if credit_key in seen_credits:
+                    continue
+                seen_credits.add(credit_key)
                 lines.append(f"- **{attr}** ([{lic}]({lic_url})) - [Source Page]({pg_url})")
         lines.append("- Stock video and imagery courtesy of [Pixabay](https://pixabay.com).")
         lines.append("")
@@ -374,6 +414,15 @@ class RenderAgent(BaseAgent):
             timeline_data = json.load(f)
         with open(media_file, "r", encoding="utf-8") as f:
             media_data = json.load(f)
+
+        # Ensure render_plan scene shots/sha256 match current media_manifest.json (e.g., after --apply-picks)
+        sync_render_plan_data(
+            plan_data=plan_data,
+            media_data=media_data,
+            run_dir=self.run_dir,
+            script_data=script_data,
+            style_config=self.style_config,
+        )
 
         # Output folders
         render_dir = self.run_dir / "render"
@@ -508,6 +557,7 @@ class RenderAgent(BaseAgent):
             media_data=media_data,
             timeline_data=timeline_data,
             output_path=desc_path,
+            manifest=manifest,
         )
 
         t_total = time.perf_counter() - t_start

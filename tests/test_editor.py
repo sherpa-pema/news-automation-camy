@@ -1189,7 +1189,7 @@ def test_editing_media_manifest_schema_does_not_invalidate_approval(tmp_path):
         # VoiceAgent check must STILL PASS without raising fingerprint mismatch
         voice_agent = VoiceAgent(run_dir)
         try:
-            voice_agent.run(manifest)
+            voice_agent.run(manifest, engine_override="fake")
         except ValueError as e:
             assert "validator or editor config changed" not in str(e)
             assert "script changed after approval" not in str(e)
@@ -1242,6 +1242,226 @@ def test_only_editor_approve_and_validate_write_approval_or_validation_report():
                             disallowed_writers.append(f"{pf.name}:{node.lineno} -> {line_repr.strip()}")
 
     assert not disallowed_writers, f"Disallowed write operations found: {disallowed_writers}"
+
+
+def test_frozen_budget_ignores_newer_voice_report_after_prepare(tmp_path):
+    """prepare writes script/budget.json once; a newer voice_report.json created after prepare must NOT change validation output."""
+    import os
+    import time
+
+    runs_root = tmp_path / "runs"
+    prior_run = runs_root / "2026-11-08"
+    (prior_run / "script").mkdir(parents=True, exist_ok=True)
+    (prior_run / "audio").mkdir(parents=True, exist_ok=True)
+
+    # Prior run has 200 words in 100.0s -> 2.00 wps
+    prior_words = " ".join(["word"] * 200)
+    (prior_run / "script" / "script.json").write_text(
+        json.dumps({"scenes": [{"narration": prior_words}]}), encoding="utf-8"
+    )
+    (prior_run / "audio" / "voice_report.json").write_text(
+        json.dumps({"total_audio_duration_sec": 100.0}), encoding="utf-8"
+    )
+
+    run_dir = runs_root / "2026-11-09"
+    (run_dir / "raw").mkdir(parents=True, exist_ok=True)
+    cluster_text = "Officials opened a new municipal library in Pokhara today. " * 10
+    articles = [
+        {
+            "source": "Outlet A",
+            "title": "New Municipal Library Opened in Pokhara",
+            "url": "https://a.com/library",
+            "text_summary": "Municipal library opened in Pokhara today.",
+            "full_text": cluster_text,
+            "published_at": "2026-11-09T08:00:00Z",
+        }
+    ]
+    (run_dir / "raw" / "articles.json").write_text(json.dumps(articles), encoding="utf-8")
+    manifest = {
+        "run_id": "2026-11-09",
+        "date": "2026-11-09",
+        "status": "running",
+        "stages": {"editor": {"status": "pending", "retry_count": 0, "max_retries": 2, "input_files": ["raw/articles.json"], "output_files": []}},
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    agent = EditorAgent(run_dir)
+    agent.prepare(manifest)
+
+    budget_path = run_dir / "script" / "budget.json"
+    assert budget_path.exists()
+    frozen_budget = json.loads(budget_path.read_text(encoding="utf-8"))
+    assert frozen_budget["words_per_second"] == 2.0
+    assert frozen_budget["source_file"]
+    assert frozen_budget["calculation"]
+
+    # Create valid 7-scene draft (~254 words -> valid inside [216, 396] at wps=2.0)
+    story_narr = (
+        "Authorities inaugurated a modern public facility across Pokhara earlier today after months of careful planning. "
+        "Local residents warmly welcomed improved community reading rooms, digital archives, and quiet study spaces. "
+        "Municipal planners noted steady attendance from local students and dedicated teachers throughout the busy afternoon."
+    )
+    intro_narr = (
+        "Good evening and welcome to the daily news briefing across the country. "
+        "Here are our top stories from local development and community initiatives today."
+    )
+    outro_narr = (
+        "That concludes our daily news briefing for tonight. "
+        "Thank you for watching our update and please stay safe this evening."
+    )
+    draft = {
+        "language": "English",
+        "origin": "editor",
+        "run_kind": "test",
+        "date": "2026-11-09",
+        "scenes": [
+            {"id": "intro", "type": "intro", "headline": "Daily Briefing", "narration": intro_narr, "category": None, "sensitive": False, "source": "Desk", "source_urls": [], "visual_keywords": ["studio", "city", "map"], "evidence": []},
+        ] + [
+            {
+                "id": f"scene_{i:02d}",
+                "type": "story",
+                "headline": f"Story Headline Number {i}",
+                "narration": story_narr,
+                "category": "society",
+                "sensitive": False,
+                "source": "Outlet A",
+                "source_urls": ["https://a.com/library"],
+                "visual_keywords": ["library", "books", "city"],
+                "evidence": [
+                    {"sentence_index": 0, "source_url": "https://a.com/library"},
+                    {"sentence_index": 1, "source_url": "https://a.com/library"},
+                    {"sentence_index": 2, "source_url": "https://a.com/library"},
+                ],
+            }
+            for i in range(1, 6)
+        ] + [
+            {"id": "outro", "type": "outro", "headline": "Thank You", "narration": outro_narr, "category": None, "sensitive": False, "source": "Desk", "source_urls": [], "visual_keywords": ["sunset", "city", "studio"], "evidence": []},
+        ],
+    }
+    (run_dir / "script" / "draft_script.json").write_text(json.dumps(draft), encoding="utf-8")
+
+    # 1st validation
+    manifest["stages"]["editor"]["status"] = "prepared"
+    agent.validate_draft(manifest)
+    report1 = json.loads((run_dir / "script" / "validation_report.json").read_text(encoding="utf-8"))
+    script1 = json.loads((run_dir / "script" / "script.json").read_text(encoding="utf-8"))
+    assert report1["is_valid"] is True
+    assert report1["metrics"]["words_per_second"] == 2.0
+
+    # Create a NEWER voice_report.json after prepare with radically different speech rate (4.0 wps)
+    (run_dir / "audio").mkdir(parents=True, exist_ok=True)
+    newer_vr = run_dir / "audio" / "voice_report.json"
+    newer_vr.write_text(json.dumps({"total_audio_duration_sec": 50.0}), encoding="utf-8")
+    future_t = time.time() + 60.0
+    os.utime(newer_vr, (future_t, future_t))
+
+    # 2nd validation must ignore the newer voice_report.json and use frozen budget.json
+    manifest["stages"]["editor"]["status"] = "awaiting_approval"
+    agent.validate_draft(manifest)
+    report2 = json.loads((run_dir / "script" / "validation_report.json").read_text(encoding="utf-8"))
+    script2 = json.loads((run_dir / "script" / "script.json").read_text(encoding="utf-8"))
+
+    assert report2["metrics"] == report1["metrics"]
+    assert report2["scene_results"] == report1["scene_results"]
+    assert report2["errors"] == report1["errors"]
+    assert report2["warnings"] == report1["warnings"]
+    assert script2["total_estimated_duration_sec"] == script1["total_estimated_duration_sec"]
+    assert script2["scenes"] == script1["scenes"]
+    assert json.loads(budget_path.read_text(encoding="utf-8")) == frozen_budget
+
+
+def test_orchestrator_execute_stage_ignores_downstream_schema_changes(tmp_path, monkeypatch):
+    """Verify Orchestrator.execute_stage uses script_validation_fingerprint only and ignores downstream schema edits."""
+    import src.orchestrator as orch_mod
+    from src.agents.base import BaseAgent
+    from src.utils.editor_validator import (
+        compute_validator_fingerprint,
+        extract_script_validation_fingerprint,
+    )
+
+    schema_path = Path("contracts/render_plan.schema.json")
+    orig_bytes = schema_path.read_bytes()
+
+    class _DummyRenderAgent(BaseAgent):
+        @property
+        def name(self) -> str:
+            return "render"
+
+        @property
+        def schema_contract_path(self) -> str | None:
+            return None
+
+        def run(self, manifest: dict) -> list[str]:
+            return []
+
+    try:
+        run_dir = tmp_path / "2026-11-08"
+        script_dir = run_dir / "script"
+        script_dir.mkdir(parents=True, exist_ok=True)
+
+        full_fp = compute_validator_fingerprint()
+        flat_fp = extract_script_validation_fingerprint(full_fp)
+        script_data = {
+            "language": "English",
+            "origin": "editor",
+            "validator_fingerprint": flat_fp,
+            "scenes": [{"id": "scene_01", "type": "story", "headline": "H", "narration": "N"}],
+        }
+        script_path = script_dir / "script.json"
+        script_path.write_text(json.dumps(script_data), encoding="utf-8")
+        script_hash = hashlib.sha256(script_path.read_bytes()).hexdigest()
+
+        # Simulate split format: flat 7-key dict in approval.json + nested validation_report.json
+        (script_dir / "approval.json").write_text(
+            json.dumps({
+                "approved_at": "2026-11-08T12:00:00Z",
+                "script_sha256": script_hash,
+                "approved_by": "user",
+                "validator_fingerprint": flat_fp,
+            }),
+            encoding="utf-8",
+        )
+        (script_dir / "validation_report.json").write_text(
+            json.dumps({"is_valid": True, "errors": [], "validator_fingerprint": full_fp}),
+            encoding="utf-8",
+        )
+
+        manifest = {
+            "run_id": "2026-11-08",
+            "date": "2026-11-08",
+            "status": "running",
+            "stages": {
+                "editor": {"status": "done", "retry_count": 0, "max_retries": 2, "input_files": ["raw/articles.json"], "output_files": ["script/script.json"]},
+                "render": {"status": "pending", "retry_count": 0, "max_retries": 2, "input_files": ["render_plan.json"], "output_files": []},
+            },
+        }
+        (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        monkeypatch.setitem(orch_mod.AGENT_REGISTRY, "render", _DummyRenderAgent)
+
+        # Mutate downstream schema: Orchestrator.execute_stage must still pass gate!
+        schema_path.write_bytes(orig_bytes + b" ")
+        orch = Orchestrator(run_date="2026-11-08", runs_dir=tmp_path)
+        assert orch.execute_stage("render", manifest, force=True) is True
+
+        # Mutate script_validation_fingerprint key in approval.json -> must refuse!
+        bad_fp = dict(flat_fp)
+        bad_fp["editor_config_sha256"] = "0" * 64
+        (script_dir / "approval.json").write_text(
+            json.dumps({
+                "approved_at": "2026-11-08T12:00:00Z",
+                "script_sha256": script_hash,
+                "approved_by": "user",
+                "validator_fingerprint": bad_fp,
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="validator or editor config changed after approval"):
+            orch.execute_stage("render", manifest, force=True)
+    finally:
+        schema_path.write_bytes(orig_bytes)
+
+
 
 
 

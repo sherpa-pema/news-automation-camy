@@ -4,13 +4,22 @@ from pathlib import Path
 from typing import Any
 
 
-def calculate_words_per_second(runs_dir: Path | str = "data/runs", default_wps: float = 2.15) -> tuple[float, str]:
-    """Finds the newest real voice_report.json and calculates words-per-second."""
+def calculate_words_per_second_details(
+    runs_dir: Path | str = "data/runs", default_wps: float = 2.15
+) -> dict[str, Any]:
+    """Finds the newest real voice_report.json and returns speech-rate details."""
     runs_path = Path(runs_dir)
     voice_reports = list(runs_path.rglob("voice_report.json"))
 
     if not voice_reports:
-        return default_wps, f"Default estimate: {default_wps:.2f} wps (no prior voice_report.json found)"
+        msg = f"Default estimate: {default_wps:.2f} wps (no prior voice_report.json found)"
+        return {
+            "words_per_second": default_wps,
+            "source": "default",
+            "source_file": None,
+            "calculation": f"default = {default_wps:.2f} words/sec (no prior voice_report.json found)",
+            "message": msg,
+        }
 
     # Pick the most recently modified report
     voice_reports.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -22,7 +31,14 @@ def calculate_words_per_second(runs_dir: Path | str = "data/runs", default_wps: 
 
         total_audio_sec = float(v_data.get("total_audio_duration_sec", 0.0))
         if total_audio_sec <= 0:
-            return default_wps, f"Default estimate: {default_wps:.2f} wps (voice report had zero duration)"
+            msg = f"Default estimate: {default_wps:.2f} wps (voice report had zero duration)"
+            return {
+                "words_per_second": default_wps,
+                "source": "default",
+                "source_file": newest_report.as_posix(),
+                "calculation": f"default = {default_wps:.2f} words/sec (voice report had zero duration)",
+                "message": msg,
+            }
 
         # Find corresponding script.json to count actual words
         run_folder = newest_report.parent.parent
@@ -40,17 +56,38 @@ def calculate_words_per_second(runs_dir: Path | str = "data/runs", default_wps: 
                 break
 
         if total_words > 0:
-            wps = total_words / total_audio_sec
-            calc_msg = (
-                f"Calibrated from {newest_report.relative_to(runs_path.parent)}: "
-                f"{total_words} words / {total_audio_sec:.1f}s = {wps:.2f} words/sec"
-            )
-            return round(wps, 2), calc_msg
+            wps = round(total_words / total_audio_sec, 2)
+            try:
+                rel_report = newest_report.relative_to(runs_path.parent)
+            except ValueError:
+                rel_report = newest_report
+            calculation = f"{total_words} words / {total_audio_sec:.1f}s = {wps:.2f} words/sec"
+            calc_msg = f"Calibrated from {rel_report}: {calculation}"
+            return {
+                "words_per_second": wps,
+                "source": rel_report.as_posix(),
+                "source_file": newest_report.as_posix(),
+                "calculation": calculation,
+                "message": calc_msg,
+            }
 
-    except Exception as e:
+    except Exception:
         pass
 
-    return default_wps, f"Default estimate: {default_wps:.2f} wps (fallback due to read error)"
+    msg = f"Default estimate: {default_wps:.2f} wps (fallback due to read error)"
+    return {
+        "words_per_second": default_wps,
+        "source": "default",
+        "source_file": None,
+        "calculation": f"default = {default_wps:.2f} words/sec (fallback due to read error)",
+        "message": msg,
+    }
+
+
+def calculate_words_per_second(runs_dir: Path | str = "data/runs", default_wps: float = 2.15) -> tuple[float, str]:
+    """Finds the newest real voice_report.json and calculates words-per-second."""
+    details = calculate_words_per_second_details(runs_dir=runs_dir, default_wps=default_wps)
+    return float(details["words_per_second"]), str(details["message"])
 
 
 def compute_word_budget(

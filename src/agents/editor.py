@@ -10,7 +10,11 @@ from typing import Any
 
 from src.agents.base import BaseAgent
 from src.utils.editor_brief import generate_editor_brief
-from src.utils.editor_budget import calculate_words_per_second, compute_word_budget
+from src.utils.editor_budget import (
+    calculate_words_per_second,
+    calculate_words_per_second_details,
+    compute_word_budget,
+)
 from src.utils.editor_cluster import cluster_articles
 from src.utils.editor_validator import (
     compute_validator_fingerprint,
@@ -19,8 +23,14 @@ from src.utils.editor_validator import (
     validate_script_draft,
     write_script_preview_markdown,
 )
+from src.utils.daily_ops import write_status_md
 from src.utils.logging import setup_logger
-from src.utils.manifest import load_manifest, save_manifest, update_stage_status
+from src.utils.manifest import (
+    load_manifest,
+    reconcile_manifest_status,
+    save_manifest,
+    update_stage_status,
+)
 
 logger = setup_logger("editor")
 
@@ -33,6 +43,20 @@ class EditorAgent(BaseAgent):
         self.script_dir = self.run_dir / "script"
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.editor_cfg, self.whitelist = load_editor_config()
+
+    def _get_default_run_kind(self) -> str:
+        """Reads default_run_kind from config/pipeline.yaml (defaults to 'test')."""
+        cfg_path = Path("config/pipeline.yaml")
+        if cfg_path.exists():
+            try:
+                import yaml
+                data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                rk = data.get("execution", {}).get("default_run_kind")
+                if rk in ("test", "production"):
+                    return str(rk)
+            except Exception:
+                pass
+        return "test"
 
     @property
     def name(self) -> str:
@@ -118,14 +142,48 @@ class EditorAgent(BaseAgent):
         with open(shortlist_path, "w", encoding="utf-8") as f:
             json.dump(shortlist, f, indent=2)
 
-        # 2. Compute word budget calibrated from voice report
-        wps, calib_msg = calculate_words_per_second(self.run_dir.parent)
-        budget = compute_word_budget(wps)
+        # 2. Compute and freeze speech-rate budget (write script/budget.json once)
+        budget_path = self.script_dir / "budget.json"
+        if budget_path.exists():
+            with open(budget_path, "r", encoding="utf-8") as bf:
+                frozen = json.load(bf)
+            wps = float(frozen["words_per_second"])
+            calib_msg = frozen.get("calculation") or f"Frozen budget: {wps:.2f} words/sec"
+            budget = compute_word_budget(wps)
+            for k in (
+                "target_duration_sec",
+                "duration_range_sec",
+                "target_total_words",
+                "min_total_words",
+                "max_total_words",
+                "tolerance_pct",
+                "scene_targets",
+            ):
+                if k in frozen:
+                    budget[k] = frozen[k]
+        else:
+            details = calculate_words_per_second_details(self.run_dir.parent)
+            wps = float(details["words_per_second"])
+            calib_msg = str(details["message"])
+            budget = compute_word_budget(wps)
+            frozen_payload = {
+                "words_per_second": wps,
+                "source": details.get("source"),
+                "source_file": details.get("source_file"),
+                "calculation": details.get("calculation"),
+                **{k: v for k, v in budget.items() if k != "words_per_second"},
+            }
+            with open(budget_path, "w", encoding="utf-8") as bf:
+                json.dump(frozen_payload, bf, indent=2)
+
         logger.info(f"Speech rate calibration: {calib_msg}")
         logger.info(
             f"Word budget: {budget['target_total_words']} words "
             f"({budget['min_total_words']} - {budget['max_total_words']}) for ~{budget['target_duration_sec']}s audio."
         )
+
+        run_kind = manifest.get("run_kind") or self._get_default_run_kind()
+        manifest["run_kind"] = run_kind
 
         # 3. Write editor_brief.md
         brief_content = generate_editor_brief(
@@ -135,15 +193,16 @@ class EditorAgent(BaseAgent):
             shortlist=shortlist,
             opinion_clusters=opinion_clusters,
             stale_preview_clusters=stale_clusters,
+            run_kind=run_kind,
         )
         brief_path = self.script_dir / "editor_brief.md"
         with open(brief_path, "w", encoding="utf-8") as f:
             f.write(brief_content)
 
-        output_files = ["script/shortlist.json", "script/editor_brief.md"]
+        output_files = ["script/shortlist.json", "script/editor_brief.md", "script/budget.json"]
         manifest_path = self.run_dir / "manifest.json"
         if manifest_path.exists():
-            manifest["run_kind"] = manifest.get("run_kind", "test")
+            manifest["run_kind"] = run_kind
             update_stage_status(
                 manifest,
                 "editor",
@@ -159,14 +218,16 @@ class EditorAgent(BaseAgent):
                     "word_budget_range": [budget["min_total_words"], budget["max_total_words"]],
                 },
             )
+            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
             save_manifest(manifest, manifest_path)
+            write_status_md(self.run_dir, manifest)
 
         next_action = (
             f"Next action: Read {brief_path}, write draft_script.json and selection.json, then run:\n"
             f"  python -m src.agents.editor validate --date {self.run_dir.name}"
         )
         print(f"\n[OK] Prepared shortlist and editor brief.\n{next_action}\n")
-        return [str(shortlist_path), str(brief_path)]
+        return [str(shortlist_path), str(brief_path), str(budget_path)]
 
     def validate_draft(self, manifest: dict[str, Any]) -> list[str]:
         """Step 2 (validate): Validates draft_script.json. On pass, writes script.json and script_preview.md."""
@@ -178,8 +239,26 @@ class EditorAgent(BaseAgent):
         shortlist_path = self.script_dir / "shortlist.json"
         report_path = self.script_dir / "validation_report.json"
 
-        wps, calib_msg = calculate_words_per_second(self.run_dir.parent)
-        budget = compute_word_budget(wps)
+        budget_path = self.script_dir / "budget.json"
+        if budget_path.exists():
+            with open(budget_path, "r", encoding="utf-8") as bf:
+                frozen = json.load(bf)
+            wps = float(frozen["words_per_second"])
+            budget = compute_word_budget(wps)
+            for k in (
+                "target_duration_sec",
+                "duration_range_sec",
+                "target_total_words",
+                "min_total_words",
+                "max_total_words",
+                "tolerance_pct",
+                "scene_targets",
+            ):
+                if k in frozen:
+                    budget[k] = frozen[k]
+        else:
+            wps, _calib_msg = calculate_words_per_second(self.run_dir.parent)
+            budget = compute_word_budget(wps)
 
         is_valid, errors, warnings, report = validate_script_draft(
             draft_path=draft_path,
@@ -232,7 +311,9 @@ class EditorAgent(BaseAgent):
                     output_files=output_files,
                     error_message=f"Validation failed: {len(errors)} errors found.",
                 )
+                reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
                 save_manifest(manifest, manifest_path)
+                write_status_md(self.run_dir, manifest)
 
             print(f"\n[VALIDATION FAILED] {len(errors)} error(s) must be resolved:")
             for err in errors:
@@ -264,10 +345,11 @@ class EditorAgent(BaseAgent):
             warnings.append(warn_scene_04)
         report["warnings"] = warnings
 
+        effective_run_kind = draft_data.get("run_kind") or manifest.get("run_kind") or self._get_default_run_kind()
         final_script = {
             "language": draft_data.get("language", "English"),
             "origin": "editor",
-            "run_kind": draft_data.get("run_kind", "test"),
+            "run_kind": effective_run_kind,
             "editor_mode": "ide_agent",
             "draft_sha256": draft_sha256,
             "validator_fingerprint": report.get("validator_fingerprint"),
@@ -309,7 +391,9 @@ class EditorAgent(BaseAgent):
                     "draft_sha256": draft_sha256,
                 },
             )
+            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
             save_manifest(manifest, manifest_path)
+            write_status_md(self.run_dir, manifest)
 
         logger.info(f"Validation PASSED. Wrote {script_path} and {preview_path}.")
         next_action = (
@@ -376,7 +460,9 @@ class EditorAgent(BaseAgent):
                 output_files=["script/script.json", "script/approval.json"],
                 metrics={"approved_script_sha256": script_sha256},
             )
+            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
             save_manifest(manifest, manifest_path)
+            write_status_md(self.run_dir, manifest)
 
         logger.info(f"Script approved successfully. Hash: {script_sha256}")
         print(f"\n[OK] Script approved. Stage 'editor' marked as done.")

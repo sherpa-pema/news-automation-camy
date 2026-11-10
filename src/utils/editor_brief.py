@@ -20,6 +20,7 @@ def generate_editor_brief(
     shortlist: list[dict[str, Any]],
     opinion_clusters: list[dict[str, Any]] | None = None,
     stale_preview_clusters: list[dict[str, Any]] | None = None,
+    run_kind: str = "test",
 ) -> str:
     """Assembles the comprehensive editor brief markdown document."""
     spoken_date = format_spoken_date(run_date)
@@ -30,6 +31,8 @@ def generate_editor_brief(
 
     lines = []
     lines.append(f"# Broadcast Editor Brief - {spoken_date}")
+    lines.append("")
+    lines.append(f"- **Run Date**: `{run_date}` | **Run Kind**: `{run_kind}`")
     lines.append("")
     lines.append("> **Role**: You (the Antigravity agent) are acting as the Broadcast News Writer.")
     lines.append("> There are no external LLM calls or API keys. You will review the shortlist below,")
@@ -74,6 +77,7 @@ def generate_editor_brief(
     example_draft = {
         "language": "English",
         "origin": "editor",
+        "run_kind": run_kind,
         "date": run_date,
         "scenes": [
             {

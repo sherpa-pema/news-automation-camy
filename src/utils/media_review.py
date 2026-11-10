@@ -127,7 +127,7 @@ def create_contact_sheet_for_scene(
                     if proc.returncode == 0 and proc.stdout:
                         import io
                         tile_img = Image.open(io.BytesIO(proc.stdout)).convert("RGB")
-                elif shot_type == "image":
+                elif shot_type in ("image", "card"):
                     tile_img = Image.open(file_path).convert("RGB")
 
             if not tile_img:

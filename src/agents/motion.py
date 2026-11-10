@@ -24,6 +24,7 @@ from src.utils.motion_graphics import (
     draw_title_card,
     generate_ass_subtitles,
 )
+from src.utils.schema_validate import validate_contract
 
 logger = logging.getLogger("motion")
 
@@ -146,7 +147,17 @@ class MotionAgent(BaseAgent):
         fps = int(media_data.get("fps", 30))
         channel_name = self.channel_config.get("channel_name", "Nepal Daily Briefing")
         date_str = script_data.get("date", datetime.now().strftime("%Y-%m-%d"))
-        run_kind = script_data.get("run_kind", "production")
+        run_kind = script_data.get("run_kind")
+        if not run_kind and manifest:
+            run_kind = manifest.get("run_kind")
+        if not run_kind:
+            m_path = self.run_dir / "manifest.json"
+            if m_path.exists():
+                try:
+                    run_kind = load_manifest(m_path).get("run_kind")
+                except Exception:
+                    pass
+        run_kind = run_kind or "production"
         disclose_synthetic_voice = bool(media_data.get("disclose_synthetic_voice", True))
 
         rects = self.style_config.get("layout_rectangles", {})
@@ -215,6 +226,7 @@ class MotionAgent(BaseAgent):
                     "motion": motion_type,
                     "source": s.get("source"),
                     "author": s.get("author"),
+                    "sha256": s.get("sha256"),
                 })
 
             primary_media = planned_shots[0]["file"] if planned_shots else ""
@@ -455,6 +467,182 @@ class MotionAgent(BaseAgent):
 
         self.logger.info(f"Motion Agent successfully generated render plan with {len(planned_scenes)} scenes and {len(all_overlays)} overlays.")
         return output_files
+
+
+STOCK_ILLUSTRATIVE_SOURCES = (
+    "wikimedia_commons",
+    "pixabay",
+    "coverr",
+    "openverse",
+    "nasa",
+    "internet_archive",
+)
+
+
+def sync_render_plan_data(
+    plan_data: dict[str, Any],
+    media_data: dict[str, Any],
+    run_dir: Path | None = None,
+    script_data: dict[str, Any] | None = None,
+    style_config: dict[str, Any] | None = None,
+) -> bool:
+    """Updates an existing render_plan payload in-place from media_manifest.json shots.
+
+    Returns True if plan_data had compatible contract shots and was synced, False otherwise.
+    """
+    media_shots = media_data.get("shots", [])
+    if not media_shots or not all(
+        "scene_id" in sh and "start" in sh and "end" in sh and "type" in sh
+        for sh in media_shots
+    ):
+        return False
+
+    shots_by_scene: dict[str, list[dict[str, Any]]] = {}
+    for sh in media_shots:
+        shots_by_scene.setdefault(sh["scene_id"], []).append(sh)
+
+    script_scenes = {s["id"]: s for s in (script_data or {}).get("scenes", [])}
+    style_cfg = style_config or {}
+    rects = style_cfg.get("layout_rectangles", {})
+    tag_rect = rects.get("illustrative_tag", {"x": 1540, "y": 54, "w": 284, "h": 44})
+    font_candidates = style_cfg.get("fonts", {}).get("primary_candidates", [])
+
+    plan_scenes = plan_data.get("scenes", [])
+    plan_scene_ids = {sc["id"] for sc in plan_scenes}
+
+    # Preserve any global / non-scene overlays cleanly
+    rebuilt_overlays: list[dict[str, Any]] = [
+        ov for ov in plan_data.get("overlays", [])
+        if not ov.get("scene_id") or ov.get("scene_id") not in plan_scene_ids
+    ]
+
+    for sc in plan_scenes:
+        sc_id = sc["id"]
+        sc_start = float(sc.get("start", 0.0))
+        sc_end = float(sc.get("end", 0.0))
+        sc_shots = sorted(shots_by_scene.get(sc_id, []), key=lambda s: s.get("shot_index", 0))
+
+        planned_shots: list[dict[str, Any]] = []
+        for s in sc_shots:
+            s_start = round(float(s.get("start", sc_start)), 3)
+            s_end = round(float(s.get("end", sc_end)), 3)
+            is_still = s.get("type") in ("image", "card")
+            planned_shots.append({
+                "shot_index": s.get("shot_index", 0),
+                "file": s.get("file") or "",
+                "start": s_start,
+                "end": s_end,
+                "duration": round(s_end - s_start, 3),
+                "type": s.get("type", "video"),
+                "motion": "zoom_in" if is_still else None,
+                "source": s.get("source"),
+                "author": s.get("author"),
+                "sha256": s.get("sha256"),
+            })
+
+        sc["shots"] = planned_shots
+        sc["media"] = planned_shots[0]["file"] if planned_shots else ""
+
+        sc_script = script_scenes.get(sc_id, {})
+        sc_type = sc_script.get("type") or ("intro" if sc_id == "intro" else ("outro" if sc_id == "outro" else "story"))
+        if sc_type not in ("intro", "outro"):
+            existing_overlays = list(sc.get("overlays", []))
+            existing_tag = next((ov for ov in existing_overlays if ov.get("type") == "illustrative_tag"), None)
+            sc_overlays = [ov for ov in existing_overlays if ov.get("type") != "illustrative_tag"]
+
+            has_illustrative = any(s.get("source") in STOCK_ILLUSTRATIVE_SOURCES for s in sc_shots)
+            if has_illustrative:
+                if existing_tag:
+                    sc_overlays.append(existing_tag)
+                else:
+                    if run_dir is not None:
+                        ill_png = run_dir / "motion" / "overlays" / "illustrative_tag.png"
+                        if not ill_png.exists():
+                            ill_png.parent.mkdir(parents=True, exist_ok=True)
+                            draw_illustrative_tag(
+                                ill_png,
+                                width=tag_rect["w"],
+                                height=tag_rect["h"],
+                                font_candidates=font_candidates,
+                            )
+                    sc_overlays.append({
+                        "id": f"{sc_id}_illustrative_tag",
+                        "scene_id": sc_id,
+                        "type": "illustrative_tag",
+                        "png": "motion/overlays/illustrative_tag.png",
+                        "start": round(sc_start + 0.2, 3),
+                        "end": round(max(sc_start + 0.3, sc_end - 0.2), 3),
+                        "x": tag_rect["x"],
+                        "y": tag_rect["y"],
+                        "w": tag_rect["w"],
+                        "h": tag_rect["h"],
+                        "animation": "fade",
+                        "fade_in": 0.2,
+                        "fade_out": 0.2,
+                    })
+            sc["overlays"] = sc_overlays
+
+        rebuilt_overlays.extend(sc.get("overlays", []))
+
+    plan_data["overlays"] = rebuilt_overlays
+    return True
+
+
+def sync_render_plan_with_media_manifest(run_dir: Path) -> bool:
+    """Syncs existing motion/render_plan.json (and root render_plan.json) with media/media_manifest.json."""
+    media_file = run_dir / "media" / "media_manifest.json"
+    if not media_file.exists():
+        media_file = run_dir / "media_manifest.json"
+    if not media_file.exists():
+        return False
+
+    motion_plan_file = run_dir / "motion" / "render_plan.json"
+    root_plan_file = run_dir / "render_plan.json"
+    primary_plan_file = motion_plan_file if motion_plan_file.exists() else root_plan_file
+    if not primary_plan_file.exists():
+        return False
+
+    with open(media_file, "r", encoding="utf-8") as mf:
+        media_data = json.load(mf)
+    with open(primary_plan_file, "r", encoding="utf-8") as pf:
+        plan_data = json.load(pf)
+
+    script_data = None
+    script_file = run_dir / "script" / "script.json"
+    if not script_file.exists():
+        script_file = run_dir / "script.json"
+    if script_file.exists():
+        with open(script_file, "r", encoding="utf-8") as sf:
+            script_data = json.load(sf)
+
+    style_config = {}
+    style_path = Path("config/style.yaml")
+    if style_path.exists():
+        with open(style_path, "r", encoding="utf-8") as stf:
+            style_config = yaml.safe_load(stf) or {}
+
+    if not sync_render_plan_data(
+        plan_data=plan_data,
+        media_data=media_data,
+        run_dir=run_dir,
+        script_data=script_data,
+        style_config=style_config,
+    ):
+        return False
+
+    is_valid, err = validate_contract(plan_data, "contracts/render_plan.schema.json")
+    if not is_valid:
+        raise ValueError(f"Synced render_plan.json schema validation failed: {err}")
+
+    if motion_plan_file.exists():
+        with open(motion_plan_file, "w", encoding="utf-8") as pf:
+            json.dump(plan_data, pf, indent=2)
+    if root_plan_file.exists():
+        with open(root_plan_file, "w", encoding="utf-8") as rpf:
+            json.dump(plan_data, rpf, indent=2)
+
+    logger.info(f"Synced render_plan.json with media_manifest.json for {run_dir.name}")
+    return True
 
 
 def main() -> None:

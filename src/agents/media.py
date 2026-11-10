@@ -49,6 +49,7 @@ class MediaAgent(BaseAgent):
         offline: bool = False,
         dry_run: bool = False,
         allow_fixture: bool = False,
+        auto: bool = False,
     ) -> None:
         super().__init__(Path(run_dir), config=config)
         self.media_config_path = Path(media_config_path)
@@ -56,6 +57,7 @@ class MediaAgent(BaseAgent):
         self.offline = offline
         self.dry_run = dry_run
         self.allow_fixture = allow_fixture
+        self.auto = auto
         self.cache_mgr = MediaCacheManager(
             cache_dir=self.media_config.get("settings", {}).get("cache_dir", "data/media_cache"),
             user_agent=self.media_config.get("settings", {}).get("user_agent", "NepalNewsBot/1.0"),
@@ -100,8 +102,11 @@ class MediaAgent(BaseAgent):
 
         return script_data, timeline_data
 
-    def run(self, manifest: dict[str, Any]) -> list[str]:
-        """Executes full media sourcing and normalization pipeline."""
+    def run(self, manifest: dict[str, Any], auto: bool | None = None) -> list[str]:
+        """Executes full media sourcing and normalization pipeline (or AUTO mode when enabled)."""
+        use_auto = self.auto if auto is None else auto
+        if use_auto:
+            return self.run_auto(manifest=manifest)
         start_time = time.time()
         logger.info(f"Starting Media Agent for run: {self.run_dir.name}")
 
@@ -690,6 +695,7 @@ class MediaAgent(BaseAgent):
         Writes media/picks_log.json, regenerates credits.md, review/index.html,
         and media_manifest.json, validates contract and shot tiling."""
         logger.info(f"Applying visual review picks from: {picks_file}")
+        self.warnings = []
         script_data, timeline_data = self._load_inputs()
 
         # Gate check
@@ -712,6 +718,36 @@ class MediaAgent(BaseAgent):
             app_fp = extract_script_validation_fingerprint(app_data.get("validator_fingerprint"))
             if app_fp and app_fp != curr_fp:
                 raise ValueError("validator or editor config changed after approval, re-run validate and approve")
+            rep_file = self.run_dir / "script" / "validation_report.json"
+            if rep_file.exists():
+                with open(rep_file, "r", encoding="utf-8") as rf:
+                    rep_data = json.load(rf)
+                rep_fp = extract_script_validation_fingerprint(rep_data.get("validator_fingerprint"))
+                if rep_fp and rep_fp != curr_fp:
+                    raise ValueError("validator or editor config changed since validation, re-run validate and approve")
+
+        disclose_voice = True
+        run_manifest_file = self.run_dir / "manifest.json"
+        if run_manifest_file.exists():
+            try:
+                with open(run_manifest_file, "r", encoding="utf-8") as rmf:
+                    rm_data = json.load(rmf)
+                voice_metrics = rm_data.get("stages", {}).get("voice", {}).get("metrics", {})
+                disclose_voice = bool(voice_metrics.get("disclose_synthetic_voice", True))
+            except Exception:
+                pass
+
+        # Snapshot pre-picks manifest (if any) to measure shot changes
+        prev_shots_list: list[dict[str, Any]] = []
+        existing_manifest_path = self.run_dir / "media" / "media_manifest.json"
+        if not existing_manifest_path.exists():
+            existing_manifest_path = self.run_dir / "media_manifest.json"
+        if existing_manifest_path.exists():
+            try:
+                with open(existing_manifest_path, "r", encoding="utf-8") as pmf:
+                    prev_shots_list = json.load(pmf).get("shots", [])
+            except Exception:
+                pass
 
         # Load picks JSON
         p_path = Path(picks_file)
@@ -768,6 +804,11 @@ class MediaAgent(BaseAgent):
         manifest_shots: list[dict[str, Any]] = []
         round2_research: list[dict[str, Any]] = []
         action_counts = {"pick": 0, "card": 0, "own_file": 0, "research": 0}
+        applied_picks: list[dict[str, Any]] = []
+        refused_picks: list[dict[str, Any]] = []
+        failed_downloads: list[dict[str, Any]] = []
+        cards_created: list[dict[str, Any]] = []
+        total_download_bytes = 0
 
         for ps in planned_scenes:
             sc_id = ps.scene_id
@@ -779,10 +820,12 @@ class MediaAgent(BaseAgent):
             for shot in ps.shots:
                 shot_key = f"{sc_id}_{shot.shot_index:02d}"
                 pick = picks_dict.get(shot_key) or picks_dict.get(f"{sc_id}_{shot.shot_index}")
+                is_default_card = False
 
                 if not pick:
                     # Default: create card proposal
                     pick = {"action": "card", "card_text": sc_script.get("headline", sc_id)}
+                    is_default_card = True
 
                 action = pick.get("action", "card")
                 action_counts[action] = action_counts.get(action, 0) + 1
@@ -800,86 +843,153 @@ class MediaAgent(BaseAgent):
 
                     # Verify license policy (e.g. allow_cc_by_sa honored)
                     if not self.selector.is_license_allowed(cand_license, source=cand_source):
-                        raise ValueError(
-                            f"Shot {shot_key} candidate {cand_id} has disallowed license: '{cand_license}'"
-                        )
+                        reason = f"Shot {shot_key} candidate {cand_id} has disallowed license: '{cand_license}'"
+                        refused_picks.append({"shot_id": shot_key, "candidate_id": cand_id, "reason": reason})
+                        raise ValueError(reason)
 
                     # Verify domain blocklist
                     if self.selector.is_domain_blocklisted(cand_page_url) or self.selector.is_domain_blocklisted(cand_down_url):
-                        raise ValueError(f"Shot {shot_key} uses blocklisted domain: {cand_page_url}")
+                        reason = f"Shot {shot_key} uses blocklisted domain: {cand_page_url}"
+                        refused_picks.append({"shot_id": shot_key, "candidate_id": cand_id, "reason": reason})
+                        raise ValueError(reason)
 
-                    # Download full asset
+                    # Download full asset (on failure or invalid asset, list it and create a card; never substitute stock)
                     raw_path = self.cache_mgr.download_file(cand_down_url, offline=self.offline)
-                    if not raw_path or not raw_path.exists():
-                        raise FileNotFoundError(f"Failed to download asset from {cand_down_url}")
-
+                    download_err: str | None = None
                     cand_kind = cand_info.get("kind", "video")
-                    if cand_kind == "video":
-                        out_filename = f"shot_{shot.shot_index:02d}.mp4"
-                        out_path = scene_shots_dir / out_filename
-                        probe = normalize_video(
-                            src_path=raw_path,
-                            dest_path=out_path,
-                            target_duration=shot.duration,
-                            target_resolution=target_res,
-                            fps=fps,
-                            source_duration=cand_info.get("duration"),
-                        )
-                        manifest_shots.append({
+
+                    if not raw_path or not raw_path.exists():
+                        download_err = f"Failed to download asset from {cand_down_url}"
+                    else:
+                        try:
+                            if cand_kind == "video":
+                                out_filename = f"shot_{shot.shot_index:02d}.mp4"
+                                out_path = scene_shots_dir / out_filename
+                                probe = normalize_video(
+                                    src_path=raw_path,
+                                    dest_path=out_path,
+                                    target_duration=shot.duration,
+                                    target_resolution=target_res,
+                                    fps=fps,
+                                    source_duration=cand_info.get("duration"),
+                                )
+                                total_download_bytes += raw_path.stat().st_size
+                                manifest_shots.append({
+                                    "scene_id": sc_id,
+                                    "shot_index": shot.shot_index,
+                                    "start": shot.start,
+                                    "end": shot.end,
+                                    "type": "video",
+                                    "card_text": None,
+                                    "file": f"media/shots/{sc_id}/{out_filename}",
+                                    "source": cand_source,
+                                    "origin_url": cand_page_url,
+                                    "license": cand_license,
+                                    "license_url": cand_info.get("license_url"),
+                                    "author": cand_info.get("author", "Unknown"),
+                                    "attribution_text": cand_info.get("attribution_text") or f"Video by {cand_info.get('author')} via {cand_source}",
+                                    "attribution_required": cand_info.get("attribution_required", False),
+                                    "width": probe.get("width"),
+                                    "height": probe.get("height"),
+                                    "duration_sec": probe.get("duration"),
+                                    "sha256": probe.get("sha256"),
+                                    "query": cand_info.get("query"),
+                                    "motion": None,
+                                    "sensitive_scene": is_sensitive,
+                                    "style": None,
+                                })
+                            else:  # Image
+                                out_filename = f"shot_{shot.shot_index:02d}.jpg"
+                                out_path = scene_shots_dir / out_filename
+                                probe = normalize_image(
+                                    src_path=raw_path,
+                                    dest_path=out_path,
+                                    target_resolution=target_res,
+                                )
+                                total_download_bytes += raw_path.stat().st_size
+                                manifest_shots.append({
+                                    "scene_id": sc_id,
+                                    "shot_index": shot.shot_index,
+                                    "start": shot.start,
+                                    "end": shot.end,
+                                    "type": "image",
+                                    "card_text": None,
+                                    "file": f"media/shots/{sc_id}/{out_filename}",
+                                    "source": cand_source,
+                                    "origin_url": cand_page_url,
+                                    "license": cand_license,
+                                    "license_url": cand_info.get("license_url"),
+                                    "author": cand_info.get("author", "Unknown"),
+                                    "attribution_text": cand_info.get("attribution_text") or f"Photo by {cand_info.get('author')} via {cand_source}",
+                                    "attribution_required": cand_info.get("attribution_required", False),
+                                    "width": probe.get("width"),
+                                    "height": probe.get("height"),
+                                    "duration_sec": round(shot.duration, 3),
+                                    "sha256": probe.get("sha256"),
+                                    "query": cand_info.get("query"),
+                                    "motion": "ken_burns",
+                                    "sensitive_scene": is_sensitive,
+                                    "style": None,
+                                })
+
+                            applied_picks.append({
+                                "shot_id": shot_key,
+                                "candidate_id": cand_id,
+                                "source": cand_source,
+                                "kind": cand_kind,
+                                "file": f"media/shots/{sc_id}/{out_filename}",
+                                "sha256": probe.get("sha256"),
+                            })
+                        except Exception as norm_exc:
+                            download_err = f"Failed to normalize downloaded asset from {cand_down_url}: {norm_exc}"
+
+                    if download_err:
+                        warn_msg = f"Shot {shot_key} ({cand_id}): {download_err}. Created non-stock headline card instead."
+                        logger.warning(warn_msg)
+                        self.warnings.append(warn_msg)
+                        failed_downloads.append({
+                            "shot_id": shot_key,
                             "scene_id": sc_id,
                             "shot_index": shot.shot_index,
-                            "start": shot.start,
-                            "end": shot.end,
-                            "type": "video",
-                            "card_text": None,
-                            "file": f"media/shots/{sc_id}/{out_filename}",
+                            "candidate_id": cand_id,
                             "source": cand_source,
-                            "origin_url": cand_page_url,
-                            "license": cand_license,
-                            "license_url": cand_info.get("license_url"),
-                            "author": cand_info.get("author", "Unknown"),
-                            "attribution_text": cand_info.get("attribution_text") or f"Video by {cand_info.get('author')} via {cand_source}",
-                            "attribution_required": cand_info.get("attribution_required", False),
-                            "width": probe.get("width"),
-                            "height": probe.get("height"),
-                            "duration_sec": probe.get("duration"),
-                            "sha256": probe.get("sha256"),
-                            "query": cand_info.get("query"),
-                            "motion": None,
-                            "sensitive_scene": is_sensitive,
-                            "style": None,
+                            "download_url": cand_down_url,
+                            "reason": download_err,
                         })
-                    else:  # Image
-                        out_filename = f"shot_{shot.shot_index:02d}.jpg"
+                        card_text = sc_script.get("headline", sc_id)
+                        out_filename = f"card_{shot.shot_index:02d}.png"
                         out_path = scene_shots_dir / out_filename
-                        probe = normalize_image(
-                            src_path=raw_path,
-                            dest_path=out_path,
-                            target_resolution=target_res,
-                        )
+                        draw_card_image(card_text, out_path, width=target_res[0], height=target_res[1])
+                        card_sha256 = compute_sha256(out_path)
+                        cards_created.append({
+                            "shot_id": shot_key,
+                            "file": f"media/shots/{sc_id}/{out_filename}",
+                            "reason": "download_failed",
+                            "card_text": card_text,
+                        })
                         manifest_shots.append({
                             "scene_id": sc_id,
                             "shot_index": shot.shot_index,
                             "start": shot.start,
                             "end": shot.end,
-                            "type": "image",
-                            "card_text": None,
+                            "type": "card",
+                            "card_text": card_text,
                             "file": f"media/shots/{sc_id}/{out_filename}",
-                            "source": cand_source,
-                            "origin_url": cand_page_url,
-                            "license": cand_license,
-                            "license_url": cand_info.get("license_url"),
-                            "author": cand_info.get("author", "Unknown"),
-                            "attribution_text": cand_info.get("attribution_text") or f"Photo by {cand_info.get('author')} via {cand_source}",
-                            "attribution_required": cand_info.get("attribution_required", False),
-                            "width": probe.get("width"),
-                            "height": probe.get("height"),
+                            "source": "system",
+                            "origin_url": None,
+                            "license": "N/A",
+                            "license_url": None,
+                            "author": "System",
+                            "attribution_text": "Graphic card",
+                            "attribution_required": False,
+                            "width": target_res[0],
+                            "height": target_res[1],
                             "duration_sec": round(shot.duration, 3),
-                            "sha256": probe.get("sha256"),
-                            "query": cand_info.get("query"),
-                            "motion": "ken_burns",
+                            "sha256": card_sha256,
+                            "query": None,
+                            "motion": "zoom_in",
                             "sensitive_scene": is_sensitive,
-                            "style": None,
+                            "style": "card",
                         })
 
                 elif action == "card":
@@ -888,6 +998,12 @@ class MediaAgent(BaseAgent):
                     out_path = scene_shots_dir / out_filename
                     draw_card_image(card_text, out_path, width=target_res[0], height=target_res[1])
                     card_sha256 = compute_sha256(out_path)
+                    cards_created.append({
+                        "shot_id": shot_key,
+                        "file": f"media/shots/{sc_id}/{out_filename}",
+                        "reason": "default_card" if is_default_card else "explicit_card",
+                        "card_text": card_text,
+                    })
                     manifest_shots.append({
                         "scene_id": sc_id,
                         "shot_index": shot.shot_index,
@@ -985,6 +1101,12 @@ class MediaAgent(BaseAgent):
                     out_path = scene_shots_dir / out_filename
                     draw_card_image(card_text, out_path, width=target_res[0], height=target_res[1])
                     card_sha256 = compute_sha256(out_path)
+                    cards_created.append({
+                        "shot_id": shot_key,
+                        "file": f"media/shots/{sc_id}/{out_filename}",
+                        "reason": "research_placeholder",
+                        "card_text": card_text,
+                    })
                     manifest_shots.append({
                         "scene_id": sc_id,
                         "shot_index": shot.shot_index,
@@ -1026,7 +1148,7 @@ class MediaAgent(BaseAgent):
             "resolution": list(target_res),
             "fps": fps,
             "illustrative_label": bool(settings.get("illustrative_label", True)),
-            "disclose_synthetic_voice": True,
+            "disclose_synthetic_voice": disclose_voice,
             "script_origin": script_origin,
             "shots": manifest_shots,
             "warnings": self.warnings,
@@ -1048,11 +1170,41 @@ class MediaAgent(BaseAgent):
 
         # Regenerate credits.md
         credits_path = media_dir / "credits.md"
-        generate_credits_markdown(manifest_shots, credits_path, disclose_synthetic_voice=True)
+        generate_credits_markdown(manifest_shots, credits_path, disclose_synthetic_voice=disclose_voice)
 
-        # Regenerate review/index.html
+        # Regenerate per-scene contact sheets and review/index.html
+        shots_by_scene: dict[str, list[dict[str, Any]]] = {}
+        for s in manifest_shots:
+            shots_by_scene.setdefault(s["scene_id"], []).append(s)
+        for sc_id, sc_shots in shots_by_scene.items():
+            create_contact_sheet_for_scene(sc_id, sc_shots, self.run_dir, review_dir / f"{sc_id}.jpg")
+
         review_html_path = review_dir / "index.html"
         generate_review_html(manifest_payload, list(script_scenes.values()), review_html_path)
+
+        # Keep existing render_plan.json synced with updated shots/hashes if motion stage already ran
+        from src.agents.motion import sync_render_plan_with_media_manifest
+        sync_render_plan_with_media_manifest(self.run_dir)
+
+        # Compare shots before vs after picks
+        prev_by_key = {(s.get("scene_id"), s.get("shot_index")): s for s in prev_shots_list}
+        new_by_key = {(s.get("scene_id"), s.get("shot_index")): s for s in manifest_shots}
+        changed_shots: list[dict[str, Any]] = []
+        for s in manifest_shots:
+            key = (s.get("scene_id"), s.get("shot_index"))
+            prev_s = prev_by_key.get(key)
+            if not prev_s or prev_s.get("sha256") != s.get("sha256") or prev_s.get("origin_url") != s.get("origin_url"):
+                changed_shots.append({
+                    "shot_id": f"{key[0]}_{key[1]:02d}",
+                    "old_origin_url": prev_s.get("origin_url") if prev_s else None,
+                    "old_sha256": prev_s.get("sha256") if prev_s else None,
+                    "new_origin_url": s.get("origin_url"),
+                    "new_sha256": s.get("sha256"),
+                    "new_type": s.get("type"),
+                })
+        removed_shots = [
+            f"{k[0]}_{k[1]:02d}" for k in prev_by_key if k not in new_by_key
+        ]
 
         # Write picks_log.json
         picks_log_path = media_dir / "picks_log.json"
@@ -1062,19 +1214,100 @@ class MediaAgent(BaseAgent):
             "picks_file": str(picks_file),
             "action_counts": action_counts,
             "total_shots": len(manifest_shots),
+            "previous_total_shots": len(prev_shots_list) if prev_shots_list else None,
+            "shots_changed_count": len(changed_shots),
+            "shots_removed_count": len(removed_shots),
+            "changed_shots": changed_shots,
+            "removed_shots": removed_shots,
+            "applied_picks": applied_picks,
+            "refused_picks": refused_picks,
+            "failed_downloads": failed_downloads,
+            "cards_created": cards_created,
+            "download_size_mb": round(total_download_bytes / (1024 * 1024), 2),
+            "warnings": self.warnings,
             "picks": picks_dict,
         }
         with open(picks_log_path, "w", encoding="utf-8") as plf:
             json.dump(picks_log_data, plf, indent=2)
 
-        logger.info(f"Successfully applied picks! Manifest updated with {len(manifest_shots)} shots.")
+        logger.info(
+            f"Successfully applied picks! Shots: {len(manifest_shots)}, "
+            f"Applied picks: {len(applied_picks)}, Cards created: {len(cards_created)}, "
+            f"Failed downloads: {len(failed_downloads)}"
+        )
         return ["media/media_manifest.json", "media/credits.md", "media/picks_log.json"]
+
+    def run_auto(
+        self,
+        manifest: dict[str, Any] | None = None,
+        candidates_k: int = 6,
+    ) -> list[str]:
+        """Runs media stage in AUTO mode:
+        1. Runs candidates discovery and writes media/review/picker.html + candidates.json.
+        2. Converts auto_picks (clips >= min_relevance, card shots below) into auto_picks.json.
+        3. Applies those picks immediately so render/motion can run while keeping picker.html available.
+        """
+        t_start = time.time()
+        logger.info(f"Starting Media Agent AUTO mode (k={candidates_k}) for run: {self.run_dir.name}")
+        candidates_data = self.run_candidates(candidates_k=candidates_k)
+
+        picks_map: dict[str, dict[str, Any]] = {}
+        clips_picked = 0
+        cards_picked = 0
+        for sh in candidates_data.get("shots", []):
+            sh_id = sh["shot_id"]
+            if sh.get("auto_pick_type") == "clip" and sh.get("auto_pick_id"):
+                cand_obj = next((c for c in sh.get("candidates", []) if c.get("id") == sh["auto_pick_id"]), None)
+                picks_map[sh_id] = {
+                    "action": "pick",
+                    "scene_id": sh["scene_id"],
+                    "shot_index": sh["shot_index"],
+                    "candidate_id": sh["auto_pick_id"],
+                    "source": cand_obj.get("source") if cand_obj else None,
+                }
+                clips_picked += 1
+            else:
+                picks_map[sh_id] = {
+                    "action": "card",
+                    "scene_id": sh["scene_id"],
+                    "shot_index": sh["shot_index"],
+                    "card_text": sh.get("scene_headline") or sh["scene_id"],
+                }
+                cards_picked += 1
+
+        auto_picks_path = self.run_dir / "media" / "review" / "auto_picks.json"
+        auto_picks_payload = {
+            "date": self.run_dir.name,
+            "mode": "auto",
+            "min_relevance": candidates_data.get("min_relevance"),
+            "picks": picks_map,
+        }
+        auto_picks_path.write_text(json.dumps(auto_picks_payload, indent=2), encoding="utf-8")
+
+        applied_outputs = self.apply_picks(auto_picks_path)
+
+        wall_time = round(time.time() - t_start, 2)
+        if manifest and "stages" in manifest and "media" in manifest["stages"]:
+            manifest["stages"]["media"]["metrics"] = {
+                "auto_mode": True,
+                "total_shots": len(candidates_data.get("shots", [])),
+                "auto_clips_count": clips_picked,
+                "auto_cards_count": cards_picked,
+                "min_relevance": candidates_data.get("min_relevance"),
+                "wall_time_sec": wall_time,
+                "warnings_count": len(self.warnings),
+            }
+
+        outputs = list(dict.fromkeys(applied_outputs + ["media/shot_plan.json", "media/review/picker.html"]))
+        logger.info(f"Media AUTO complete in {wall_time}s: {clips_picked} clips, {cards_picked} cards.")
+        return outputs
 
 
 # CLI Interface implementation
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Media Agent CLI")
     parser.add_argument("--date", default=date.today().isoformat(), help="Run date (YYYY-MM-DD)")
+    parser.add_argument("--auto", action="store_true", help="Run candidates discovery then automatically apply auto-picks and cards")
     parser.add_argument("--dry-run", action="store_true", help="Generate plan without downloading")
     parser.add_argument("--offline", action="store_true", help="Use cache and local library only")
     parser.add_argument("--allow-fixture", action="store_true", help="Allow running on fixture/mock script data")
@@ -1162,7 +1395,28 @@ def main() -> int:
     if args.apply_picks_file:
         print(f"Applying visual review picks from {args.apply_picks_file}...")
         outputs = agent.apply_picks(args.apply_picks_file)
-        print(f"[OK] Applied picks successfully.")
+        print("[OK] Applied picks successfully.")
+        for o in outputs:
+            print(f" - {run_dir / o}")
+        picks_log_p = run_dir / "media" / "picks_log.json"
+        if picks_log_p.exists():
+            plog = json.loads(picks_log_p.read_text(encoding="utf-8"))
+            print(f"Applied picks: {len(plog.get('applied_picks', []))} | Cards created: {len(plog.get('cards_created', []))} | Failed downloads: {len(plog.get('failed_downloads', []))} | Shots changed: {plog.get('shots_changed_count')}")
+            for fd in plog.get("failed_downloads", []):
+                print(f" [WARN] Download failed: {fd['shot_id']} ({fd['candidate_id']}): {fd['reason']}")
+        return 0
+
+    # CLI action: Auto mode (candidates + apply auto-picks + picker.html)
+    if args.auto:
+        manifest_file = run_dir / "manifest.json"
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.exists() else {}
+        print(f"Running Media Agent in AUTO mode for {args.date}...")
+        outputs = agent.run_auto(manifest)
+        valid, err = agent.validate(outputs)
+        if not valid:
+            print(f"[FAIL] Contract validation error: {err}")
+            return 1
+        print("[OK] Media Agent AUTO executed successfully.")
         for o in outputs:
             print(f" - {run_dir / o}")
         return 0

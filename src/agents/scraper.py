@@ -313,9 +313,15 @@ class ScraperAgent(BaseAgent):
         seen_titles: list[str],
         default_language: str = "en",
         lookback_seconds: float = 30 * 3600,
-    ) -> tuple[list[dict[str, Any]], dict[str, int], str | None]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
         """Fetches and processes an RSS source."""
-        stats = {"found": 0, "kept_filter": 0, "extracted_ok": 0, "dropped": 0}
+        stats: dict[str, Any] = {
+            "found": 0,
+            "kept_filter": 0,
+            "extracted_ok": 0,
+            "dropped": 0,
+            "newest_age_hours": None,
+        }
         error_msg = None
         articles: list[dict[str, Any]] = []
 
@@ -339,6 +345,17 @@ class ScraperAgent(BaseAgent):
         entries = feed.entries or []
         stats["found"] = len(entries)
         self.logger.info(f"{source_name}: {len(entries)} entries found in feed.")
+
+        feed_ages: list[float] = []
+        for entry in entries:
+            e_url = normalize_url(getattr(entry, "link", ""))
+            e_dt = parse_article_date(entry, e_url)
+            if e_dt is not None:
+                e_diff = (ref_time - e_dt).total_seconds()
+                if e_diff >= -3600:
+                    feed_ages.append(max(0.0, round(e_diff / 3600.0, 2)))
+        if feed_ages:
+            stats["newest_age_hours"] = min(feed_ages)
 
         for entry in entries:
             raw_url = getattr(entry, "link", "")
@@ -413,9 +430,15 @@ class ScraperAgent(BaseAgent):
         seen_urls: set[str],
         seen_titles: list[str],
         default_language: str = "en",
-    ) -> tuple[list[dict[str, Any]], dict[str, int], str | None]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
         """Fetches and processes an HTML-only source by discovering links on the homepage."""
-        stats = {"found": 0, "kept_filter": 0, "extracted_ok": 0, "dropped": 0}
+        stats: dict[str, Any] = {
+            "found": 0,
+            "kept_filter": 0,
+            "extracted_ok": 0,
+            "dropped": 0,
+            "newest_age_hours": None,
+        }
         error_msg = None
         articles: list[dict[str, Any]] = []
 
@@ -601,7 +624,7 @@ class ScraperAgent(BaseAgent):
         backfill: bool | None = None,
         lookback_hours: float | None = None,
         ref_time: datetime | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]], dict[str, str]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, str]]:
         """Executes scraping for all active sources (or a single filtered source).
 
         Returns:
@@ -639,7 +662,7 @@ class ScraperAgent(BaseAgent):
         )
 
         all_articles: list[dict[str, Any]] = []
-        per_source_stats: dict[str, dict[str, int]] = {}
+        per_source_stats: dict[str, dict[str, Any]] = {}
         source_errors: dict[str, str] = {}
         seen_urls: set[str] = set()
         seen_titles: list[str] = []
@@ -742,6 +765,22 @@ class ScraperAgent(BaseAgent):
 
         output_files = ["raw/articles.json", "raw/news.md"]
 
+        scraper_metrics = {
+            "total_articles": len(articles),
+            "total_words": sum(a.get("word_count", 0) for a in articles),
+            "per_source_stats": stats,
+        }
+
+        if "stages" in manifest and "scraper" in manifest["stages"]:
+            update_stage_status(
+                manifest,
+                "scraper",
+                manifest["stages"]["scraper"].get("status", "running"),
+                output_files=output_files,
+                source_errors=errors if errors else None,
+                metrics=scraper_metrics,
+            )
+
         # Update manifest
         manifest_file = self.run_dir / "manifest.json"
         if manifest_file.exists():
@@ -752,11 +791,7 @@ class ScraperAgent(BaseAgent):
                 "done",
                 output_files=output_files,
                 source_errors=errors if errors else None,
-                metrics={
-                    "total_articles": len(articles),
-                    "total_words": sum(a.get("word_count", 0) for a in articles),
-                    "per_source_stats": stats,
-                },
+                metrics=scraper_metrics,
             )
             save_manifest(m, manifest_file)
 
@@ -768,7 +803,7 @@ class ScraperAgent(BaseAgent):
         file_path: Path,
         articles: list[dict[str, Any]],
         run_date: str,
-        stats: dict[str, dict[str, int]],
+        stats: dict[str, dict[str, Any]],
     ) -> None:
         """Writes the human-readable news.md digest grouped by source."""
         lines = [

@@ -1,9 +1,202 @@
-"""Manifest operations utility stub."""
-import json
+"""Manifest operations, PID lock tracking, and stage-derived status computation."""
+from contextlib import contextmanager
 from datetime import datetime
+import json
+import os
 from pathlib import Path
-from typing import Any
+import sys
+from typing import Any, Iterator
+
 from src.utils.schema_validate import validate_contract
+
+PAUSE_STATES = {"prepared", "needs_revision", "awaiting_approval"}
+LOCK_FILENAME = ".pipeline.pid"
+DEFAULT_STALE_MINUTES = 30.0
+
+
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    """Parses an ISO-8601 timestamp string safely."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        cleaned = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+
+
+def is_pid_alive(pid: int) -> bool:
+    """Checks whether an OS process with the given PID is currently active."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+
+    if sys.platform == "win32":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        ERROR_ACCESS_DENIED = 5
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            err = kernel32.GetLastError()
+            return err == ERROR_ACCESS_DENIED
+        try:
+            exit_code = ctypes.c_ulong()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return exit_code.value == STILL_ACTIVE
+            return False
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def is_run_process_active(run_dir: Path | str | None) -> bool:
+    """Returns True only if a live pipeline process holds .pipeline.pid in run_dir."""
+    if run_dir is None:
+        return False
+    lock_path = Path(run_dir) / LOCK_FILENAME
+    if not lock_path.exists():
+        return False
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return False
+        if raw.startswith("{"):
+            data = json.loads(raw)
+            pid = int(data.get("pid", 0))
+        else:
+            pid = int(raw)
+    except (ValueError, OSError, json.JSONDecodeError):
+        return False
+    return is_pid_alive(pid)
+
+
+def acquire_run_lock(run_dir: Path | str) -> Path:
+    """Writes .pipeline.pid for the current active process."""
+    lock_path = Path(run_dir) / LOCK_FILENAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "started_at": datetime.now().astimezone().isoformat(),
+    }
+    lock_path.write_text(json.dumps(payload), encoding="utf-8")
+    return lock_path
+
+
+def release_run_lock(run_dir: Path | str) -> None:
+    """Removes .pipeline.pid if present."""
+    lock_path = Path(run_dir) / LOCK_FILENAME
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except OSError:
+        pass
+
+
+@contextmanager
+def run_process_lock(run_dir: Path | str) -> Iterator[Path]:
+    """Context manager marking run_dir active while a pipeline process executes."""
+    lock_path = Path(run_dir) / LOCK_FILENAME
+    owned = True
+    if lock_path.exists():
+        try:
+            data = json.loads(lock_path.read_text(encoding="utf-8"))
+            if int(data.get("pid", 0)) == os.getpid():
+                owned = False
+        except Exception:
+            pass
+    if owned:
+        acquire_run_lock(run_dir)
+    try:
+        yield lock_path
+    finally:
+        if owned:
+            release_run_lock(run_dir)
+
+
+def compute_manifest_status(
+    manifest: dict[str, Any],
+    run_dir: Path | str | None = None,
+    active_process: bool | None = None,
+    now: datetime | None = None,
+    stale_minutes: float = DEFAULT_STALE_MINUTES,
+) -> str:
+    """Computes top-level manifest status from stages, active PID lock, and stale detection."""
+    current_top = manifest.get("status", "pending")
+    if current_top == "abandoned":
+        return "abandoned"
+
+    stages = manifest.get("stages", {})
+    statuses = [st.get("status", "pending") for st in stages.values()]
+
+    if active_process is None:
+        active_process = is_run_process_active(run_dir) if run_dir is not None else False
+
+    if active_process:
+        return "running"
+
+    if statuses and all(s == "done" for s in statuses):
+        return "done"
+
+    if any(s == "failed" for s in statuses):
+        return "failed"
+
+    if any(s in PAUSE_STATES for s in statuses):
+        return "paused"
+
+    has_running_stage = any(s == "running" for s in statuses)
+    if current_top == "interrupted":
+        return "interrupted"
+
+    if has_running_stage or current_top == "running":
+        ref_time = _parse_iso_timestamp(manifest.get("updated_at") or manifest.get("created_at"))
+        if has_running_stage:
+            # Prefer running stage start_time if more specific or updated_at missing
+            for st in stages.values():
+                if st.get("status") == "running" and st.get("start_time"):
+                    st_time = _parse_iso_timestamp(st.get("start_time"))
+                    if st_time and (ref_time is None or st_time > ref_time):
+                        ref_time = st_time
+                    break
+
+        curr_now = now or datetime.now().astimezone()
+        if ref_time is not None:
+            if ref_time.tzinfo is None and curr_now.tzinfo is not None:
+                ref_time = ref_time.replace(tzinfo=curr_now.tzinfo)
+            age_seconds = (curr_now - ref_time).total_seconds()
+            if age_seconds >= stale_minutes * 60.0:
+                return "interrupted"
+
+    return "pending"
+
+
+def reconcile_manifest_status(
+    manifest: dict[str, Any],
+    run_dir: Path | str | None = None,
+    active_process: bool | None = None,
+    now: datetime | None = None,
+    stale_minutes: float = DEFAULT_STALE_MINUTES,
+) -> str:
+    """Updates and returns manifest['status'] derived cleanly from stages and liveness."""
+    new_status = compute_manifest_status(
+        manifest=manifest,
+        run_dir=run_dir,
+        active_process=active_process,
+        now=now,
+        stale_minutes=stale_minutes,
+    )
+    manifest["status"] = new_status
+    return new_status
 
 
 def create_initial_manifest(run_id: str, date_str: str, pipeline_config: dict[str, Any]) -> dict[str, Any]:

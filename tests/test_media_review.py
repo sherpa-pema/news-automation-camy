@@ -637,3 +637,232 @@ def test_library_report_formatting(tmp_path):
     assert "Image" in rep_full
     assert "kathmandu, skyline, city" in rep_full
     assert "Total media items: 1" in rep_full
+
+
+def test_apply_picks_download_or_norm_failure_creates_card_and_syncs_render_plan(tmp_path, review_config, monkeypatch):
+    """Verify apply_picks creates non-stock headline cards on download/normalization failure without substituting stock, and syncs render_plan.json."""
+    run_dir = tmp_path / "runs" / "2026-11-08"
+    (run_dir / "script").mkdir(parents=True)
+    (run_dir / "media" / "review").mkdir(parents=True)
+    (run_dir / "motion" / "overlays").mkdir(parents=True)
+
+    script_data = {
+        "date": "2026-11-08",
+        "run_kind": "test",
+        "origin": "fixture",
+        "scenes": [
+            {
+                "id": "scene_01",
+                "type": "story",
+                "headline": "Hydro Project Progress",
+                "visual_keywords": ["hydropower dam"],
+                "narration": "Engineers inspected the hydropower site today. Generation remains steady.",
+            }
+        ],
+    }
+    (run_dir / "script" / "script.json").write_text(json.dumps(script_data), encoding="utf-8")
+
+    timeline_data = {
+        "duration_sec": 12.0,
+        "scenes": [
+            {
+                "id": "scene_01",
+                "start": 0.0,
+                "end": 12.0,
+                "sentences": [{"text": "Engineers inspected the site.", "start": 0.5, "end": 11.5}],
+            }
+        ],
+    }
+    (run_dir / "timeline.json").write_text(json.dumps(timeline_data), encoding="utf-8")
+
+    # Pre-existing render_plan with 3 old shots and an illustrative_tag overlay
+    old_plan = {
+        "resolution": "1920x1080",
+        "fps": 30,
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 12.0,
+        "captions_ass": "motion/captions.ass",
+        "overlays": [
+            {
+                "id": "scene_01_lower_third",
+                "scene_id": "scene_01",
+                "type": "lower_third",
+                "png": "motion/overlays/scene_01_lower_third.png",
+                "start": 1.0,
+                "end": 7.0,
+                "x": 96,
+                "y": 730,
+                "w": 1320,
+                "h": 155,
+            },
+            {
+                "id": "scene_01_illustrative_tag",
+                "scene_id": "scene_01",
+                "type": "illustrative_tag",
+                "png": "motion/overlays/illustrative_tag.png",
+                "start": 0.2,
+                "end": 11.8,
+                "x": 1540,
+                "y": 54,
+                "w": 284,
+                "h": 44,
+            },
+        ],
+        "scenes": [
+            {
+                "id": "scene_01",
+                "start": 0.0,
+                "end": 12.0,
+                "media": "media/shots/scene_01/old_00.mp4",
+                "lower_third": {"headline": "Hydro Project Progress", "source_credit": "Desk"},
+                "caption_style": {"position": "bottom"},
+                "transition": {"type": "dip_to_black", "duration_sec": 0.2},
+                "shots": [
+                    {"shot_index": 0, "file": "media/shots/scene_01/old_00.mp4", "start": 0.0, "end": 4.0, "type": "video"},
+                    {"shot_index": 1, "file": "media/shots/scene_01/old_01.mp4", "start": 4.0, "end": 8.0, "type": "video"},
+                    {"shot_index": 2, "file": "media/shots/scene_01/old_02.mp4", "start": 8.0, "end": 12.0, "type": "video"},
+                ],
+                "overlays": [
+                    {
+                        "id": "scene_01_lower_third",
+                        "scene_id": "scene_01",
+                        "type": "lower_third",
+                        "png": "motion/overlays/scene_01_lower_third.png",
+                        "start": 1.0,
+                        "end": 7.0,
+                        "x": 96,
+                        "y": 730,
+                        "w": 1320,
+                        "h": 155,
+                    },
+                    {
+                        "id": "scene_01_illustrative_tag",
+                        "scene_id": "scene_01",
+                        "type": "illustrative_tag",
+                        "png": "motion/overlays/illustrative_tag.png",
+                        "start": 0.2,
+                        "end": 11.8,
+                        "x": 1540,
+                        "y": 54,
+                        "w": 284,
+                        "h": 44,
+                    },
+                ],
+            }
+        ],
+    }
+    (run_dir / "motion" / "render_plan.json").write_text(json.dumps(old_plan), encoding="utf-8")
+    (run_dir / "render_plan.json").write_text(json.dumps(old_plan), encoding="utf-8")
+
+    # Pre-existing media_manifest.json with 3 old shots so picks_log records shrinkage/changes
+    (run_dir / "media" / "media_manifest.json").write_text(
+        json.dumps({
+            "date": "2026-11-08",
+            "orientation": "landscape",
+            "resolution": [1920, 1080],
+            "fps": 30,
+            "shots": [
+                {"scene_id": "scene_01", "shot_index": 0, "start": 0.0, "end": 4.0, "type": "video", "file": "media/shots/scene_01/old_00.mp4", "origin_url": "https://old/0", "sha256": "old0"},
+                {"scene_id": "scene_01", "shot_index": 1, "start": 4.0, "end": 8.0, "type": "video", "file": "media/shots/scene_01/old_01.mp4", "origin_url": "https://old/1", "sha256": "old1"},
+                {"scene_id": "scene_01", "shot_index": 2, "start": 8.0, "end": 12.0, "type": "video", "file": "media/shots/scene_01/old_02.mp4", "origin_url": "https://old/2", "sha256": "old2"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    # Corrupt file returned for second pick so normalize_video fails
+    corrupt_mp4 = tmp_path / "corrupt.mp4"
+    corrupt_mp4.write_bytes(b"NOT_A_VALID_MP4_STREAM")
+
+    candidates_json_data = {
+        "date": "2026-11-08",
+        "shots": [
+            {
+                "shot_id": "scene_01_00",
+                "candidates": [
+                    {
+                        "id": "cand_missing",
+                        "source": "pixabay",
+                        "title": "Expired Video Link",
+                        "page_url": "https://pixabay.com/v/expired",
+                        "download_url": "https://cdn.pixabay.com/expired.mp4",
+                        "kind": "video",
+                        "license": "Pixabay Content License",
+                        "author": "AuthorA",
+                        "width": 1920,
+                        "height": 1080,
+                        "duration": 10.0,
+                    }
+                ],
+            },
+            {
+                "shot_id": "scene_01_01",
+                "candidates": [
+                    {
+                        "id": "cand_corrupt",
+                        "source": "pixabay",
+                        "title": "Corrupt Video Stream",
+                        "page_url": "https://pixabay.com/v/corrupt",
+                        "download_url": "https://cdn.pixabay.com/corrupt.mp4",
+                        "kind": "video",
+                        "license": "Pixabay Content License",
+                        "author": "AuthorB",
+                        "width": 1920,
+                        "height": 1080,
+                        "duration": 10.0,
+                    }
+                ],
+            },
+        ],
+    }
+    (run_dir / "media" / "review" / "candidates.json").write_text(json.dumps(candidates_json_data), encoding="utf-8")
+
+    picks_file = run_dir / "media" / "picks.json"
+    picks_file.write_text(
+        json.dumps({
+            "date": "2026-11-08",
+            "picks": {
+                "scene_01_00": {"action": "pick", "scene_id": "scene_01", "shot_index": 0, "candidate_id": "cand_missing"},
+                "scene_01_01": {"action": "pick", "scene_id": "scene_01", "shot_index": 1, "candidate_id": "cand_corrupt"},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    agent = MediaAgent(run_dir, config=review_config, allow_fixture=True)
+
+    def _fake_download(url: str, offline: bool = False):
+        if "expired" in url:
+            return None
+        return corrupt_mp4
+
+    monkeypatch.setattr(agent.cache_mgr, "download_file", _fake_download)
+
+    agent.apply_picks(picks_file)
+
+    manifest_data = json.loads((run_dir / "media" / "media_manifest.json").read_text(encoding="utf-8"))
+    is_valid, err = validate_contract(manifest_data, agent.schema_contract_path)
+    assert is_valid, f"media_manifest validation failed: {err}"
+
+    shots = manifest_data["shots"]
+    assert len(shots) == 2
+    assert all(s["type"] == "card" and s["source"] == "system" for s in shots)
+    assert all((run_dir / s["file"]).exists() for s in shots)
+
+    plog = json.loads((run_dir / "media" / "picks_log.json").read_text(encoding="utf-8"))
+    assert len(plog["failed_downloads"]) == 2
+    assert len(plog["cards_created"]) == 2
+    assert all(c["reason"] == "download_failed" for c in plog["cards_created"])
+    assert len(plog["applied_picks"]) == 0
+    assert plog["previous_total_shots"] == 3
+
+    # Verify render_plan.json synced cleanly without stock illustrative tag
+    synced_plan = json.loads((run_dir / "motion" / "render_plan.json").read_text(encoding="utf-8"))
+    ok_plan, plan_err = validate_contract(synced_plan, "contracts/render_plan.schema.json")
+    assert ok_plan, f"render_plan validation failed: {plan_err}"
+    assert len(synced_plan["scenes"][0]["shots"]) == 2
+    assert synced_plan["scenes"][0]["shots"][0]["sha256"] == shots[0]["sha256"]
+    assert synced_plan["scenes"][0]["shots"][0]["type"] == "card"
+    assert not any(ov.get("type") == "illustrative_tag" for ov in synced_plan["overlays"])
+    assert any(ov.get("type") == "lower_third" for ov in synced_plan["overlays"])
+
