@@ -1,8 +1,32 @@
 """Clustering and shortlist generation for Editor Agent."""
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import difflib
 import re
 from typing import Any
+
+NPT_TZ = timezone(timedelta(hours=5, minutes=45))
+DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+DEFAULT_ENTITY_ALIASES: dict[str, list[str]] = {
+    "uml": ["cpn-uml", "cpn (uml)", "uml", "एमाले", "नेकपा एमाले"],
+    "rsp": ["rsp", "rastriya swatantra party", "रास्वपा", "राष्ट्रिय स्वतन्त्र पार्टी"],
+    "nc": ["nepali congress", "नेपाली कांग्रेस", "कांग्रेस"],
+    "maoist": ["cpn-maoist", "maoist centre", "माओवादी", "माओवादी केन्द्र"],
+    "nrb": ["nrb", "nepal rastra bank", "राष्ट्र बैंक", "नेपाल राष्ट्र बैंक"],
+    "nepse": ["nepse", "nepal stock exchange", "नेप्से"],
+    "ciaa": ["ciaa", "अख्तियार"],
+    "nea": ["nea", "nepal electricity authority", "विद्युत प्राधिकरण", "नेपाल विद्युत प्राधिकरण"],
+    "caan": ["caan", "civil aviation authority of nepal", "नागरिक उड्डयन प्राधिकरण"],
+    "noc": ["noc", "nepal oil corporation", "आयल निगम", "नेपाल आयल निगम"],
+    "kmc": ["kmc", "kathmandu metropolitan city", "काठमाडौं महानगर", "महानगरपालिका"],
+    "muglin": ["muglin", "mugling", "मुग्लिन"],
+    "balen": ["balen", "balendra", "बालेन", "बालेन्द्र"],
+    "prachanda": ["prachanda", "pushpa kamal dahal", "प्रचण्ड", "पुष्पकमल दाहाल"],
+    "oli": ["kp oli", "k.p. oli", "kp sharma oli", "केपी ओली", "ओली"],
+    "deuba": ["sher bahadur deuba", "deuba", "शेरबहादुर देउवा", "देउवा"],
+    "kathmandu": ["kathmandu", "ktm", "काठमाडौं", "काठमाडौँ"],
+    "pokhara": ["pokhara", "पोखरा"],
+}
 
 STOPWORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
@@ -21,18 +45,20 @@ STOPWORDS = {
     "we'll", "we're", "we've", "were", "weren't", "what", "what's", "when", "when's", "where",
     "where's", "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
     "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself",
-    "yourselves", "nepal", "nepali", "says", "said"
+    "yourselves", "nepal", "nepali", "says", "said",
+    # Nepali stopwords (Devanagari)
+    "र", "छ", "छन्", "थियो", "थिए", "भएको", "गरेको", "गर्न", "लागि", "बाट", "भने", "पनि", "तथा", "अनुसार", "नेपाल",
 }
 
 OPINION_URL_PATTERNS = [
     "/opinion/", "/columns/", "/column/", "/commentary/",
-    "/blogs/", "/blog/", "/op-ed/", "/editorial/", "/views/",
+    "/blogs/", "/blog/", "/op-ed/", "/editorial/", "/views/", "/vichar/",
 ]
 
 
 def tokenize(text: str) -> set[str]:
-    """Extracts normalized alphanumeric word tokens excluding stopwords."""
-    words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+    """Extracts normalized English and Devanagari word tokens excluding stopwords."""
+    words = re.findall(r"\b[a-zA-Z]{3,}\b|[\u0900-\u097F]{2,}", text.lower())
     return {w for w in words if w not in STOPWORDS}
 
 
@@ -59,9 +85,14 @@ def detect_opinion(article: dict[str, Any]) -> tuple[bool, str]:
             return True, f"URL pattern '{pattern}'"
 
     # 2. Title pattern
-    title_match = re.search(r"\b(opinion|editorial|commentary|op-ed|column|perspective)\b", title, re.IGNORECASE)
+    title_match = re.search(
+        r"\b(opinion|editorial|commentary|op-ed|column|perspective)\b|(विचार|सम्पादकीय|दृष्टिकोण|ब्लग)",
+        title,
+        re.IGNORECASE,
+    )
     if title_match:
-        return True, f"Title pattern '{title_match.group(1)}'"
+        matched_term = title_match.group(1) or title_match.group(2)
+        return True, f"Title pattern '{matched_term}'"
 
     # 3. Author pattern
     author_match = re.search(r"\b(columnist|contributor|guest author)\b", author, re.IGNORECASE)
@@ -69,11 +100,14 @@ def detect_opinion(article: dict[str, Any]) -> tuple[bool, str]:
         return True, f"Author designation '{author_match.group(1)}'"
 
     # 4. First-person pronoun heuristic
-    words = re.findall(r"\b[A-Za-z]+\b", full_text)
+    words = re.findall(r"\b[A-Za-z]+\b|[\u0900-\u097F]+", full_text)
     fp_count = 0
     fp_examples = []
     for w in words:
-        if w in ("I", "my", "My", "mine", "Mine", "myself", "Myself", "we", "We", "our", "Our", "ours", "Ours", "ourselves", "Ourselves", "us"):
+        if w in (
+            "I", "my", "My", "mine", "Mine", "myself", "Myself", "we", "We", "our", "Our", "ours", "Ours", "ourselves", "Ourselves", "us",
+            "म", "मेरो", "मेरा", "मेरी", "हामी", "हाम्रो", "हाम्रा", "हामीलाई",
+        ):
             fp_count += 1
             if len(fp_examples) < 5:
                 fp_examples.append(w)
@@ -111,52 +145,98 @@ def parse_time_str(time_str: str) -> tuple[int, int]:
 def detect_stale_preview(article: dict[str, Any], ref_time: datetime | None = None) -> tuple[bool, str]:
     """Detects whether an article is a preview of a scheduled future event whose event time has already passed."""
     text = (article.get("title", "") + " " + (article.get("full_text") or article.get("text_summary") or ""))
-    m_phrase = re.search(r"\b(will|scheduled|set to|to face|to host)\b", text, re.IGNORECASE)
-    if not m_phrase:
-        return False, ""
-
-    time_matches = list(re.finditer(r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))\b|\b([01]?\d|2[0-3]):([0-5]\d)\b", text, re.IGNORECASE))
-    if not time_matches:
-        return False, ""
 
     pub_str = article.get("published_at") or ""
     try:
         pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=NPT_TZ)
     except Exception:
-        pub_dt = datetime.now().astimezone()
+        pub_dt = datetime.now(NPT_TZ)
 
     if ref_time is None:
-        ref_time = datetime.now(pub_dt.tzinfo)
+        ref_time = datetime.now(pub_dt.tzinfo or NPT_TZ)
+    elif ref_time.tzinfo is None:
+        ref_time = ref_time.replace(tzinfo=NPT_TZ)
 
-    for tm in time_matches:
-        time_str = tm.group(0)
-        hour, minute = parse_time_str(time_str)
+    ref_npt = ref_time.astimezone(NPT_TZ)
+    pub_npt = pub_dt.astimezone(NPT_TZ)
 
-        start = max(0, tm.start() - 50)
-        end = min(len(text), tm.end() + 50)
-        window = text[start:end].lower()
+    m_phrase = re.search(
+        r"\b(will|scheduled|set to|to face|to host|to open|to begin|to start|to hold|to meet|due to|slated|expected to)\b|(हुने|बस्ने|खुल्ने|सुरु हुने)",
+        text,
+        re.IGNORECASE,
+    )
 
-        event_year = pub_dt.year
-        event_month = pub_dt.month
-        event_day = pub_dt.day
+    time_matches = list(
+        re.finditer(
+            r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))\b|\b([01]?\d|2[0-3]):([0-5]\d)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if m_phrase and time_matches:
+        for tm in time_matches:
+            time_str = tm.group(0)
+            hour, minute = parse_time_str(time_str)
 
-        m_date = re.search(r"\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})\b", window)
-        if m_date:
-            event_month = MONTHS[m_date.group(1)]
-            event_day = int(m_date.group(2))
-        else:
-            m_date2 = re.search(r"\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b", window)
-            if m_date2:
-                event_day = int(m_date2.group(1))
-                event_month = MONTHS[m_date2.group(2)]
+            start = max(0, tm.start() - 50)
+            end = min(len(text), tm.end() + 50)
+            window = text[start:end].lower()
 
-        try:
-            event_dt = datetime(event_year, event_month, event_day, hour, minute, tzinfo=pub_dt.tzinfo)
-        except Exception:
-            continue
+            event_year = pub_dt.year
+            event_month = pub_dt.month
+            event_day = pub_dt.day
 
-        if event_dt < ref_time:
-            return True, f"Future event preview ('{m_phrase.group()}', time '{time_str}') on {event_dt.strftime('%Y-%m-%d %H:%M')} has passed relative to {ref_time.strftime('%Y-%m-%d %H:%M')}"
+            m_date = re.search(
+                r"\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})\b",
+                window,
+            )
+            if m_date:
+                event_month = MONTHS[m_date.group(1)]
+                event_day = int(m_date.group(2))
+            else:
+                m_date2 = re.search(
+                    r"\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b",
+                    window,
+                )
+                if m_date2:
+                    event_day = int(m_date2.group(1))
+                    event_month = MONTHS[m_date2.group(2)]
+
+            try:
+                event_dt = datetime(event_year, event_month, event_day, hour, minute, tzinfo=pub_dt.tzinfo)
+            except Exception:
+                continue
+
+            if event_dt < ref_time:
+                return (
+                    True,
+                    f"Future event preview ('{m_phrase.group()}', time '{time_str}') on {event_dt.strftime('%Y-%m-%d %H:%M')} has passed relative to {ref_time.strftime('%Y-%m-%d %H:%M')}",
+                )
+
+    # Nepal time-of-day anchor checks (relative to +05:45 NPT) even without explicit clock time
+    m_nepse = re.search(r"\b(nepse to open|market set to open|nepse set to open)\b", text, re.IGNORECASE)
+    if m_nepse and (pub_npt.date() < ref_npt.date() or ref_npt.hour >= 15):
+        return (
+            True,
+            f"NEPSE pre-market preview ('{m_nepse.group(0)}') is stale at {ref_npt.strftime('%Y-%m-%d %H:%M NPT')}",
+        )
+
+    if m_phrase:
+        m_morning = re.search(r"\b(this morning|today morning)\b|आज बिहान", text, re.IGNORECASE)
+        if m_morning and (pub_npt.date() < ref_npt.date() or ref_npt.hour >= 12):
+            return (
+                True,
+                f"Morning event preview ('{m_morning.group(0)}') is stale at {ref_npt.strftime('%Y-%m-%d %H:%M NPT')}",
+            )
+
+        m_afternoon = re.search(r"\b(this afternoon)\b|आज दिउँसो", text, re.IGNORECASE)
+        if m_afternoon and (pub_npt.date() < ref_npt.date() or ref_npt.hour >= 17):
+            return (
+                True,
+                f"Afternoon event preview ('{m_afternoon.group(0)}') is stale at {ref_npt.strftime('%Y-%m-%d %H:%M NPT')}",
+            )
 
     return False, ""
 
@@ -176,22 +256,93 @@ def is_thin_story(article: dict[str, Any], min_words: int = 60) -> bool:
     return len(words) < min_words
 
 
-def guess_category(text: str, categories_cfg: dict[str, list[str]]) -> str:
-    """Infers the most likely category based on keyword matches."""
+def guess_category(
+    text: str,
+    categories_cfg: dict[str, list[str]],
+    fallback_hints: list[str] | None = None,
+) -> str:
+    """Infers the most likely category based on keyword matches, falling back to scraper hints."""
     text_lower = text.lower()
     best_cat = "other"
     max_score = 0
 
     for cat, kws in categories_cfg.items():
-        score = sum(1 for kw in kws if kw in text_lower)
+        score = 0
+        for kw in kws:
+            kw_l = str(kw).lower().strip()
+            if not kw_l:
+                continue
+            if kw_l.isascii():
+                if re.search(rf"\b{re.escape(kw_l)}\b", text_lower):
+                    score += 1
+            elif kw_l in text_lower:
+                score += 1
         if score > max_score:
             max_score = score
             best_cat = cat
 
+    if best_cat == "other" and fallback_hints:
+        counts: dict[str, int] = {}
+        for h in fallback_hints:
+            if h and h != "other":
+                counts[h] = counts.get(h, 0) + 1
+        if counts:
+            best_cat = max(counts.items(), key=lambda kv: kv[1])[0]
+
     return best_cat
 
 
-def articles_are_similar(a1: dict[str, Any], a2: dict[str, Any], title_ratio_thresh: float = 0.55, token_overlap_thresh: float = 0.35) -> bool:
+def extract_canonical_entities(text: str, entity_aliases: dict[str, list[str]] | None = None) -> set[str]:
+    """Normalizes English and Devanagari entity variants into canonical keys."""
+    aliases = entity_aliases if entity_aliases is not None else DEFAULT_ENTITY_ALIASES
+    if not text or not aliases:
+        return set()
+    text_lower = text.lower()
+    matched: set[str] = set()
+    for canon, variants in aliases.items():
+        for variant in variants or []:
+            v_l = str(variant).lower().strip()
+            if not v_l:
+                continue
+            if v_l.isascii():
+                if re.search(rf"(?<![a-z0-9]){re.escape(v_l)}(?![a-z0-9])", text_lower):
+                    matched.add(canon)
+                    break
+            elif v_l in text_lower:
+                matched.add(canon)
+                break
+    return matched
+
+
+def extract_spine_numbers(text: str, exclude_years: set[int] | None = None) -> set[float]:
+    """Extracts non-trivial numeric tokens (including Devanagari digits) for cross-script matching."""
+    if not text:
+        return set()
+    norm = text.translate(DEVANAGARI_DIGITS)
+    cur_year = datetime.now().year
+    excluded = {0.0, 1.0, float(cur_year)}
+    if exclude_years:
+        excluded.update(float(y) for y in exclude_years)
+
+    found: set[float] = set()
+    for m in re.finditer(r"(?<![\d.])\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])", norm):
+        try:
+            val = float(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if val not in excluded:
+            found.add(val)
+    return found
+
+
+def articles_are_similar(
+    a1: dict[str, Any],
+    a2: dict[str, Any],
+    title_ratio_thresh: float = 0.55,
+    token_overlap_thresh: float = 0.35,
+    entity_aliases: dict[str, list[str]] | None = None,
+    ref_year: int | None = None,
+) -> bool:
     """Determines whether two articles cover the same event."""
     t1 = a1.get("title", "")
     t2 = a2.get("title", "")
@@ -218,6 +369,22 @@ def articles_are_similar(a1: dict[str, Any], a2: dict[str, Any], title_ratio_thr
         comb_overlap = len(comb1 & comb2) / len(comb1 | comb2)
         if comb_overlap >= 0.40 and len(toks1 & toks2) >= 2:
             return True
+
+    # 4. Cross-script Entity & Numeric Spine Matching (>= 2 canonical entities + >= 1 non-trivial number within 12h)
+    ts1 = parse_timestamp(a1.get("published_at"))
+    ts2 = parse_timestamp(a2.get("published_at"))
+    within_window = True if (ts1 == 0.0 or ts2 == 0.0) else (abs(ts1 - ts2) <= 12 * 3600)
+    if within_window:
+        txt1 = f"{t1} {a1.get('text_summary', '')} {a1.get('full_text', '')}"
+        txt2 = f"{t2} {a2.get('text_summary', '')} {a2.get('full_text', '')}"
+        ents1 = extract_canonical_entities(txt1, entity_aliases=entity_aliases)
+        ents2 = extract_canonical_entities(txt2, entity_aliases=entity_aliases)
+        if len(ents1 & ents2) >= 2:
+            excl = {ref_year} if ref_year else None
+            nums1 = extract_spine_numbers(txt1, exclude_years=excl)
+            nums2 = extract_spine_numbers(txt2, exclude_years=excl)
+            if len(nums1 & nums2) >= 1:
+                return True
 
     return False
 
@@ -247,14 +414,43 @@ def cluster_articles(
     return_opinion: bool = False,
     return_stale: bool = False,
     ref_time: datetime | None = None,
+    prior_stories: list[dict[str, Any]] | None = None,
+    use_llm_curator: bool | None = None,
 ) -> list[dict[str, Any]] | tuple[Any, ...]:
     """Filters and clusters articles about the same event across outlets."""
+    curator_cfg = editor_cfg.get("llm_curator", {})
+    should_use_llm = use_llm_curator if use_llm_curator is not None else curator_cfg.get("enabled", True)
+
+    if should_use_llm:
+        try:
+            from src.utils.llm_curator import curate_and_cluster_with_llm
+            res = curate_and_cluster_with_llm(
+                articles=articles,
+                editor_cfg=editor_cfg,
+                prior_stories=prior_stories,
+                ref_time=ref_time,
+            )
+            if res is not None:
+                shortlist, opinion_clusters, stale_clusters = res
+                if return_opinion and return_stale:
+                    return shortlist, opinion_clusters, stale_clusters
+                if return_opinion:
+                    return shortlist, opinion_clusters
+                return shortlist
+        except Exception as e:
+            import logging
+            logging.getLogger("editor").warning(f"LLM curation failed ({e}); falling back to heuristic clustering.")
+
     min_words = int(editor_cfg.get("clustering", {}).get("min_full_text_words", 60))
     title_ratio = float(editor_cfg.get("clustering", {}).get("title_similarity_threshold", 0.55))
     token_overlap = float(editor_cfg.get("clustering", {}).get("token_overlap_threshold", 0.35))
     categories_cfg = editor_cfg.get("categories", {})
+    entity_aliases = editor_cfg.get("entity_aliases", DEFAULT_ENTITY_ALIASES)
+    dedup_cfg = editor_cfg.get("deduplication", {})
+    repeat_penalty = float(dedup_cfg.get("cross_day_repeat_penalty", -600))
     allow_opinion = bool(editor_cfg.get("allow_opinion", False))
     allow_stale_preview = bool(editor_cfg.get("allow_stale_preview", False))
+    ref_year = ref_time.year if ref_time else datetime.now().year
 
     # 1. Filter out ads and thin stories, detect opinion and stale preview on articles
     filtered_articles = []
@@ -280,21 +476,73 @@ def cluster_articles(
         placed = False
         for c in clusters:
             # Check similarity against any existing article in cluster
-            if any(articles_are_similar(art, existing, title_ratio, token_overlap) for existing in c):
+            if any(
+                articles_are_similar(
+                    art,
+                    existing,
+                    title_ratio,
+                    token_overlap,
+                    entity_aliases=entity_aliases,
+                    ref_year=ref_year,
+                )
+                for existing in c
+            ):
                 c.append(art)
                 placed = True
                 break
         if not placed:
             clusters.append([art])
 
-    # 3. Format clusters
+    # 3. Format clusters with chronological ordering and intra-cluster temporal supersession
     formatted_clusters = []
     for idx, c in enumerate(clusters, 1):
         sources = sorted(list({a["source"] for a in c}))
         urls = [a["url"] for a in c]
         all_text = " ".join([f"{a.get('title', '')} {a.get('text_summary', '')}" for a in c])
-        category = guess_category(all_text, categories_cfg)
+        cat_hints = [str(a.get("category_hint")) for a in c if a.get("category_hint")]
+        category = guess_category(all_text, categories_cfg, fallback_hints=cat_hints)
         newest_ts = max((parse_timestamp(a.get("published_at")) for a in c), default=0.0)
+        max_source_trust = max((float(a.get("source_trust", 0.70) or 0.70) for a in c), default=0.70)
+        max_importance = max((float(a.get("importance_hint", 0.0) or 0.0) for a in c), default=0.0)
+        all_dates_missing = all(
+            (a.get("date_confidence") == "missing" or not a.get("published_at"))
+            for a in c
+        )
+
+        # Sort member articles reverse-chronologically by published_at (newest/primary -> older)
+        # with source_trust and importance_hint as tie-breakers
+        sorted_members = sorted(
+            c,
+            key=lambda a: (
+                parse_timestamp(a.get("published_at")),
+                float(a.get("source_trust", 0.70) or 0.70),
+                float(a.get("importance_hint", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
+
+        # Detect differing numeric figures across articles in cluster for supersession
+        article_num_sets = [
+            frozenset(
+                extract_spine_numbers(
+                    f"{a.get('title', '')} {a.get('full_text') or a.get('text_summary') or ''}",
+                    exclude_years={ref_year},
+                )
+            )
+            for a in sorted_members
+        ]
+        has_differing_numbers = len(sorted_members) >= 2 and len(set(article_num_sets)) > 1
+        newest_article = sorted_members[0]
+
+        superseded_flags: list[bool] = []
+        for a in sorted_members:
+            a_ts = parse_timestamp(a.get("published_at"))
+            if has_differing_numbers and newest_ts > 0.0 and a_ts < newest_ts:
+                superseded_flags.append(True)
+            else:
+                superseded_flags.append(False)
+
+        has_superseded = any(superseded_flags)
 
         # Cluster opinion status: True if any member article is opinion
         is_opinion_cluster = any(a.get("is_opinion", False) for a in c)
@@ -306,8 +554,11 @@ def cluster_articles(
         stale_reasons = [a.get("stale_preview_reason") for a in c if a.get("stale_preview_reason")]
         stale_reason_str = "; ".join(stale_reasons) if stale_reasons else None
 
-        # Primary title: pick longest or from multi-outlet
-        primary_title = max((a.get("title", "") for a in c), key=len, default="News Item")
+        # Primary title: newest timestamped article when superseded updates exist, else longest
+        if has_superseded and newest_article.get("title"):
+            primary_title = newest_article["title"]
+        else:
+            primary_title = max((a.get("title", "") for a in c), key=len, default="News Item")
 
         formatted_clusters.append({
             "cluster_id": f"cluster_{idx:02d}",
@@ -316,8 +567,14 @@ def cluster_articles(
             "opinion_reason": op_reason_str,
             "is_stale_preview": is_stale_cluster,
             "stale_preview_reason": stale_reason_str,
+            "has_superseded_updates": has_superseded,
+            "covered_recently": False,
+            "repeat_reason": None,
             "sources": sources,
             "source_count": len(sources),
+            "max_source_trust": round(max_source_trust, 2),
+            "max_importance_hint": round(max_importance, 3),
+            "all_dates_missing": all_dates_missing,
             "urls": urls,
             "article_count": len(c),
             "newest_timestamp": newest_ts,
@@ -330,18 +587,71 @@ def cluster_articles(
                     "published_at": a.get("published_at"),
                     "text_summary": a.get("text_summary", ""),
                     "full_text": a.get("full_text", a.get("text_summary", "")),
+                    "language": a.get("language", "en"),
+                    "category_hint": a.get("category_hint"),
+                    "importance_hint": a.get("importance_hint"),
+                    "feed_position": a.get("feed_position"),
+                    "source_trust": a.get("source_trust"),
+                    "date_confidence": a.get("date_confidence"),
+                    "raw_tags": a.get("raw_tags", []),
                     "is_opinion": a.get("is_opinion", False),
                     "opinion_reason": a.get("opinion_reason"),
                     "is_stale_preview": a.get("is_stale_preview", False),
                     "stale_preview_reason": a.get("stale_preview_reason"),
+                    "superseded": sup_flag,
                 }
-                for a in c
+                for a, sup_flag in zip(sorted_members, superseded_flags)
             ],
         })
 
-    # 4. Rank clusters: more outlets first, then recency, then topic-variety penalty
-    def cluster_sort_key(c: dict[str, Any]) -> tuple[int, float]:
-        return (c["source_count"], c["newest_timestamp"])
+    # Apply 48-hour cross-day deduplication memory before ranking
+    if prior_stories:
+        for cand in formatted_clusters:
+            cand_urls = set(cand.get("urls", []))
+            for prior in prior_stories:
+                prior_urls = set(prior.get("source_urls", []))
+                prior_art = prior.get("pseudo_article") or {
+                    "title": prior.get("title", ""),
+                    "text_summary": prior.get("narration", ""),
+                    "full_text": prior.get("narration", ""),
+                }
+                url_match = bool(cand_urls & prior_urls)
+                sim_match = any(
+                    articles_are_similar(
+                        art,
+                        prior_art,
+                        title_ratio,
+                        token_overlap,
+                        entity_aliases=entity_aliases,
+                        ref_year=ref_year,
+                    )
+                    for art in cand.get("articles", [])
+                )
+                if url_match or sim_match:
+                    approved_ts = float(prior.get("approved_ts", 0.0) or 0.0)
+                    prior_nums = set(prior.get("numbers", []))
+                    has_new_post_approval_update = False
+                    if approved_ts > 0.0:
+                        for art in cand.get("articles", []):
+                            art_ts = parse_timestamp(art.get("published_at"))
+                            if art_ts > approved_ts:
+                                art_nums = extract_spine_numbers(
+                                    f"{art.get('title', '')} {art.get('full_text', '')}",
+                                    exclude_years={ref_year},
+                                )
+                                if art_nums - prior_nums:
+                                    has_new_post_approval_update = True
+                                    break
+                    if not has_new_post_approval_update:
+                        cand["covered_recently"] = True
+                        cand["repeat_reason"] = (
+                            f"Covered on {prior.get('run_date', 'recent run')}: {prior.get('title', '')}"
+                        )
+                    break
+
+    # 4. Rank clusters: more outlets first, then importance/trust/recency, then topic-variety & repeat penalty
+    def cluster_sort_key(c: dict[str, Any]) -> tuple[int, float, float, float]:
+        return (c["source_count"], c["max_importance_hint"], c["max_source_trust"], c["newest_timestamp"])
 
     initial_sorted = sorted(formatted_clusters, key=cluster_sort_key, reverse=True)
 
@@ -357,7 +667,17 @@ def cluster_articles(
             cat = cand["category_guess"]
             cat_count = category_counts.get(cat, 0)
             recency_normalized = cand["newest_timestamp"] / 1e9 if cand["newest_timestamp"] else 0.0
-            score = (cand["source_count"] * 1000.0) + recency_normalized - (cat_count * 150.0)
+            missing_penalty = 50.0 if cand.get("all_dates_missing") else 0.0
+            cross_day_adj = -abs(repeat_penalty) if cand.get("covered_recently") else 0.0
+            score = (
+                (cand["source_count"] * 1000.0)
+                + (cand.get("max_importance_hint", 0.0) * 80.0)
+                + (cand.get("max_source_trust", 0.70) * 40.0)
+                + recency_normalized
+                - missing_penalty
+                - (cat_count * 150.0)
+                + cross_day_adj
+            )
             if score > best_score:
                 best_score = score
                 best_cand = cand

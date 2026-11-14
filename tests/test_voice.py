@@ -371,3 +371,129 @@ def test_voice_agent_run_approval_fingerprint_gate(tmp_path):
         agent.run(manifest)
 
 
+def test_longest_first_pronunciation_replacement():
+    """Longer multi-word pronunciation entries match before shorter substrings."""
+    pronunciations = {
+        "Rai": "Rye",
+        "Sarita Rai": "Sa-ree-ta Rye",
+    }
+    cleaned = clean_narration_text("Reporter Sarita Rai spoke with Mr. Rai today.", pronunciations)
+    assert "Sa-ree-ta Rye" in cleaned
+    assert "Mr. Rye" in cleaned
+
+
+def test_assemble_scene_audio_resamples_mismatched_rate(tmp_path: Path):
+    """assemble_scene_audio converts WAVs whose sample rate differs from target_sample_rate."""
+    fake_24k = FakeTTS(sample_rate=24000, words_per_sec=5.0)
+    s1 = tmp_path / "s_24k.wav"
+    fake_24k.synthesize_batch([{"id": "s1", "text": "Five words for timing check.", "out_path": str(s1)}], {})
+    dur_in = read_wav_info(s1)["duration_sec"]
+
+    out = tmp_path / "scene_44k.wav"
+    dur_out = assemble_scene_audio([s1], out, pad_before=0.2, pad_after=0.3, target_sample_rate=44100)
+    info_out = read_wav_info(out)
+    assert info_out["sample_rate"] == 44100
+    assert info_out["channels"] == 1
+    assert abs(dur_out - (dur_in + 0.5)) < 0.08
+
+
+def test_scene_content_hash_cache_hit_and_invalidation(mock_run_dir: Path, monkeypatch):
+    """Unchanged scenes reuse cached WAVs; modified narration invalidates only that scene."""
+    from src.utils import tts as tts_mod
+
+    synth_calls: list[list[str]] = []
+    orig_fake = FakeTTS()
+
+    class SpyFakeTTS(FakeTTS):
+        def synthesize_batch(self, items, settings):
+            synth_calls.append([it["id"] for it in items])
+            res = orig_fake.synthesize_batch(items, settings)
+            res["reference_f0_hz"] = 216.0
+            return res
+
+    monkeypatch.setattr(tts_mod, "get_tts_engine", lambda name, cfg=None: SpyFakeTTS())
+    import src.agents.voice as voice_mod
+    monkeypatch.setattr(voice_mod, "get_tts_engine", lambda name, cfg=None: SpyFakeTTS())
+
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={"stages": [{"id": "voice", "engine": "fake", "target_lufs": -16.0}]},
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    agent.run(manifest, engine_override="fake")
+    assert len(synth_calls) == 1
+    first_count = len(synth_calls[0])
+    assert first_count > 1
+
+    # Verify reference_f0_hz & top-level loudness propagated to voice_report.json
+    rep = json.loads((mock_run_dir / "audio" / "voice_report.json").read_text(encoding="utf-8"))
+    assert rep["speaker_consistency"]["reference_f0_hz"] == 216.0
+    assert rep["loudness_after_lufs"] is not None
+    assert rep["true_peak_after_db"] is not None
+
+    # Second run without script changes should hit cache for all scenes (0 synthesis calls)
+    agent.run(manifest, engine_override="fake")
+    assert len(synth_calls) == 1
+
+    # Edit only one scene -> only that single scene is re-synthesized
+    script_file = mock_run_dir / "script" / "script.json"
+    script_data = json.loads(script_file.read_text(encoding="utf-8"))
+    edited_id = script_data["scenes"][0]["id"]
+    script_data["scenes"][0]["narration"] += " Extra breaking update."
+    script_file.write_text(json.dumps(script_data, indent=2), encoding="utf-8")
+
+    agent.run(manifest, engine_override="fake")
+    assert len(synth_calls) == 2
+    assert synth_calls[1] == [edited_id]
+
+
+def test_ming_engine_daemon_and_fallback(tmp_path: Path):
+    """MingEngine uses persistent HTTP daemon when reachable and falls back cleanly if unreachable."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+    from src.utils.tts import MingEngine
+
+    received = []
+
+    class MockHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            received.append(body)
+            resp = json.dumps({"status": "success", "model_load_time_sec": 0.0, "results": []}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        def log_message(self, *args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), MockHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        eng = MingEngine(
+            python_path=tmp_path / "missing_python.exe",
+            daemon_url=f"http://127.0.0.1:{port}",
+        )
+        res = eng.synthesize_batch([{"id": "s1", "text": "Hello.", "out_path": str(tmp_path / "s1.wav")}], {})
+        assert res["status"] == "success"
+        assert len(received) == 1
+        assert received[0]["crossfade_ms"] == 12.0
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # When daemon is down, it falls back to subprocess path (which raises FileNotFoundError for missing python)
+    eng_down = MingEngine(
+        python_path=tmp_path / "missing_python.exe",
+        daemon_url=f"http://127.0.0.1:{port}",
+    )
+    with pytest.raises(FileNotFoundError):
+        eng_down.synthesize_batch([{"id": "s1", "text": "Hello.", "out_path": str(tmp_path / "s1.wav")}], {})
+
+
+

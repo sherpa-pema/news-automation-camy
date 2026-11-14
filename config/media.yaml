@@ -16,6 +16,7 @@ settings:
   query_max_repeat: 2 # Limit shots from same query to 2 per run
   max_maps_per_run: 1 # Allow at most one map/diagram style still per run
   max_total_media_size_mb: 500
+  internet_search: false # 100% manual per run: stop pulling media from internet APIs
   cache_dir: "data/media_cache"
   cache_ttl_hours: 24
   cache_max_gb: 5.0
@@ -43,13 +44,13 @@ file_types:
 # Sources Configuration and Priority
 sources:
   local_library:
-    enabled: true
+    enabled: false
     priority: 1
     path: "data/media_library"
     requires_key: false
 
   wikimedia_commons:
-    enabled: true
+    enabled: false
     priority: 2
     endpoint: "https://commons.wikimedia.org/w/api.php"
     requires_key: false
@@ -74,7 +75,7 @@ sources:
     rate_limit_per_hour: 50
 
   openverse:
-    enabled: true
+    enabled: false
     priority: 5
     token_env: "OPENVERSE_TOKEN" # Optional token raises rate limits
     requires_key: false
@@ -82,7 +83,7 @@ sources:
     rate_limit_per_minute: 60
 
   nasa:
-    enabled: true
+    enabled: false
     priority: 6
     requires_key: false
     endpoint: "https://images-api.nasa.gov/search"

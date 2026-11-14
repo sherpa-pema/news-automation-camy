@@ -3,6 +3,74 @@ from typing import Any
 from src.utils.media_models import PlannedScene, PlannedShot
 
 
+def estimate_timeline_scenes_from_script(
+    script_scenes: list[dict[str, Any]],
+    words_per_second: float = 2.5,
+    min_scene_sec: float = 4.0,
+) -> list[dict[str, Any]]:
+    """Builds provisional timeline-like scenes from script.json when audio timeline.json is not yet available.
+
+    Estimates scene and sentence start/end timestamps based on narration word counts
+    or estimated_duration_sec, enabling provisional shot planning for visual candidate discovery.
+    """
+    from src.agents.voice import split_into_sentences
+
+    estimated_scenes: list[dict[str, Any]] = []
+    current_time = 0.0
+
+    for sc in script_scenes:
+        sc_id = sc.get("id", "scene_00")
+        narration = sc.get("narration", "").strip()
+
+        # Determine estimated duration
+        raw_dur = sc.get("estimated_duration_sec")
+        if raw_dur is not None and float(raw_dur) > 0:
+            scene_duration = round(float(raw_dur), 3)
+        else:
+            w_count = max(1, len(narration.split()))
+            scene_duration = max(min_scene_sec, round(w_count / words_per_second, 3))
+
+        scene_start = round(current_time, 3)
+        scene_end = round(scene_start + scene_duration, 3)
+        current_time = scene_end
+
+        # Split narration into sentences and assign proportional timestamps
+        sentences_text = split_into_sentences(narration) if narration else [sc.get("headline", sc_id)]
+        if not sentences_text:
+            sentences_text = [sc.get("headline", sc_id)]
+
+        sentence_word_counts = [max(1, len(s.split())) for s in sentences_text]
+        total_words = sum(sentence_word_counts)
+
+        sentences: list[dict[str, Any]] = []
+        sent_curr = scene_start
+        for idx, s_text in enumerate(sentences_text):
+            if idx == len(sentences_text) - 1:
+                s_end = scene_end
+            else:
+                ratio = sentence_word_counts[idx] / total_words
+                s_dur = round(scene_duration * ratio, 3)
+                s_end = round(sent_curr + s_dur, 3)
+                s_end = min(s_end, round(scene_end - 0.1, 3))
+
+            sentences.append({
+                "text": s_text,
+                "start": round(sent_curr, 3),
+                "end": round(s_end, 3),
+            })
+            sent_curr = s_end
+
+        estimated_scenes.append({
+            "id": sc_id,
+            "start": scene_start,
+            "end": scene_end,
+            "duration": scene_duration,
+            "sentences": sentences,
+        })
+
+    return estimated_scenes
+
+
 def plan_shots_for_scenes(
     scenes: list[dict[str, Any]],
     target_duration: float = 7.0,

@@ -752,29 +752,126 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
     .cand-radio-label input {{
       cursor: pointer;
     }}
-    .extra-options {{
-      background: #0B1C33;
-      border: 1px dashed #2E568F;
-      border-radius: 8px;
-      padding: 12px 16px;
+    .manual-options {{
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
+      margin-top: 14px;
     }}
-    .opt-row {{
+    .manual-card {{
+      background: #0D1F38;
+      border: 1px solid #1C3D6E;
+      border-radius: 8px;
+      padding: 12px 16px;
+      transition: border-color 0.2s, background 0.2s;
+    }}
+    .manual-card:hover {{
+      border-color: #3867A6;
+    }}
+    .manual-card.active {{
+      border-color: #F5A623;
+      background: #11284A;
+    }}
+    .manual-card-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }}
+    .manual-card-header label {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      color: #FFFFFF;
+    }}
+    .opt-tag {{
+      font-size: 11px;
+      color: #A0B2C6;
+    }}
+    .dropzone-box {{
+      border: 2px dashed #2E568F;
+      border-radius: 6px;
+      padding: 14px;
+      text-align: center;
+      cursor: pointer;
+      background: #091629;
+      transition: all 0.2s ease;
+      color: #DDE7F3;
+      font-size: 13px;
+    }}
+    .dropzone-box:hover, .dropzone-box.drag-over {{
+      border-color: #F5A623;
+      background: #122849;
+    }}
+    .dropzone-box .icon {{
+      font-size: 20px;
+      margin-right: 8px;
+    }}
+    .upload-preview-box {{
       display: flex;
       align-items: center;
       gap: 12px;
-      font-size: 13px;
+      background: #08162B;
+      border: 1px solid #28A745;
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-top: 8px;
     }}
-    .opt-row input[type="text"] {{
+    .upload-preview-box img {{
+      width: 80px;
+      height: 45px;
+      object-fit: cover;
+      border-radius: 4px;
+      background: #000;
+    }}
+    .upload-file-details {{
+      flex: 1;
+      font-size: 12px;
+    }}
+    .upload-file-name {{
+      color: #FFFFFF;
+      font-weight: bold;
+      word-break: break-all;
+    }}
+    .upload-file-status {{
+      color: #28A745;
+      font-size: 11px;
+      font-weight: 600;
+      margin-top: 2px;
+    }}
+    .text-row {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }}
+    .text-row input[type="text"] {{
       flex: 1;
       background: #142848;
       border: 1px solid #2B5086;
       color: #FFFFFF;
-      padding: 6px 10px;
+      padding: 8px 12px;
       border-radius: 4px;
       font-size: 13px;
+    }}
+    .text-row input[type="text"]:focus {{
+      outline: none;
+      border-color: #F5A623;
+    }}
+    .btn-sm {{
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .badge-default {{
+      background: #1C3559;
+      color: #F5A623;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      border: 1px solid #F5A623;
     }}
     .badge-auto {{
       background: #28A745;
@@ -794,10 +891,13 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
     <div class="top-bar-inner">
       <div class="title-area">
         <h1>Media Review & Shot Picker</h1>
-        <div class="sub">Run Date: {html.escape(date_str)} | Double-click self-contained review</div>
+        <div class="sub">Run Date: {html.escape(date_str)} | Manual Visual Assignment Dock</div>
       </div>
       <div class="actions-area">
-        <button class="btn" onclick="copyChoices()">📋 Copy My Choices</button>
+        <button class="btn" id="btnApplyOffice" onclick="applyPicksToOffice()" style="background:#28A745;color:#FFFFFF">✅ Apply Picks & Render Video</button>
+        <button class="btn btn-sec" onclick="fillCardsWithTopClips()">✨ Auto-Pick Top Clips</button>
+        <button class="btn btn-sec" onclick="setAllGraphicCards()">🎨 Set All to Graphic Cards</button>
+        <button class="btn btn-sec" onclick="copyChoices()">📋 Copy Choices</button>
         <button class="btn btn-sec" onclick="downloadPicks()">💾 Download picks.json</button>
       </div>
     </div>
@@ -839,18 +939,22 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
         <div class="candidates-grid">
 """
             candidates = sh.get("candidates", [])
-            for cand in candidates:
-                c_id = cand.get("id")
-                score = float(cand.get("score", 0.0))
-                is_auto = (c_id == auto_id and auto_type == "clip")
-                auto_badge = '<span class="badge-auto">AUTO PICK</span>' if is_auto else ""
-                score_cls = "high" if score >= 0.5 else ""
-                tokens = cand.get("matched_tokens", [])
-                tokens_html = "".join(f'<span class="token-pill">{html.escape(t)}</span>' for t in tokens)
-                dur_text = f"{cand.get('duration'):.1f}s" if cand.get("duration") else "Still"
-                dim_text = f"{cand.get('width', 0)}x{cand.get('height', 0)}"
+            if candidates:
+                html_content += """
+        <div class="candidates-grid">
+"""
+                for cand in candidates:
+                    c_id = cand.get("id")
+                    score = float(cand.get("score", 0.0))
+                    is_auto = (c_id == auto_id and auto_type == "clip")
+                    auto_badge = '<span class="badge-auto">AUTO PICK</span>' if is_auto else ""
+                    score_cls = "high" if score >= 0.5 else ""
+                    tokens = cand.get("matched_tokens", [])
+                    tokens_html = "".join(f'<span class="token-pill">{html.escape(t)}</span>' for t in tokens)
+                    dur_text = f"{cand.get('duration'):.1f}s" if cand.get("duration") else "Still"
+                    dim_text = f"{cand.get('width', 0)}x{cand.get('height', 0)}"
 
-                html_content += f"""
+                    html_content += f"""
           <div class="cand-item {'auto-picked' if is_auto else ''}" id="cand_{sh_id}_{c_id}">
             <div class="cand-thumb-wrap">
               <img src="{cand.get('thumb', '')}" alt="{html.escape(cand.get('title', ''))}" onerror="this.style.display='none'">
@@ -871,33 +975,80 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
             </div>
           </div>
 """
-
-            # Extra options
-            default_card_text = headline
-            is_auto_card = (auto_type == "card")
-            card_badge = '<span class="badge-auto">AUTO PROPOSAL (Below 0.5)</span>' if is_auto_card else ""
-
-            html_content += f"""
+                html_content += """
         </div> <!-- end candidates-grid -->
+"""
 
-        <div class="extra-options">
-          <div class="opt-row">
-            <label style="cursor: pointer; min-width: 130px; font-weight: bold;">
-              <input type="radio" name="pick_{sh_id}" value="card" onchange="updateChoices()"> Graphic card {card_badge}
-            </label>
-            <input type="text" id="card_text_{sh_id}" value="{html.escape(default_card_text)}" placeholder="Card display headline..." oninput="updateChoices()">
+            default_card_text = headline
+            html_content += f"""
+        <div class="manual-options">
+          <!-- 1. Upload Video or Image -->
+          <div class="manual-card" id="card_opt_upload_{sh_id}">
+            <div class="manual-card-header">
+              <label>
+                <input type="radio" name="pick_{sh_id}" value="upload" id="radio_upload_{sh_id}" onchange="updateChoices()">
+                <span>📁 Upload Video or Image</span>
+              </label>
+              <span class="opt-tag">MP4, MOV, MKV, JPG, PNG, WEBP</span>
+            </div>
+            <div class="dropzone-box" id="dropzone_{sh_id}" onclick="document.getElementById('file_input_{sh_id}').click()">
+              <input type="file" id="file_input_{sh_id}" accept="video/*,image/*" style="display:none;" onchange="handleFileUpload('{sh_id}', this.files[0])">
+              <span class="icon">📤</span>
+              <span id="drop_text_{sh_id}">Click to browse file or drag & drop here</span>
+            </div>
+            <div id="upload_preview_{sh_id}" class="upload-preview-box" style="display:none;">
+              <img id="upload_img_{sh_id}" src="" alt="Thumbnail" onerror="this.style.display='none'">
+              <div class="upload-file-details">
+                <div class="upload-file-name" id="upload_name_{sh_id}"></div>
+                <div class="upload-file-status" id="upload_status_{sh_id}">✅ Selected for this shot</div>
+              </div>
+              <button type="button" class="btn btn-sec btn-sm" onclick="clearUpload('{sh_id}')" title="Clear upload">✕</button>
+            </div>
+            <input type="hidden" id="upload_path_{sh_id}" value="">
           </div>
-          <div class="opt-row">
-            <label style="cursor: pointer; min-width: 130px;">
-              <input type="radio" name="pick_{sh_id}" value="own_file" onchange="updateChoices()"> My own file:
-            </label>
-            <input type="text" id="own_file_{sh_id}" placeholder="Full path to local footage, e.g. C:/videos/clip.mp4" oninput="updateChoices()">
+
+          <!-- 2. Direct Web Link (URL) -->
+          <div class="manual-card" id="card_opt_link_{sh_id}">
+            <div class="manual-card-header">
+              <label>
+                <input type="radio" name="pick_{sh_id}" value="link" id="radio_link_{sh_id}" onchange="updateChoices()">
+                <span>🔗 Direct Web Link (URL)</span>
+              </label>
+              <span class="opt-tag">Direct link to MP4 or Image</span>
+            </div>
+            <div class="text-row">
+              <input type="text" id="link_url_{sh_id}" placeholder="https://example.com/footage.mp4" oninput="handleLinkInput('{sh_id}')" onchange="updateChoices()">
+              <button type="button" class="btn btn-sec btn-sm" onclick="validateLink('{sh_id}')">Verify</button>
+              <span id="link_status_{sh_id}" style="font-size:12px;"></span>
+            </div>
           </div>
-          <div class="opt-row">
-            <label style="cursor: pointer; min-width: 130px;">
-              <input type="radio" name="pick_{sh_id}" value="research" onchange="updateChoices()"> Search again:
-            </label>
-            <input type="text" id="query_{sh_id}" placeholder="New search query keywords..." oninput="updateChoices()">
+
+          <!-- 3. Branded Graphic Card -->
+          <div class="manual-card" id="card_opt_card_{sh_id}">
+            <div class="manual-card-header">
+              <label>
+                <input type="radio" name="pick_{sh_id}" value="card" id="radio_card_{sh_id}" onchange="updateChoices()">
+                <span>🎨 Branded 1080p Headline Card</span>
+              </label>
+              <span class="badge-default">DEFAULT</span>
+            </div>
+            <div class="text-row">
+              <input type="text" id="card_text_{sh_id}" value="{html.escape(default_card_text)}" placeholder="Headline text to display on graphic card..." oninput="handleCardInput('{sh_id}')" onchange="updateChoices()">
+            </div>
+          </div>
+
+          <!-- 4. Local File Path on Disk -->
+          <div class="manual-card" id="card_opt_own_{sh_id}">
+            <div class="manual-card-header">
+              <label>
+                <input type="radio" name="pick_{sh_id}" value="own_file" id="radio_own_{sh_id}" onchange="updateChoices()">
+                <span>💻 File Path on Disk</span>
+              </label>
+              <span class="opt-tag">Local file path</span>
+            </div>
+            <div class="text-row">
+              <input type="text" id="own_file_{sh_id}" placeholder="C:/path/to/local_footage.mp4" oninput="handleOwnFileInput('{sh_id}')" onchange="updateChoices()">
+            </div>
           </div>
         </div>
 
@@ -915,6 +1066,8 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
     const STORAGE_KEY = "media_picks_" + RUN_DATE;
 
     function initPage() {{
+      initDropzones();
+
       let saved = null;
       try {{
         const raw = localStorage.getItem(STORAGE_KEY);
@@ -923,7 +1076,6 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
         console.warn("localStorage read blocked or unavailable", e);
       }}
 
-      // Set initial radio selections
       CANDIDATES_DATA.shots.forEach(sh => {{
         const shId = sh.shot_id;
         const radios = document.getElementsByName("pick_" + shId);
@@ -931,7 +1083,25 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
 
         if (saved && saved.picks && saved.picks[shId]) {{
           const p = saved.picks[shId];
-          if (p.action === "pick") {{
+          if (p.action === "upload") {{
+            for (let r of radios) if (r.value === "upload") r.checked = true;
+            const input = document.getElementById("upload_path_" + shId);
+            if (input && p.file_path) {{
+              input.value = p.file_path;
+              const prevBox = document.getElementById("upload_preview_" + shId);
+              const uploadName = document.getElementById("upload_name_" + shId);
+              const dropText = document.getElementById("drop_text_" + shId);
+              if (prevBox) prevBox.style.display = "flex";
+              if (uploadName) uploadName.textContent = p.file_path.split("/").pop();
+              if (dropText) dropText.textContent = "✅ File selected. Click to replace.";
+            }}
+            applied = true;
+          }} else if (p.action === "link") {{
+            for (let r of radios) if (r.value === "link") r.checked = true;
+            const input = document.getElementById("link_url_" + shId);
+            if (input && p.url) input.value = p.url;
+            applied = true;
+          }} else if (p.action === "pick") {{
             for (let r of radios) {{
               if (r.value === "pick" && r.dataset.candId === p.candidate_id) {{
                 r.checked = true;
@@ -949,31 +1119,207 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
             const input = document.getElementById("own_file_" + shId);
             if (input && p.file_path) input.value = p.file_path;
             applied = true;
-          }} else if (p.action === "research") {{
-            for (let r of radios) if (r.value === "research") r.checked = true;
-            const input = document.getElementById("query_" + shId);
-            if (input && p.query) input.value = p.query;
-            applied = true;
           }}
         }}
 
         if (!applied) {{
-          // Default to auto-pick
+          // Default: if clip candidate is auto-selected, use it; otherwise default to card
           if (sh.auto_pick_type === "clip" && sh.auto_pick_id) {{
             for (let r of radios) {{
               if (r.value === "pick" && r.dataset.candId === sh.auto_pick_id) {{
                 r.checked = true;
+                applied = true;
                 break;
               }}
             }}
-          }} else {{
-            // Default to card
+          }}
+          if (!applied) {{
             for (let r of radios) if (r.value === "card") r.checked = true;
           }}
         }}
       }});
 
       updateChoices();
+    }}
+
+    function initDropzones() {{
+      CANDIDATES_DATA.shots.forEach(sh => {{
+        const shId = sh.shot_id;
+        const dz = document.getElementById("dropzone_" + shId);
+        if (!dz) return;
+        dz.addEventListener("dragover", (e) => {{
+          e.preventDefault();
+          dz.classList.add("drag-over");
+        }});
+        dz.addEventListener("dragleave", (e) => {{
+          e.preventDefault();
+          dz.classList.remove("drag-over");
+        }});
+        dz.addEventListener("drop", (e) => {{
+          e.preventDefault();
+          dz.classList.remove("drag-over");
+          if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {{
+            handleFileUpload(shId, e.dataTransfer.files[0]);
+          }}
+        }});
+      }});
+    }}
+
+    async function handleFileUpload(shId, file) {{
+      if (!file) return;
+      const dropText = document.getElementById("drop_text_" + shId);
+      const prevBox = document.getElementById("upload_preview_" + shId);
+      const uploadImg = document.getElementById("upload_img_" + shId);
+      const uploadName = document.getElementById("upload_name_" + shId);
+      const uploadPath = document.getElementById("upload_path_" + shId);
+      const radioUpload = document.getElementById("radio_upload_" + shId);
+
+      if (window.location.protocol.startsWith("http")) {{
+        if (dropText) dropText.textContent = "⏳ Uploading " + file.name + "...";
+        try {{
+          const fd = new FormData();
+          fd.append("shot_id", shId);
+          fd.append("file", file);
+          const res = await fetch("/api/runs/" + encodeURIComponent(RUN_DATE) + "/upload-media", {{
+            method: "POST",
+            body: fd
+          }});
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || ("HTTP " + res.status));
+
+          uploadPath.value = data.file_path;
+          uploadName.textContent = file.name + (data.kind ? " (" + data.kind.toUpperCase() + ")" : "");
+          if (data.thumb_url) {{
+            uploadImg.src = data.thumb_url;
+            uploadImg.style.display = "block";
+          }} else {{
+            uploadImg.style.display = "none";
+          }}
+          if (prevBox) prevBox.style.display = "flex";
+          if (dropText) dropText.textContent = "✅ File uploaded! Click to replace.";
+          if (radioUpload) radioUpload.checked = true;
+          updateChoices();
+        }} catch (err) {{
+          alert("Upload failed: " + err.message);
+          if (dropText) dropText.textContent = "❌ Upload failed. Click to try again.";
+        }}
+      }} else {{
+        // Local file:/// mode
+        uploadPath.value = file.name;
+        uploadName.textContent = file.name;
+        if (prevBox) prevBox.style.display = "flex";
+        if (dropText) dropText.textContent = "✅ File selected (" + file.name + "). Ensure it is in run folder.";
+        if (radioUpload) radioUpload.checked = true;
+        updateChoices();
+      }}
+    }}
+
+    function clearUpload(shId) {{
+      const uploadPath = document.getElementById("upload_path_" + shId);
+      const prevBox = document.getElementById("upload_preview_" + shId);
+      const dropText = document.getElementById("drop_text_" + shId);
+      const fileInput = document.getElementById("file_input_" + shId);
+      if (uploadPath) uploadPath.value = "";
+      if (prevBox) prevBox.style.display = "none";
+      if (dropText) dropText.textContent = "Click to browse file or drag & drop here";
+      if (fileInput) fileInput.value = "";
+      const radioCard = document.getElementById("radio_card_" + shId);
+      if (radioCard) radioCard.checked = true;
+      updateChoices();
+    }}
+
+    async function validateLink(shId) {{
+      const linkInput = document.getElementById("link_url_" + shId);
+      const statusEl = document.getElementById("link_status_" + shId);
+      const url = (linkInput ? linkInput.value : "").trim();
+      if (!url) {{
+        if (statusEl) statusEl.innerHTML = "<span style='color:#E06C75;'>Please enter a URL.</span>";
+        return;
+      }}
+      if (statusEl) statusEl.innerHTML = "⏳ Validating...";
+      if (window.location.protocol.startsWith("http")) {{
+        try {{
+          const res = await fetch("/api/runs/" + encodeURIComponent(RUN_DATE) + "/validate-media-link", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ url: url }})
+          }});
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || ("HTTP " + res.status));
+          statusEl.innerHTML = "<span style='color:#28A745;'>✅ Domain allowed (" + data.domain + ")</span>";
+          const radioLink = document.getElementById("radio_link_" + shId);
+          if (radioLink) radioLink.checked = true;
+          updateChoices();
+        }} catch (e) {{
+          statusEl.innerHTML = "<span style='color:#E06C75;'>❌ " + e.message + "</span>";
+        }}
+      }} else {{
+        if (url.startsWith("http://") || url.startsWith("https://")) {{
+          statusEl.innerHTML = "<span style='color:#28A745;'>✅ URL format OK</span>";
+          const radioLink = document.getElementById("radio_link_" + shId);
+          if (radioLink) radioLink.checked = true;
+          updateChoices();
+        }} else {{
+          statusEl.innerHTML = "<span style='color:#E06C75;'>❌ Must start with http:// or https://</span>";
+        }}
+      }}
+    }}
+
+    function handleLinkInput(shId) {{
+      const input = document.getElementById("link_url_" + shId);
+      if (input && input.value.trim().length > 0) {{
+        const r = document.getElementById("radio_link_" + shId);
+        if (r) r.checked = true;
+      }}
+      updateChoices();
+    }}
+
+    function handleCardInput(shId) {{
+      const r = document.getElementById("radio_card_" + shId);
+      if (r) r.checked = true;
+      updateChoices();
+    }}
+
+    function handleOwnFileInput(shId) {{
+      const input = document.getElementById("own_file_" + shId);
+      if (input && input.value.trim().length > 0) {{
+        const r = document.getElementById("radio_own_" + shId);
+        if (r) r.checked = true;
+      }}
+      updateChoices();
+    }}
+
+    function fillCardsWithTopClips() {{
+      let switched = 0;
+      CANDIDATES_DATA.shots.forEach(sh => {{
+        const shId = sh.shot_id;
+        const radios = document.getElementsByName("pick_" + shId);
+        let curAction = "card";
+        for (let r of radios) if (r.checked) curAction = r.value;
+        if (curAction === "card") {{
+          for (let r of radios) {{
+            if (r.value === "pick") {{
+              r.checked = true;
+              switched++;
+              break;
+            }}
+          }}
+        }}
+      }});
+      updateChoices();
+      const statusEl = document.getElementById("summary-status");
+      statusEl.innerHTML += ` — Switched ${{switched}} card(s) to top candidate clip.`;
+    }}
+
+    function setAllGraphicCards() {{
+      CANDIDATES_DATA.shots.forEach(sh => {{
+        const shId = sh.shot_id;
+        const radioCard = document.getElementById("radio_card_" + shId);
+        if (radioCard) radioCard.checked = true;
+      }});
+      updateChoices();
+      const statusEl = document.getElementById("summary-status");
+      statusEl.innerHTML += " — Set all shots to 1080p Graphic Cards.";
     }}
 
     function getPicksPayload() {{
@@ -992,16 +1338,24 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
           }}
         }}
 
-        if (selectedAction === "pick" && chosenRadio) {{
+        if (selectedAction === "upload") {{
+          const path = document.getElementById("upload_path_" + shId)?.value || "";
           picks[shId] = {{
-            action: "pick",
+            action: "upload",
             scene_id: sh.scene_id,
             shot_index: sh.shot_index,
-            candidate_id: chosenRadio.dataset.candId,
-            source: chosenRadio.dataset.source
+            file_path: path
+          }};
+        }} else if (selectedAction === "link") {{
+          const url = document.getElementById("link_url_" + shId)?.value || "";
+          picks[shId] = {{
+            action: "link",
+            scene_id: sh.scene_id,
+            shot_index: sh.shot_index,
+            url: url
           }};
         }} else if (selectedAction === "card") {{
-          const txt = document.getElementById("card_text_" + shId).value || sh.scene_headline;
+          const txt = document.getElementById("card_text_" + shId)?.value || sh.scene_headline;
           picks[shId] = {{
             action: "card",
             scene_id: sh.scene_id,
@@ -1009,20 +1363,20 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
             card_text: txt
           }};
         }} else if (selectedAction === "own_file") {{
-          const path = document.getElementById("own_file_" + shId).value || "";
+          const path = document.getElementById("own_file_" + shId)?.value || "";
           picks[shId] = {{
             action: "own_file",
             scene_id: sh.scene_id,
             shot_index: sh.shot_index,
             file_path: path
           }};
-        }} else if (selectedAction === "research") {{
-          const q = document.getElementById("query_" + shId).value || "";
+        }} else if (selectedAction === "pick" && chosenRadio) {{
           picks[shId] = {{
-            action: "research",
+            action: "pick",
             scene_id: sh.scene_id,
             shot_index: sh.shot_index,
-            query: q
+            candidate_id: chosenRadio.dataset.candId,
+            source: chosenRadio.dataset.source
           }};
         }}
       }});
@@ -1036,16 +1390,29 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
 
     function updateChoices() {{
       const payload = getPicksPayload();
-      let clips = 0, cards = 0, own = 0, research = 0;
+      let uploads = 0, links = 0, cards = 0, own = 0, clips = 0;
 
       for (let shId in payload.picks) {{
         const act = payload.picks[shId].action;
-        if (act === "pick") clips++;
+        if (act === "upload") uploads++;
+        else if (act === "link") links++;
         else if (act === "card") cards++;
         else if (act === "own_file") own++;
-        else if (act === "research") research++;
+        else if (act === "pick") clips++;
 
-        // Update selected card styling
+        // Highlight selected manual option card
+        ["upload", "link", "card", "own"].forEach(opt => {{
+          const optEl = document.getElementById("card_opt_" + opt + "_" + shId);
+          if (optEl) {{
+            if (act === opt || (opt === "own" && act === "own_file")) {{
+              optEl.classList.add("active");
+            }} else {{
+              optEl.classList.remove("active");
+            }}
+          }}
+        }});
+
+        // Highlight candidate item if picked
         const items = document.querySelectorAll(`[id^="cand_${{shId}}_"]`);
         items.forEach(it => it.classList.remove("selected"));
         if (act === "pick") {{
@@ -1060,23 +1427,24 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
       }} catch (e) {{}}
 
       const statusEl = document.getElementById("summary-status");
-      statusEl.innerHTML = `Current choices: <strong>${{clips}}</strong> clips, <strong>${{cards}}</strong> graphic cards, <strong>${{own}}</strong> own files, <strong>${{research}}</strong> re-searches. (Saved locally)`;
+      statusEl.innerHTML = `Current choices: <strong>${{uploads}}</strong> uploads, <strong>${{links}}</strong> web links, <strong>${{cards}}</strong> graphic cards, <strong>${{own}}</strong> local paths${{clips > 0 ? ', <strong>' + clips + '</strong> clips' : ''}}. (Saved locally)`;
     }}
 
     function copyChoices() {{
       const payload = getPicksPayload();
       const compactJson = JSON.stringify(payload, null, 2);
 
-      let clips = 0, cards = 0, own = 0, research = 0;
+      let uploads = 0, links = 0, cards = 0, own = 0, clips = 0;
       for (let k in payload.picks) {{
         const act = payload.picks[k].action;
-        if (act === "pick") clips++;
+        if (act === "upload") uploads++;
+        else if (act === "link") links++;
         else if (act === "card") cards++;
         else if (act === "own_file") own++;
-        else if (act === "research") research++;
+        else if (act === "pick") clips++;
       }}
 
-      const summaryText = `[Picks Summary] Date: ${{RUN_DATE}} | ${{clips}} clips, ${{cards}} cards, ${{own}} own files, ${{research}} re-searches.`;
+      const summaryText = `[Picks Summary] Date: ${{RUN_DATE}} | ${{uploads}} uploads, ${{links}} links, ${{cards}} cards, ${{own}} local files.`;
 
       navigator.clipboard.writeText(compactJson).then(() => {{
         const statusEl = document.getElementById("summary-status");
@@ -1100,7 +1468,50 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
       URL.revokeObjectURL(url);
     }}
 
-    window.addEventListener("DOMContentLoaded", initPage);
+    async function applyPicksToOffice() {{
+      const statusEl = document.getElementById("summary-status");
+      if (!window.location.protocol.startsWith("http")) {{
+        statusEl.innerHTML = "⚠ Opened as local file — use <strong>Open Visual Picker</strong> inside Boss Office, or click <strong>Download picks.json</strong>.";
+        return;
+      }}
+      const btn = document.getElementById("btnApplyOffice");
+      const origText = btn ? btn.textContent : "";
+      if (btn) {{
+        btn.disabled = true;
+        btn.textContent = "⏳ Applying & Starting Render...";
+      }}
+      statusEl.innerHTML = "⏳ Submitting visual picks to 2D Office & queuing render...";
+      try {{
+        const payload = getPicksPayload();
+        const res = await fetch("/api/runs/" + encodeURIComponent(RUN_DATE) + "/apply-picks", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ picks: payload }})
+        }});
+        const data = await res.json();
+        if (!res.ok) {{
+          throw new Error(data.detail || ("HTTP " + res.status));
+        }}
+        statusEl.innerHTML = "✅ <strong>Visual picks submitted!</strong> Rendering & publishing started — watch the 2D Office floorplan.";
+        if (window.parent && window.parent !== window) {{
+          window.parent.postMessage({{ type: "office_picks_submitted", date: RUN_DATE, job_id: data.job_id }}, "*");
+        }}
+      }} catch (err) {{
+        statusEl.innerHTML = "❌ <strong>Failed to apply picks:</strong> " + err.message;
+        if (btn) {{
+          btn.disabled = false;
+          btn.textContent = origText;
+        }}
+      }}
+    }}
+
+    window.addEventListener("DOMContentLoaded", () => {{
+      const btn = document.getElementById("btnApplyOffice");
+      if (btn && !window.location.protocol.startsWith("http")) {{
+        btn.title = "Open via 2D Office server to apply directly";
+      }}
+      initPage();
+    }});
   </script>
 </body>
 </html>
@@ -1108,4 +1519,5 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
 
     output_path.write_text(html_content, encoding="utf-8")
     logger.info(f"Picker HTML generated at {output_path}")
+
 

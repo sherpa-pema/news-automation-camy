@@ -127,17 +127,21 @@ def score_candidate_relevance(
         if cand.people_visible is True or any(pm in cand.tags for pm in person_markers) or any(pm in cand_meta for pm in person_markers):
             return 0.0, []
 
-    # 1. Query tokens
-    query_text = f"{query} {' '.join(visual_keywords)}"
-    raw_query_words = [re.sub(r"[^\w]", "", w.lower()) for w in query_text.split()]
-    query_words = [w for w in raw_query_words if w and w not in STOPWORDS and len(w) > 2]
+    # 1. Query tokens (score against active query and individual visual keywords,
+    # rather than diluting across all visual_keywords concatenated together)
+    def _extract_stems(text: str) -> tuple[dict[str, str], list[str]]:
+        raw_words = [re.sub(r"[^\w]", "", w.lower()) for w in text.split()]
+        words = [w for w in raw_words if w and w not in STOPWORDS and len(w) > 2]
+        stem_map: dict[str, str] = {}
+        for w in words:
+            st = light_stem(w)
+            if st not in stem_map:
+                stem_map[st] = w
+        return stem_map, words
 
-    # Map stem -> raw word (for matched_tokens recording)
-    q_stem_map: dict[str, str] = {}
-    for w in query_words:
-        st = light_stem(w)
-        if st not in q_stem_map:
-            q_stem_map[st] = w
+    active_stem_map, _ = _extract_stems(query)
+    all_kw_text = f"{query} {' '.join(visual_keywords)}"
+    q_stem_map, _ = _extract_stems(all_kw_text)
 
     # Candidate text (title, tags, description)
     cand_desc = cand.extra.get("description", "") if isinstance(cand.extra, dict) else ""
@@ -145,20 +149,43 @@ def score_candidate_relevance(
     raw_cand_words = [re.sub(r"[^\w]", "", w.lower()) for w in cand_text.split()]
     cand_stems = {light_stem(w) for w in raw_cand_words if w and w not in STOPWORDS}
 
-    # Token match share
-    matched_stems = set(q_stem_map.keys()) & cand_stems
-    matched_tokens = sorted(list({q_stem_map[st] for st in matched_stems}))
+    # Token matches recorded for UI pills
+    matched_stems_all = set(q_stem_map.keys()) & cand_stems
+    matched_tokens = sorted(list({q_stem_map[st] for st in matched_stems_all}))
 
-    if q_stem_map:
-        token_share = len(matched_stems) / len(q_stem_map)
+    if active_stem_map:
+        active_share = len(set(active_stem_map.keys()) & cand_stems) / len(active_stem_map)
     else:
-        token_share = 0.5
+        active_share = 0.5 if not q_stem_map else 0.0
+
+    clean_q = query.strip().lower()
+    clean_kws = [kw.strip().lower() for kw in visual_keywords if isinstance(kw, str) and kw.strip()]
+
+    if is_sensitive:
+        # Sensitive queries intentionally use safe atmospheric prompts, not headline keywords
+        token_share = 0.85 * active_share
+    else:
+        best_kw_share = 0.0
+        for kw in clean_kws:
+            kw_map, _ = _extract_stems(kw)
+            if kw_map:
+                s = len(set(kw_map.keys()) & cand_stems) / len(kw_map)
+                if s > best_kw_share:
+                    best_kw_share = s
+
+        if not clean_kws or clean_q in clean_kws:
+            token_share = max(active_share, best_kw_share)
+        else:
+            if len(active_stem_map) == 1:
+                active_weighted = min(0.65, 0.65 * active_share)
+            else:
+                active_weighted = 0.80 * active_share
+            token_share = max(active_weighted, best_kw_share)
 
     score = token_share
 
     # 2. Exact phrase bonus (+0.2)
     has_exact_phrase = False
-    clean_q = query.strip().lower()
     if len(clean_q.split()) >= 2 and clean_q in cand_text:
         has_exact_phrase = True
     else:
@@ -243,6 +270,7 @@ class MediaSelector:
         self.max_maps_per_run: int = int(config.get("settings", {}).get("max_maps_per_run", 1))
 
         # License policy
+        self.internet_search = bool(config.get("settings", {}).get("internet_search", True))
         self.allowed_licenses = set(lic.lower() for lic in config.get("allowed_licenses", []))
         self.allow_cc_by_sa = config.get("settings", {}).get("allow_cc_by_sa", False)
 
@@ -370,7 +398,16 @@ class MediaSelector:
     def build_query_ladder(self, scene: dict[str, Any], is_sensitive: bool) -> list[str]:
         """Constructs ordered query ladder: visual keywords -> simplified nouns -> category default."""
         if is_sensitive:
-            return ["empty road landscape", "monsoon rain window", "city night skyline", "clouds mountain timelapse"]
+            return [
+                "empty road landscape",
+                "monsoon rain window",
+                "city night skyline",
+                "clouds mountain timelapse",
+                "foggy mountain valley",
+                "misty forest morning",
+                "evening city lights",
+                "calm river mist",
+            ]
 
         queries: list[str] = []
         visual_keywords = scene.get("visual_keywords", [])
@@ -435,25 +472,46 @@ class MediaSelector:
     ) -> Generator[tuple[Candidate, str, str], None, None]:
         """Yields valid candidates across prioritized sources and query ladders.
 
-        Allows consumer to try candidate 1, and on failure continue immediately to candidate 2.
+        Rotates leading queries by shot_index so multi-shot scenes receive diverse
+        candidates across shots, and yields a bounded primary slice per source stage
+        before overflow so multiple sources contribute to the candidate pool.
         """
         is_sensitive = self.is_scene_sensitive(scene)
         category = self.detect_category(scene)
         query_ladder = self.build_query_ladder(scene, is_sensitive)
         allow_stills = stills_in_scene < max_stills
 
-        source_stages = [
-            ("local_library", "any"),
-            ("wikimedia_commons", "video"),
-            ("wikimedia_commons", "image" if allow_stills else "video"),
-            ("pixabay", "video"),
-            ("coverr", "video"),
-            ("openverse", "image" if allow_stills else "video"),
-            ("pixabay", "image" if allow_stills else "video"),
-            ("unsplash", "image" if allow_stills else "video"),
-            ("nasa", "any"),
-            ("internet_archive", "video"),
-        ]
+        # Rotate leading queries on subsequent shots of the same scene for variety
+        shot_idx = int(getattr(shot, "shot_index", 0) or 0)
+        if shot_idx > 0 and len(query_ladder) > 1:
+            if is_sensitive:
+                rot = shot_idx % len(query_ladder)
+                query_ladder = query_ladder[rot:] + query_ladder[:rot]
+            else:
+                lead_n = min(len(scene.get("visual_keywords", [])), len(query_ladder))
+                if lead_n > 1:
+                    rot = shot_idx % lead_n
+                    query_ladder = query_ladder[rot:lead_n] + query_ladder[:rot] + query_ladder[lead_n:]
+
+        if not self.internet_search:
+            source_stages = [("local_library", "any")]
+        else:
+            source_stages = [
+                ("local_library", "any"),
+                ("wikimedia_commons", "video"),
+                ("wikimedia_commons", "image" if allow_stills else "video"),
+                ("pixabay", "video"),
+                ("coverr", "video"),
+                ("openverse", "image" if allow_stills else "video"),
+                ("pixabay", "image" if allow_stills else "video"),
+                ("unsplash", "image" if allow_stills else "video"),
+                ("nasa", "any"),
+                ("internet_archive", "video"),
+            ]
+
+        overflow: list[tuple[Candidate, str, str]] = []
+        per_query_primary = 4
+        per_stage_primary = 6
 
         for source_name, prefer_kind in source_stages:
             src = self.sources.get(source_name)
@@ -465,6 +523,7 @@ class MediaSelector:
                 self.metrics[source_name]["skipped"] += 1
                 continue
 
+            stage_emitted = 0
             for query in query_ladder:
                 # Query cap: limit shots from same query to query_max_repeat per run
                 if self.query_usage_counts.get(query, 0) >= self.query_max_repeat:
@@ -486,6 +545,7 @@ class MediaSelector:
 
                 self.metrics[source_name]["candidates"] += len(candidates)
 
+                query_emitted = 0
                 for cand in candidates:
                     # Enforce that Wikimedia matches must be Nepal-specific
                     if source_name == "wikimedia_commons" and not self.is_candidate_nepal_specific(cand):
@@ -506,7 +566,18 @@ class MediaSelector:
                             foreign_places=self.foreign_places,
                             is_sensitive=is_sensitive,
                         )
-                        yield cand, query, source_name
+                        if (
+                            source_name == "local_library"
+                            or (query_emitted < per_query_primary and stage_emitted < per_stage_primary)
+                        ):
+                            query_emitted += 1
+                            stage_emitted += 1
+                            yield cand, query, source_name
+                        else:
+                            overflow.append((cand, query, source_name))
+
+        for item in overflow:
+            yield item
 
     def mark_candidate_used(self, cand: Candidate, query: str, source_name: str) -> None:
         """Records candidate as used, updating query counts and metrics."""

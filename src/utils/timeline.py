@@ -17,154 +17,109 @@ import subprocess
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-
-
-# Weak words that should be avoided at the end of a subtitle line
-WEAK_WORDS = {
-    "a", "an", "the", "of", "to", "in", "and", "but", "for",
-    "on", "at", "by", "with", "from", "as", "or", "into", "onto",
-}
-
-# Basic number map for spoken English expansion in broadcast scripts
-NUMBER_WORDS = {
-    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four",
-    5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine",
-    10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
-    14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen",
-    18: "eighteen", 19: "nineteen", 20: "twenty", 30: "thirty",
-    40: "forty", 50: "fifty", 60: "sixty", 70: "seventy",
-    80: "eighty", 90: "ninety",
-}
-
-
-def number_to_spoken_words(num: int) -> str:
-    """Converts an integer to spoken words (0-9999)."""
-    if num in NUMBER_WORDS:
-        return NUMBER_WORDS[num]
-    if num < 100:
-        tens = (num // 10) * 10
-        units = num % 10
-        return f"{NUMBER_WORDS[tens]} {NUMBER_WORDS[units]}"
-    if 2000 <= num <= 2099:
-        # Years like 2026 -> "twenty twenty six"
-        century = num // 100
-        rem = num % 100
-        century_str = number_to_spoken_words(century)
-        if rem == 0:
-            return f"{century_str} hundred"
-        if rem < 10:
-            return f"{century_str} o {number_to_spoken_words(rem)}"
-        return f"{century_str} {number_to_spoken_words(rem)}"
-    if num < 1000:
-        hundreds = num // 100
-        rem = num % 100
-        h_str = f"{NUMBER_WORDS[hundreds]} hundred"
-        return f"{h_str} {number_to_spoken_words(rem)}" if rem else h_str
-    if num < 10000:
-        thousands = num // 1000
-        rem = num % 1000
-        t_str = f"{NUMBER_WORDS[thousands]} thousand"
-        return f"{t_str} {number_to_spoken_words(rem)}" if rem else t_str
-    return str(num)
-
-
-def expand_digits(word: str, is_date_context: bool = False) -> str:
-    """Expands digits or dates in a word token to spoken English words."""
-    core = re.sub(r"^[^\w]+|[^\w]+$", "", word)
-    if not core:
-        return word
-
-    # Ordinal date forms like "6th"
-    ord_match = re.match(r"^(\d+)(st|nd|rd|th)$", core, re.IGNORECASE)
-    if ord_match:
-        n = int(ord_match.group(1))
-        ord_names = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth"}
-        return ord_names.get(n, f"{number_to_spoken_words(n)}th")
-
-    # If it's a plain number
-    if core.isdigit():
-        n = int(core)
-        # In date context, single digit day like '6' is spoken as 'sixth' or 'six'
-        if is_date_context and 1 <= n <= 31:
-            ord_names = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth",
-                         7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth", 11: "eleventh",
-                         12: "twelfth", 13: "thirteenth", 14: "fourteenth", 15: "fifteenth",
-                         16: "sixteenth", 17: "seventeenth", 18: "eighteenth", 19: "nineteenth",
-                         20: "twentieth", 21: "twenty first", 22: "twenty second", 23: "twenty third",
-                         24: "twenty fourth", 25: "twenty fifth", 26: "twenty sixth", 27: "twenty seventh",
-                         28: "twenty eighth", 29: "twenty ninth", 30: "thirtieth", 31: "thirty first"}
-            return ord_names.get(n, number_to_spoken_words(n))
-        return number_to_spoken_words(n)
-
-    return word
+from src.utils.editor_budget import count_syllables_in_text
+from src.utils.text_normalizer import (
+    NUMBER_WORDS as NUMBER_WORDS,
+    WEAK_WORDS as WEAK_WORDS,
+    contains_devanagari as contains_devanagari,
+    expand_digits as expand_digits,
+    number_to_spoken_words as number_to_spoken_words,
+    tokenize_for_alignment,
+)
 
 
 def prepare_scene_tokens(
     narration: str,
     pronunciations: dict[str, str] | None = None,
+    romanizer: Callable[[str], str] | None = None,
+    warnings_out: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Tokenizes raw narration text into word items with TTS spoken form and MMS tokens.
 
-    Preserves original casing and punctuation on the original word token.
-    Maps phonetic respellings and numbers to aligner tokens.
+    Delegates to src.utils.text_normalizer.tokenize_for_alignment so VoiceAgent
+    and TimelineAgent share identical normalization rules.
     """
-    if not narration:
+    return tokenize_for_alignment(
+        narration,
+        pronunciations=pronunciations,
+        romanizer=romanizer,
+        warnings_out=warnings_out,
+    )
+
+
+def estimate_word_weight(word_item: dict[str, Any]) -> float:
+    """Estimates relative spoken duration weight from syllable count, length, and punctuation."""
+    spoken = str(word_item.get("tts") or "").strip()
+    if not spoken:
+        tokens = word_item.get("tokens") or []
+        spoken = " ".join(tokens) if tokens else str(word_item.get("orig") or word_item.get("w") or "")
+    orig = str(word_item.get("orig") or word_item.get("w") or spoken)
+
+    syllables = count_syllables_in_text(spoken)
+    alpha_chars = len(re.sub(r"[^a-zA-Z]", "", spoken))
+    if alpha_chars == 0:
+        # Fallback for non-Latin scripts (e.g. unromanized Devanagari)
+        alpha_chars = len(re.sub(r"[\s\W_]+", "", orig))
+        syllables = max(1, (alpha_chars + 1) // 2) if alpha_chars > 0 else 1
+
+    weight = max(1.0, 0.7 * syllables + 0.15 * alpha_chars)
+
+    if re.search(r"[.!?][\"']?$", orig):
+        weight += 0.6
+    elif re.search(r"[,;:\-][\"']?$", orig):
+        weight += 0.3
+
+    return weight
+
+
+def allocate_weighted_intervals(
+    words: list[dict[str, Any]],
+    start_sec: float,
+    end_sec: float,
+    active_ratio: float = 1.0,
+) -> list[tuple[float, float]]:
+    """Allocates proportional [start, end] timestamps across [start_sec, end_sec] by word weight."""
+    n = len(words)
+    if n == 0:
         return []
 
-    # Strip bracketed paralinguistic tags like [Sigh] or [Laughter]
-    text = re.sub(r"\[.*?\]", "", narration)
-    # Normalize unicode quotes and dashes
-    text = text.replace("“", '"').replace("”", '"')
-    text = text.replace("‘", "'").replace("’", "'")
-    text = text.replace("—", " - ").replace("–", " - ")
+    s_bound = round(start_sec, 3)
+    e_bound = round(max(start_sec, end_sec), 3)
+    total_dur = max(0.0, e_bound - s_bound)
 
-    raw_words = text.strip().split()
-    pron = pronunciations or {}
+    weights = [estimate_word_weight(w) for w in words]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        weights = [1.0] * n
+        total_weight = float(n)
 
-    words_data: list[dict[str, Any]] = []
+    intervals: list[tuple[float, float]] = []
+    cum_weight = 0.0
+    prev_slot_end = s_bound
 
-    for idx, w in enumerate(raw_words):
-        # Extract core word without punctuation
-        core_match = re.match(r"^([^\w]*)([\w\-]+)([^\w]*)$", w)
-        if core_match:
-            lead_punct, core, trail_punct = core_match.groups()
+    for idx, wt in enumerate(weights):
+        cum_weight += wt
+        slot_start = prev_slot_end
+        if idx == n - 1:
+            slot_end = e_bound
         else:
-            lead_punct, core, trail_punct = "", w, ""
+            slot_end = round(s_bound + total_dur * (cum_weight / total_weight), 3)
+            slot_end = max(slot_start, min(e_bound, slot_end))
 
-        # Check date context for digit expansion
-        prev_word = raw_words[idx - 1].lower().strip(".,!?;:") if idx > 0 else ""
-        months = {"january", "february", "march", "april", "may", "june",
-                  "july", "august", "september", "october", "november", "december"}
-        is_date = prev_word in months
-
-        # Check pronunciation dictionary
-        respelling = None
-        for p_word, p_val in pron.items():
-            if core.lower() == p_word.lower():
-                respelling = p_val
-                break
-
-        if respelling:
-            spoken_text = respelling
-        elif core.isdigit() or re.match(r"^\d+(st|nd|rd|th)$", core, re.IGNORECASE):
-            spoken_text = expand_digits(core, is_date_context=is_date)
+        if active_ratio >= 1.0:
+            w_end = slot_end
         else:
-            spoken_text = core
+            w_end = round(slot_start + (slot_end - slot_start) * active_ratio, 3)
+            w_end = max(slot_start, min(slot_end, w_end))
 
-        # Split spoken text into tokens for MMS_FA
-        sub_tokens = [re.sub(r"[^a-z']", "", p.lower()) for p in re.split(r"[\s\-]+", spoken_text)]
-        sub_tokens = [p for p in sub_tokens if p]
+        intervals.append((slot_start, w_end))
+        prev_slot_end = slot_end
 
-        words_data.append({
-            "orig": w,
-            "tts": spoken_text,
-            "tokens": sub_tokens,
-        })
-
-    return words_data
+    return intervals
 
 
 def interpolate_unplaced_words(
@@ -173,7 +128,7 @@ def interpolate_unplaced_words(
     pad_before: float = 0.4,
     pad_after: float = 0.6,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Interpolates timestamps for unplaced words linearly from neighbors.
+    """Interpolates timestamps for unplaced words proportionally by word weight from neighbors.
 
     Returns the updated words list and the number of unplaced words that were interpolated.
     """
@@ -185,14 +140,16 @@ def interpolate_unplaced_words(
     if unplaced_count == 0:
         return words, 0
 
-    # If all words are unplaced, distribute evenly across speech interval
+    # If all words are unplaced, distribute proportionally across speech interval
     if unplaced_count == n:
-        speech_start = pad_before
+        speech_start = min(pad_before, max(0.0, scene_duration - 0.1)) if scene_duration > 0 else 0.0
         speech_end = max(speech_start + 0.1, scene_duration - pad_after)
-        step = (speech_end - speech_start) / n
-        for i, w in enumerate(words):
-            w["start"] = round(speech_start + i * step, 3)
-            w["end"] = round(w["start"] + step, 3)
+        if scene_duration > 0:
+            speech_end = min(scene_duration, speech_end)
+        intervals = allocate_weighted_intervals(words, speech_start, speech_end, active_ratio=1.0)
+        for w, (w_start, w_end) in zip(words, intervals):
+            w["start"] = w_start
+            w["end"] = w_end
             w["score"] = 0.0
             w["unplaced"] = True
         return words, unplaced_count
@@ -214,22 +171,25 @@ def interpolate_unplaced_words(
 
         # Find bounds from left and right neighbors
         if run_start > 0:
-            left_bound = words[run_start - 1]["end"]
+            left_bound = float(words[run_start - 1]["end"])
         else:
-            left_bound = pad_before
+            left_bound = min(pad_before, max(0.0, scene_duration - 0.1)) if scene_duration > 0 else 0.0
 
         if run_end < n:
-            right_bound = words[run_end]["start"]
+            right_bound = float(words[run_end]["start"])
         else:
             right_bound = max(left_bound + 0.1, scene_duration - pad_after)
+            if scene_duration > 0:
+                right_bound = min(scene_duration, right_bound)
 
         available_time = max(0.02 * run_len, right_bound - left_bound)
-        step = available_time / run_len
+        right_bound = left_bound + available_time
 
-        for k in range(run_len):
+        run_slice = words[run_start:run_end]
+        intervals = allocate_weighted_intervals(run_slice, left_bound, right_bound, active_ratio=1.0)
+
+        for k, (w_start, w_end) in enumerate(intervals):
             idx = run_start + k
-            w_start = round(left_bound + k * step, 3)
-            w_end = round(w_start + step, 3)
             words[idx]["start"] = w_start
             words[idx]["end"] = w_end
             words[idx]["score"] = 0.0
@@ -358,17 +318,20 @@ class FakeAligner(TimelineAligner):
             # Read or approximate duration
             duration_sec = job.get("duration_sec", 10.0)
 
-            speech_start = pad_before
+            speech_start = min(pad_before, max(0.0, duration_sec - 0.1)) if duration_sec > 0 else 0.0
             speech_end = max(speech_start + 0.1, duration_sec - pad_after)
-            total_speech = speech_end - speech_start
+            if duration_sec > 0:
+                speech_end = min(duration_sec, speech_end)
 
-            n_words = len(words_data)
             aligned_words = []
-            if n_words > 0:
-                step = total_speech / n_words
-                for idx, w in enumerate(words_data):
-                    w_start = round(speech_start + idx * step, 3)
-                    w_end = round(w_start + step * 0.9, 3)
+            if words_data:
+                intervals = allocate_weighted_intervals(
+                    words_data,
+                    start_sec=speech_start,
+                    end_sec=speech_end,
+                    active_ratio=0.9,
+                )
+                for w, (w_start, w_end) in zip(words_data, intervals):
                     aligned_words.append({
                         "w": w.get("orig", ""),
                         "tts": w.get("tts", ""),

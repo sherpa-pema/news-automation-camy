@@ -1462,6 +1462,574 @@ def test_orchestrator_execute_stage_ignores_downstream_schema_changes(tmp_path, 
         schema_path.write_bytes(orig_bytes)
 
 
+def _make_7_scene_draft(
+    story_overrides: dict[int, dict] | None = None,
+    run_date: str = "2026-11-12",
+    source_url: str = "https://example.com/story",
+) -> dict:
+    """Helper building a valid 7-scene draft for validator unit tests."""
+    intro_narr = (
+        "Good evening and welcome to the daily news briefing from Kathmandu. "
+        "Here are our top national updates from across the provinces today."
+    )
+    outro_narr = (
+        "That concludes our daily news briefing for tonight. "
+        "Thank you for watching our broadcast and please stay safe this evening."
+    )
+    default_story = (
+        "Officials in Pokhara inaugurated a new community water supply facility this afternoon after years of careful municipal planning and steady local engineering effort. "
+        "Municipal engineers confirmed that local households across multiple rural wards now receive clean drinking water daily from upgraded local treatment stations."
+    )
+    scenes = [
+        {
+            "id": "intro",
+            "type": "intro",
+            "headline": "Daily Briefing",
+            "narration": intro_narr,
+            "category": None,
+            "sensitive": False,
+            "source": "Nepal News Desk",
+            "source_urls": [],
+            "visual_keywords": ["kathmandu valley", "news studio", "map of nepal"],
+            "evidence": [],
+        }
+    ]
+    for i in range(1, 6):
+        sc = {
+            "id": f"story_{i}",
+            "type": "story",
+            "headline": f"Community Project Update Number {i}",
+            "narration": default_story,
+            "category": "society",
+            "sensitive": False,
+            "source": "Outlet A",
+            "source_urls": [source_url],
+            "visual_keywords": ["mountain village", "water pipes", "community workers"],
+            "evidence": [
+                {"sentence_index": 0, "source_url": source_url},
+                {"sentence_index": 1, "source_url": source_url},
+            ],
+        }
+        if story_overrides and i in story_overrides:
+            sc.update(story_overrides[i])
+        scenes.append(sc)
+    scenes.append(
+        {
+            "id": "outro",
+            "type": "outro",
+            "headline": "Thank You for Watching",
+            "narration": outro_narr,
+            "category": None,
+            "sensitive": False,
+            "source": "Nepal News Desk",
+            "source_urls": [],
+            "visual_keywords": ["kathmandu skyline", "sunset mountains", "news studio"],
+            "evidence": [],
+        }
+    )
+    return {
+        "language": "English",
+        "origin": "editor",
+        "run_kind": "test",
+        "date": run_date,
+        "scenes": scenes,
+    }
+
+
+def test_scale_normalized_number_grounding_english_and_devanagari(tmp_path):
+    """Verify 'Rs 1.50 crore' and '१ करोड ५० लाख' ground 'fifteen million', 'one point five crore', and 2% approx."""
+    # Direct extractor check
+    assert 15000000.0 in extract_numbers_from_text("The ministry allocated Rs 1.50 crore for road repairs.")
+    assert 15000000.0 in extract_numbers_from_text("मन्त्रालयले १ करोड ५० लाख रुपैयाँ विनियोजन गरेको छ।")
+    assert 15000000.0 in extract_numbers_from_text("Officials spent fifteen million rupees.")
+    assert 15000000.0 in extract_numbers_from_text("Officials spent one point five crore rupees.")
+
+    cluster = [
+        {
+            "cluster_id": "cluster_01",
+            "urls": ["https://example.com/story"],
+            "articles": [
+                {
+                    "url": "https://example.com/story",
+                    "title": "Budget Allocation",
+                    "full_text": "सडक मर्मतका लागि १ करोड ५० लाख रुपैयाँ बजेट छुट्याइएको छ।",
+                }
+            ],
+        }
+    ]
+    shortlist_path = tmp_path / "shortlist.json"
+    shortlist_path.write_text(json.dumps(cluster), encoding="utf-8")
+    budget = compute_word_budget(2.15)
+    draft_path = tmp_path / "draft.json"
+
+    # 1. "fifteen million" grounded by "१ करोड ५० लाख"
+    draft = _make_7_scene_draft(
+        story_overrides={
+            1: {
+                "narration": (
+                    "Transport authorities allocated fifteen million rupees for rural highway maintenance work across the mountain district this week. "
+                    "Senior engineers confirmed that repair crews will prioritize heavily damaged road stretches and drainage culverts before winter."
+                )
+            }
+        }
+    )
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, warnings, report = validate_script_draft(draft_path, shortlist_path, budget)
+    assert is_valid is True, f"Unexpected errors: {errors}"
+
+    # 2. "about fifteen point two million" within 2% of 15,000,000 -> warning, no error
+    draft["scenes"][1]["narration"] = (
+        "Transport authorities allocated about fifteen point two million rupees for rural highway maintenance work across the district. "
+        "Senior engineers confirmed that repair crews will prioritize heavily damaged mountain stretches and drainage culverts before winter."
+    )
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, warnings, report = validate_script_draft(draft_path, shortlist_path, budget)
+    assert is_valid is True, f"Unexpected errors: {errors}"
+    assert any("within 2%" in w for w in warnings)
+
+    # 3. "one point five crore" grounded by "Rs 1.50 crore"
+    cluster[0]["articles"][0]["full_text"] = "The transport ministry allocated Rs 1.50 crore for rural highway maintenance."
+    shortlist_path.write_text(json.dumps(cluster), encoding="utf-8")
+    draft["scenes"][1]["narration"] = (
+        "Transport authorities allocated one point five crore rupees for rural highway maintenance work across the mountain district. "
+        "Senior engineers confirmed that repair crews will prioritize heavily damaged road stretches and drainage culverts before winter."
+    )
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, warnings, report = validate_script_draft(draft_path, shortlist_path, budget)
+    assert is_valid is True, f"Unexpected errors: {errors}"
+
+
+def test_bikram_sambat_year_whitelisting_in_fiscal_and_date_context(tmp_path):
+    """Valid BS years (2082/2083/2084 for 2026) in fiscal/date context must not fail as ungrounded."""
+    cluster = [
+        {
+            "cluster_id": "cluster_01",
+            "urls": ["https://example.com/story"],
+            "articles": [
+                {
+                    "url": "https://example.com/story",
+                    "title": "Budget Plan",
+                    "full_text": "The finance ministry released its annual infrastructure budget plan in Kathmandu today.",
+                }
+            ],
+        }
+    ]
+    shortlist_path = tmp_path / "shortlist.json"
+    shortlist_path.write_text(json.dumps(cluster), encoding="utf-8")
+    budget = compute_word_budget(2.15)
+    draft_path = tmp_path / "draft.json"
+
+    # Both "two thousand eighty three" and "twenty eighty three" in fiscal/date context pass
+    draft = _make_7_scene_draft(
+        run_date="2026-11-12",
+        story_overrides={
+            1: {
+                "narration": (
+                    "The finance ministry presented its infrastructure spending plan for fiscal year two thousand eighty three in Kathmandu today. "
+                    "Senior budget officials confirmed that public project implementation targets will begin in Baisakh twenty eighty three across the federal provinces."
+                )
+            }
+        },
+    )
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, warnings, report = validate_script_draft(draft_path, shortlist_path, budget)
+    assert is_valid is True, f"Unexpected errors: {errors}"
+
+    # An unrelated non-BS year outside source (e.g. 2075) still fails
+    draft["scenes"][1]["narration"] = (
+        "The finance ministry presented its infrastructure spending plan for fiscal year two thousand seventy five today in Kathmandu. "
+        "Senior budget officials confirmed that implementation targets will begin soon across all federal provinces."
+    )
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, warnings, report = validate_script_draft(draft_path, shortlist_path, budget)
+    assert is_valid is False
+    assert any("Invented number 2075.0" in e for e in errors)
+
+
+def test_acronym_blocklist_and_western_visual_keywords_and_structured_errors(tmp_path):
+    """Verify Title-Case blocked acronyms fail, expanded forms pass, Western keywords fail, and structured errors carry scene_index/id."""
+    cluster = [
+        {
+            "cluster_id": "cluster_01",
+            "urls": ["https://example.com/story"],
+            "articles": [
+                {
+                    "url": "https://example.com/story",
+                    "title": "Power Grid Update",
+                    "full_text": "The Nepal Electricity Authority expanded substation capacity in Lalitpur today.",
+                }
+            ],
+        }
+    ]
+    shortlist_path = tmp_path / "shortlist.json"
+    shortlist_path.write_text(json.dumps(cluster), encoding="utf-8")
+    budget = compute_word_budget(2.15)
+    draft_path = tmp_path / "draft.json"
+
+    # 1. Title-Case blocked acronym ("Nea", "Nepse") + blocked Western visual keyword ("dollar bills")
+    draft = _make_7_scene_draft(
+        story_overrides={
+            2: {
+                "narration": (
+                    "Officials at Nea and Nepse announced substation grid upgrades across Lalitpur today. "
+                    "Local distribution teams confirmed steady voltage levels for residential consumers in Dhapakhel."
+                ),
+                "visual_keywords": ["dollar bills", "power substation", "kathmandu valley"],
+            }
+        }
+    )
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, warnings, report = validate_script_draft(draft_path, shortlist_path, budget)
+    assert is_valid is False
+    assert any("Blocked acronym 'Nea'" in e for e in errors)
+    assert any("Blocked acronym 'Nepse'" in e for e in errors)
+    assert any("blocked Western term 'dollar bills'" in e for e in errors)
+    assert any("Dhapakhel" in w for w in warnings)
+
+    # Check structured_errors & structured_warnings carry scene_index and scene_id
+    struct_errs = report.get("structured_errors", [])
+    assert struct_errs
+    assert all(e["scene_index"] == 2 and e["scene_id"] == "story_2" for e in struct_errs)
+    assert any(w["scene_index"] == 2 and "Dhapakhel" in w["message"] for w in report.get("structured_warnings", []))
+
+    # 2. Expanded form + Nepal-appropriate visual keywords pass
+    draft["scenes"][2]["narration"] = (
+        "The Nepal Electricity Authority announced substation grid upgrades across Lalitpur today. "
+        "Local distribution teams confirmed steady voltage levels for residential consumers throughout the district."
+    )
+    draft["scenes"][2]["visual_keywords"] = ["power substation", "electric grid", "kathmandu valley"]
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, warnings, report = validate_script_draft(draft_path, shortlist_path, budget)
+    assert is_valid is True, f"Unexpected errors: {errors}"
+
+
+def test_cross_script_clustering_and_intra_cluster_supersession(tmp_path):
+    """Verify English+Devanagari entity+number spine clusters within 12h, and differing numbers mark older as superseded."""
+    from src.utils.editor_brief import generate_editor_brief
+
+    en_older = {
+        "source": "English Daily",
+        "title": "NRB fines bank over NEPSE compliance breach",
+        "url": "https://en.example.com/1",
+        "published_at": "2026-11-12T08:00:00+05:45",
+        "text_summary": "Nepal Rastra Bank penalized a brokerage over 250 million rupees transaction.",
+        "full_text": ("Nepal Rastra Bank and NEPSE reviewed the 250 million compliance case involving 45 accounts. " * 6),
+        "language": "en",
+    }
+    ne_newer = {
+        "source": "Nepali Patrika",
+        "title": "नेपाल राष्ट्र बैंक र नेप्सेको संयुक्त कारबाही, ५२ खातामा छानबिन",
+        "url": "https://ne.example.com/1",
+        "published_at": "2026-11-12T14:00:00+05:45",
+        "text_summary": "राष्ट्र बैंकले २५० करोड तथा नेप्सेको ४५ खातामा कारबाही अघि बढायो।",
+        "full_text": ("नेपाल राष्ट्र बैंक र नेप्सेको संयुक्त छानबिनमा ४५ खाता र ५२ उजुरी फेला परेका छन्। " * 6),
+        "language": "ne",
+    }
+    en_too_far = {
+        "source": "Late Outlet",
+        "title": "Unrelated NRB report",
+        "url": "https://en.example.com/2",
+        "published_at": "2026-11-14T12:00:00+05:45",  # > 12h away
+        "text_summary": "Nepal Rastra Bank and NEPSE issued annual 45 day notice.",
+        "full_text": ("Nepal Rastra Bank and NEPSE issued an annual 45 day compliance reminder for members. " * 6),
+        "language": "en",
+    }
+
+    cfg = {
+        "clustering": {"min_full_text_words": 20, "title_similarity_threshold": 0.55, "token_overlap_threshold": 0.35, "top_clusters_limit": 12},
+        "categories": {"economy": ["bank", "nepse", "राष्ट्र बैंक"]},
+    }
+    shortlist = cluster_articles([en_older, ne_newer, en_too_far], cfg)
+    assert len(shortlist) == 2
+
+    merged_cluster = next(c for c in shortlist if c["article_count"] == 2)
+    assert set(merged_cluster["sources"]) == {"English Daily", "Nepali Patrika"}
+    assert merged_cluster["primary_title"] == ne_newer["title"]
+    assert merged_cluster["has_superseded_updates"] is True
+
+    # Chronological order (newest/primary first): newer (superseded=False), older (superseded=True)
+    arts = merged_cluster["articles"]
+    assert arts[0]["url"] == ne_newer["url"] and arts[0]["superseded"] is False
+    assert arts[1]["url"] == en_older["url"] and arts[1]["superseded"] is True
+
+    brief = generate_editor_brief("2026-11-12", compute_word_budget(2.15), "Default", shortlist)
+    assert "[OLDER UPDATE — DO NOT USE FOR NUMBERS]" in brief
+
+
+def test_nepal_time_of_day_stale_previews():
+    """Verify Nepal time-of-day anchors ('this morning', 'this afternoon', 'NEPSE to open') relative to +05:45 NPT."""
+    from datetime import datetime, timedelta, timezone
+    from src.utils.editor_cluster import detect_stale_preview
+
+    npt = timezone(timedelta(hours=5, minutes=45))
+
+    # 1. Morning anchor: stale at 14:00 NPT, valid at 09:00 NPT
+    art_morning = {
+        "title": "Parliament panel scheduled to meet this morning",
+        "published_at": "2026-11-12T07:00:00+05:45",
+        "full_text": "Lawmakers will convene this morning to review the energy bill.",
+    }
+    assert detect_stale_preview(art_morning, ref_time=datetime(2026, 11, 12, 14, 0, tzinfo=npt))[0] is True
+    assert detect_stale_preview(art_morning, ref_time=datetime(2026, 11, 12, 9, 0, tzinfo=npt))[0] is False
+
+    # 2. Afternoon anchor: stale at 18:00 NPT, valid at 14:00 NPT
+    art_afternoon = {
+        "title": "Cabinet meeting set to begin आज दिउँसो",
+        "published_at": "2026-11-12T10:00:00+05:45",
+        "full_text": "आज दिउँसो मन्त्रिपरिषद् बैठक बस्ने तय भएको छ।",
+    }
+    assert detect_stale_preview(art_afternoon, ref_time=datetime(2026, 11, 12, 18, 0, tzinfo=npt))[0] is True
+    assert detect_stale_preview(art_afternoon, ref_time=datetime(2026, 11, 12, 14, 0, tzinfo=npt))[0] is False
+
+    # 3. NEPSE pre-market anchor: stale at 16:00 NPT, valid at 10:00 NPT
+    art_nepse = {
+        "title": "NEPSE to open following positive banking outlook",
+        "published_at": "2026-11-12T10:00:00+05:45",
+        "full_text": "Analysts expect the benchmark index ahead of opening bell.",
+    }
+    assert detect_stale_preview(art_nepse, ref_time=datetime(2026, 11, 12, 16, 0, tzinfo=npt))[0] is True
+    assert detect_stale_preview(art_nepse, ref_time=datetime(2026, 11, 12, 10, 0, tzinfo=npt))[0] is False
+
+
+def test_cross_day_deduplication_penalty_and_brief_flag(tmp_path):
+    """Verify 48-hour cross-day deduplication penalizes repeated stories and flags them in editor_brief.md."""
+    runs_root = tmp_path / "runs"
+    prev_dir = runs_root / "2026-11-11" / "script"
+    prev_dir.mkdir(parents=True)
+    (prev_dir / "script.json").write_text(
+        json.dumps({
+            "language": "English",
+            "origin": "editor",
+            "scenes": [
+                {
+                    "id": "story_1",
+                    "type": "story",
+                    "headline": "Highway Expansion Begins in Muglin",
+                    "narration": "Crews started expanding the Muglin road section today with twenty workers.",
+                    "source": "Outlet A",
+                    "source_urls": ["https://a.com/muglin-day1"],
+                    "visual_keywords": ["highway", "road", "workers"],
+                    "sensitive": False,
+                    "evidence": [],
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (prev_dir / "approval.json").write_text(
+        json.dumps({"approved_at": "2026-11-11T18:00:00+05:45", "script_sha256": "abc"}),
+        encoding="utf-8",
+    )
+
+    today_dir = runs_root / "2026-11-12"
+    (today_dir / "raw").mkdir(parents=True)
+    articles = [
+        {
+            "source": "Outlet A",
+            "title": "Highway Expansion Begins in Muglin",
+            "url": "https://a.com/muglin-day1",
+            "published_at": "2026-11-11T12:00:00+05:45",
+            "text_summary": "Crews started expanding Muglin road.",
+            "full_text": ("Crews started expanding the Muglin road section with twenty workers across the highway corridor. " * 6),
+        },
+        {
+            "source": "Outlet B",
+            "title": "New Hydropower Tunnel Completed in Dolakha",
+            "url": "https://b.com/hydro",
+            "published_at": "2026-11-12T09:00:00+05:45",
+            "text_summary": "Engineers completed breakthrough of Dolakha tunnel.",
+            "full_text": ("Engineers completed the breakthrough of a major hydropower tunnel in Dolakha district today. " * 6),
+        },
+    ]
+    (today_dir / "raw" / "articles.json").write_text(json.dumps(articles), encoding="utf-8")
+    manifest = {
+        "run_id": "2026-11-12",
+        "date": "2026-11-12",
+        "status": "running",
+        "stages": {"editor": {"status": "pending", "retry_count": 0, "max_retries": 2, "input_files": ["raw/articles.json"], "output_files": []}},
+    }
+    (today_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    agent = EditorAgent(today_dir)
+    agent.prepare(manifest)
+
+    shortlist = json.loads((today_dir / "script" / "shortlist.json").read_text(encoding="utf-8"))
+    assert shortlist[0]["primary_title"] == "New Hydropower Tunnel Completed in Dolakha"
+    assert shortlist[1]["covered_recently"] is True
+
+    brief_text = (today_dir / "script" / "editor_brief.md").read_text(encoding="utf-8")
+    assert "[COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]" in brief_text
+
+    budget_data = json.loads((today_dir / "script" / "budget.json").read_text(encoding="utf-8"))
+    assert "syllables_per_second" in budget_data
+    assert budget_data["comma_pause_sec"] == 0.25
+    assert budget_data["period_pause_sec"] == 0.55
+
+
+def test_surgical_single_scene_retry_in_llm_writer(tmp_path, monkeypatch):
+    """Verify llm_writer locks passing scenes and surgically repairs only the failing scene."""
+    import src.utils.llm_writer as llm_writer_mod
+
+    run_dir = tmp_path / "2026-11-12"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({
+            "run_id": "2026-11-12",
+            "date": "2026-11-12",
+            "status": "running",
+            "stages": {
+                "editor": {
+                    "status": "prepared",
+                    "retry_count": 0,
+                    "max_retries": 2,
+                    "input_files": ["raw/articles.json"],
+                    "output_files": [],
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    shortlist = [
+        {
+            "cluster_id": f"cluster_0{i}",
+            "primary_title": f"Cluster {i}",
+            "urls": [f"https://example.com/story{i}"],
+            "articles": [
+                {
+                    "source": "Outlet A",
+                    "title": f"Cluster {i}",
+                    "url": f"https://example.com/story{i}",
+                    "full_text": f"Officials in Pokhara announced {10 + i} infrastructure projects today across municipal wards.",
+                    "superseded": False,
+                }
+            ],
+        }
+        for i in range(1, 6)
+    ]
+    (script_dir / "shortlist.json").write_text(json.dumps(shortlist), encoding="utf-8")
+    budget = compute_word_budget(2.15)
+    (script_dir / "budget.json").write_text(json.dumps(budget), encoding="utf-8")
+    (script_dir / "editor_brief.md").write_text("# Brief\nWrite 7 scenes.", encoding="utf-8")
+
+    # Build round-1 full draft where ONLY story_2 (index 2) fails (blocked acronym 'Nea')
+    draft_round1 = _make_7_scene_draft(run_date="2026-11-12")
+    for i in range(1, 6):
+        u = f"https://example.com/story{i}"
+        draft_round1["scenes"][i]["source_urls"] = [u]
+        draft_round1["scenes"][i]["evidence"] = [
+            {"sentence_index": 0, "source_url": u},
+            {"sentence_index": 1, "source_url": u},
+        ]
+        # ~46 words per story scene -> total ~272 words inside [232, 426]
+        draft_round1["scenes"][i]["narration"] = (
+            "Officials in Pokhara inaugurated a new community water supply facility this afternoon after careful municipal planning and steady engineering work. "
+            "Municipal engineers confirmed that local households across multiple rural wards now receive clean drinking water daily from upgraded local treatment stations."
+        )
+    # Break ONLY story_2 (scene_index 2) with blocked acronym 'Nea'
+    draft_round1["scenes"][2]["narration"] = (
+        "Officials at Nea inaugurated a new community water supply facility this afternoon after careful municipal planning and steady engineering work. "
+        "Municipal engineers confirmed that local households across multiple rural wards now receive clean drinking water daily from upgraded local treatment stations."
+    )
+
+    repaired_story_2 = dict(draft_round1["scenes"][2])
+    repaired_story_2["narration"] = (
+        "The Nepal Electricity Authority supported a new community water supply facility this afternoon after careful municipal planning and steady engineering work. "
+        "Municipal engineers confirmed that local households across multiple rural wards now receive clean drinking water daily from upgraded local treatment stations."
+    )
+
+    captured_prompts: list[str] = []
+
+    def fake_call_llm(provider, model, messages, timeout=180):
+        prompt_text = messages[-1]["content"]
+        captured_prompts.append(prompt_text)
+        if len(captured_prompts) == 1:
+            return json.dumps({
+                "draft_script": draft_round1,
+                "selection": {"selected_clusters": [{"cluster_id": "cluster_01", "reason": "Top"}], "skipped_clusters": []},
+            })
+        return json.dumps({"scenes": [repaired_story_2]})
+
+    monkeypatch.setattr(llm_writer_mod, "detect_configured_provider", lambda preferred=None: ("gemini", "fake-model"))
+    monkeypatch.setattr(llm_writer_mod, "_call_llm", fake_call_llm)
+
+    res = llm_writer_mod.generate_and_validate_draft(run_dir, max_rounds=5)
+    assert res["ok"] is True
+    assert res["rounds"] == 2
+    assert res["surgical_rounds"] == 1
+    assert len(captured_prompts) == 2
+
+    # Second prompt must be surgical (mentioning ONLY story_2, not story_1)
+    assert "SURGICAL SCENE REPAIR" in captured_prompts[1]
+    assert "id='story_2'" in captured_prompts[1]
+    assert "id='story_1'" not in captured_prompts[1]
+    assert "REMAINING GLOBAL WORD BUDGET" in captured_prompts[1]
+
+    # Locked scene_1 must remain byte-for-byte identical, and scene_2 must be spliced
+    final_draft = json.loads((script_dir / "draft_script.json").read_text(encoding="utf-8"))
+    assert final_draft["scenes"][1] == draft_round1["scenes"][1]
+    assert final_draft["scenes"][2]["narration"] == repaired_story_2["narration"]
+
+
+def test_syllable_pause_duration_estimation_and_calibration(tmp_path):
+    """Verify deterministic syllable counting, pause weights, historical SPS calibration, and blended duration."""
+    from src.utils.editor_budget import (
+        count_syllables_in_text,
+        count_syllables_in_word,
+        count_punctuation_pauses,
+        calculate_words_per_second_details,
+        estimate_scene_duration_sec,
+    )
+
+    assert count_syllables_in_word("infrastructure") >= 4
+    assert count_syllables_in_word("authority") >= 4
+    assert count_syllables_in_text("Nepal Electricity Authority, Kathmandu.") >= 12
+    commas, periods = count_punctuation_pauses("First, second. Third! Fourth?")
+    assert commas == 1
+    assert periods == 3
+
+    # Long multisyllabic text should yield longer duration than simple monosyllabic words of same count
+    short_words_text = " ".join(["cat dog sun run box"] * 6) + "."
+    long_words_text = " ".join(["infrastructure municipality electricity administration telecommunication"] * 6) + "."
+    budget_cfg = {
+        "words_per_second": 2.15,
+        "syllables_per_second": 3.3,
+        "comma_pause_sec": 0.25,
+        "period_pause_sec": 0.55,
+    }
+    dur_short = estimate_scene_duration_sec(short_words_text, budget_cfg)
+    dur_long = estimate_scene_duration_sec(long_words_text, budget_cfg)
+    assert dur_long > dur_short
+
+    # Historical voice_report calibration computes syllables_per_second alongside words_per_second
+    runs_dir = tmp_path / "runs"
+    run_folder = runs_dir / "2026-11-01"
+    (run_folder / "voice").mkdir(parents=True)
+    (run_folder / "script").mkdir(parents=True)
+    (run_folder / "script" / "script.json").write_text(
+        json.dumps({
+            "scenes": [
+                {
+                    "narration": "The Nepal Electricity Authority expanded substation capacity in Lalitpur today, officials confirmed."
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+    (run_folder / "voice" / "voice_report.json").write_text(
+        json.dumps({"total_audio_duration_sec": 12.0}),
+        encoding="utf-8",
+    )
+    details = calculate_words_per_second_details(runs_dir)
+    assert details["source"] != "default"
+    assert details["syllables_per_second"] > 0
+    assert details["comma_pause_sec"] == 0.25
+    assert details["period_pause_sec"] == 0.55
+
+
+
+
 
 
 

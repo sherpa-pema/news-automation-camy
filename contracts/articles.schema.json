@@ -53,6 +53,39 @@
       "age_hours": {
         "type": ["number", "null"],
         "description": "Age of the article in hours relative to scrape reference time"
+      },
+      "category_hint": {
+        "type": ["string", "null"],
+        "description": "Rough canonical topic category inferred from feed tags, URL path, or keywords"
+      },
+      "raw_tags": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Original feed category/tag labels from the publisher RSS item"
+      },
+      "importance_hint": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Normalized editorial importance hint (0.0-1.0) derived from feed position and priority tags"
+      },
+      "feed_position": {
+        "type": ["integer", "null"],
+        "minimum": 1,
+        "description": "1-based position in the source feed or homepage link list"
+      },
+      "source_trust": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Publisher reliability weight from sources.yaml"
+      },
+      "date_confidence": {
+        "type": "string",
+        "enum": ["exact", "metadata", "url_date", "missing"],
+        "description": "Provenance of published_at timestamp"
       }
     },
     "required": ["source", "title", "url", "published_at", "text_summary"],

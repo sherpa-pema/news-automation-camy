@@ -125,15 +125,16 @@ def test_digit_expansion():
 
 
 def test_unplaced_words_interpolation():
-    """Unplaced words are interpolated smoothly between neighbors."""
-    words = [
-        {"w": "Good", "start": 0.5, "end": 0.8, "score": 0.95, "unplaced": False},
-        {"w": "morning", "start": None, "end": None, "score": 0.0, "unplaced": True},
-        {"w": "friends", "start": None, "end": None, "score": 0.0, "unplaced": True},
-        {"w": "today", "start": 2.0, "end": 2.4, "score": 0.90, "unplaced": False},
+    """Unplaced words are interpolated proportionally by word weight between neighbors."""
+    # Equal-weight short words split evenly
+    equal_words = [
+        {"w": "Good", "tts": "Good", "start": 0.5, "end": 0.8, "score": 0.95, "unplaced": False},
+        {"w": "cat", "tts": "cat", "start": None, "end": None, "score": 0.0, "unplaced": True},
+        {"w": "dog", "tts": "dog", "start": None, "end": None, "score": 0.0, "unplaced": True},
+        {"w": "today", "tts": "today", "start": 2.0, "end": 2.4, "score": 0.90, "unplaced": False},
     ]
 
-    updated, unplaced_count = interpolate_unplaced_words(words, scene_duration=5.0)
+    updated, unplaced_count = interpolate_unplaced_words(equal_words, scene_duration=5.0)
     assert unplaced_count == 2
     assert updated[1]["start"] == 0.8
     assert updated[1]["end"] == 1.4
@@ -142,9 +143,32 @@ def test_unplaced_words_interpolation():
     assert updated[1]["unplaced"] is True
     assert updated[2]["unplaced"] is True
 
+    # Unequal-weight words allocate proportionally more duration to multi-syllable words
+    weighted_words = [
+        {"w": "The", "tts": "The", "start": 0.5, "end": 0.8, "score": 0.95, "unplaced": False},
+        {"w": "a", "tts": "a", "start": None, "end": None, "score": 0.0, "unplaced": True},
+        {"w": "international", "tts": "international", "start": None, "end": None, "score": 0.0, "unplaced": True},
+        {"w": "summit", "tts": "summit", "start": 2.8, "end": 3.2, "score": 0.90, "unplaced": False},
+    ]
+    updated_w, cnt_w = interpolate_unplaced_words(weighted_words, scene_duration=5.0)
+    assert cnt_w == 2
+    dur_short = updated_w[1]["end"] - updated_w[1]["start"]
+    dur_long = updated_w[2]["end"] - updated_w[2]["start"]
+    assert dur_long > dur_short * 2.5
+    assert updated_w[1]["start"] == 0.8
+    assert updated_w[1]["end"] == updated_w[2]["start"]
+    assert updated_w[2]["end"] == 2.8
 
-def test_unplaced_threshold_failure(mock_timeline_run_dir: Path):
-    """Exceeding the unplaced threshold (scene >15% or run-wide >5%) raises ValueError."""
+
+def test_unplaced_threshold_degrades_gracefully(mock_timeline_run_dir: Path):
+    """Exceeding the unplaced threshold degrades to weighted interpolation and flags manifest.json."""
+    from src.utils.manifest import create_initial_manifest
+
+    manifest = create_initial_manifest(
+        "test_run",
+        "2026-11-06",
+        {"stages": [{"id": "timeline", "inputs": [], "outputs": []}]},
+    )
     agent = TimelineAgent(mock_timeline_run_dir)
 
     class BrokenAligner(FakeAligner):
@@ -163,10 +187,29 @@ def test_unplaced_threshold_failure(mock_timeline_run_dir: Path):
     t_module.get_timeline_aligner = lambda name, cfg: BrokenAligner()
 
     try:
-        with pytest.raises(ValueError, match="failed alignment.*unplaced"):
-            agent.run(aligner_override="fake", no_preview=True)
+        output_files = agent.run(manifest=manifest, aligner_override="fake", no_preview=True)
     finally:
         t_module.get_timeline_aligner = orig_get_aligner
+
+    for rel_f in output_files:
+        assert (mock_timeline_run_dir / rel_f).exists()
+
+    timeline_data = json.loads((mock_timeline_run_dir / "timeline" / "timeline.json").read_text(encoding="utf-8"))
+    is_valid, err = validate_contract(timeline_data, "contracts/timeline.schema.json")
+    assert is_valid is True, f"Schema validation error: {err}"
+    assert any("degraded alignment" in w for w in timeline_data["warnings"])
+
+    first_scene = timeline_data["scenes"][0]
+    for k in range(len(first_scene["words"]) - 1):
+        assert first_scene["words"][k]["start"] <= first_scene["words"][k + 1]["start"]
+        assert first_scene["words"][k]["start"] <= first_scene["words"][k]["end"]
+
+    saved_manifest = json.loads((mock_timeline_run_dir / "manifest.json").read_text(encoding="utf-8"))
+    tl_metrics = saved_manifest["stages"]["timeline"]["metrics"]
+    assert tl_metrics["degraded"] is True
+    assert tl_metrics["unplaced_ratio"] > 0.05
+    assert len(tl_metrics["degraded_scenes"]) == 1
+    assert tl_metrics["degraded_scenes"][0]["id"] == first_scene["id"]
 
 
 def test_caption_chunking_constraints():
@@ -374,4 +417,143 @@ def test_timeline_agent_run_approval_fingerprint_gate(tmp_path):
     # Since scenes is empty, it proceeds past alignment to schema validation requiring non-empty scenes.
     with pytest.raises(ValueError, match="should be non-empty"):
         agent.run(manifest)
+
+
+def test_scene_partition_gap_still_aborts(mock_timeline_run_dir: Path):
+    """Audio partition gaps/overlaps between scenes still raise ValueError."""
+    dur_path = mock_timeline_run_dir / "audio" / "scene_durations.json"
+    durations = json.loads(dur_path.read_text(encoding="utf-8"))
+    durations[1]["start_sec"] += 0.5
+    durations[1]["end_sec"] += 0.5
+    dur_path.write_text(json.dumps(durations, indent=2), encoding="utf-8")
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    with pytest.raises(ValueError, match="partition gap/overlap"):
+        agent.run(aligner_override="fake", no_preview=True)
+
+
+def test_fake_aligner_weights_durations_by_word_length():
+    """FakeAligner allocates longer durations to multi-syllable/longer words than short ones."""
+    words = prepare_scene_tokens("To international telecommunications infrastructure and a.")
+    aligner = FakeAligner()
+    res = aligner.align_scenes(
+        [{"id": "s1", "audio_path": "dummy.wav", "words": words, "duration_sec": 8.0}],
+        {},
+    )
+    aligned = res["scenes"]["s1"]["words"]
+    dur_to = aligned[0]["end"] - aligned[0]["start"]
+    dur_intl = aligned[1]["end"] - aligned[1]["start"]
+    dur_telecom = aligned[2]["end"] - aligned[2]["start"]
+    dur_a = aligned[5]["end"] - aligned[5]["start"]
+
+    assert dur_intl > dur_to * 2.0
+    assert dur_telecom > dur_a * 2.0
+    for k in range(len(aligned) - 1):
+        assert aligned[k]["start"] <= aligned[k]["end"] <= aligned[k + 1]["start"]
+
+
+def test_shared_normalizer_parity_between_voice_and_timeline(mock_timeline_run_dir: Path):
+    """Voice clean_narration_text and Timeline prepare_scene_tokens expand currency, %, decimals, and acronyms identically."""
+    from src.agents.voice import clean_narration_text
+
+    pronunciations = {
+        "Sarita Rai": "Sa-ree-ta Rye",
+        "Birgunj": "Beer-gunj",
+    }
+    raw = "NRB and UML noted Rs. 5,000, or 12.5%, at 3.14 ratio for Sarita Rai in Birgunj."
+
+    voice_text = clean_narration_text(raw, pronunciations)
+    assert "N R B" in voice_text
+    assert "U M L" in voice_text
+    assert "five thousand rupees" in voice_text
+    assert "twelve point five percent" in voice_text
+    assert "three point one four" in voice_text
+    assert "Sa-ree-ta Rye" in voice_text
+    assert "Beer-gunj" in voice_text
+
+    tl_tokens = prepare_scene_tokens(raw, pronunciations)
+    flattened_tl = [tok for item in tl_tokens for tok in item["tokens"]]
+
+    import re
+    voice_words = [re.sub(r"[^a-z']", "", w.lower()) for w in re.split(r"[\s\-]+", voice_text)]
+    voice_words = [w for w in voice_words if w]
+    assert flattened_tl == voice_words
+
+    # Verify grouped display tokens preserve original broadcast text
+    rs_item = next(item for item in tl_tokens if "Rs." in item["orig"])
+    assert rs_item["orig"] == "Rs. 5,000,"
+    assert rs_item["tts"] == "five thousand rupees"
+
+    # End-to-end sentence timing stays aligned when currency spans multiple whitespace words
+    script_path = mock_timeline_run_dir / "script" / "script.json"
+    script_data = json.loads(script_path.read_text(encoding="utf-8"))
+    script_data["scenes"][0]["narration"] = (
+        "NRB allocated Rs. 5,000 for Birgunj projects today. Inflation rose by 12.5%."
+    )
+    script_path.write_text(json.dumps(script_data, indent=2), encoding="utf-8")
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    agent.run(aligner_override="fake", no_preview=True)
+    tl_out = json.loads((mock_timeline_run_dir / "timeline" / "timeline.json").read_text(encoding="utf-8"))
+    s0 = tl_out["scenes"][0]
+    assert len(s0["sentences"]) == 2
+    assert s0["sentences"][0]["end"] < s0["sentences"][1]["start"]
+    assert "Rs. 5,000" in " ".join(w["w"] for w in s0["words"])
+
+
+def test_devanagari_compatibility_guard(mock_timeline_run_dir: Path):
+    """English-only text incurs no Devanagari warnings; Devanagari without uroman degrades gracefully."""
+    en_warnings: list[str] = []
+    prepare_scene_tokens("Good evening from Kathmandu.", warnings_out=en_warnings)
+    assert en_warnings == []
+
+    # Devanagari with an explicit romanizer produces aligner tokens
+    rom_warnings: list[str] = []
+    rom_map = {"नेपाल": "nepal", "समाचार": "samachar"}
+    rom_tokens = prepare_scene_tokens(
+        "नेपाल समाचार",
+        romanizer=lambda s: rom_map.get(s, s),
+        warnings_out=rom_warnings,
+    )
+    assert rom_warnings == []
+    assert [t["tokens"] for t in rom_tokens] == [["nepal"], ["samachar"]]
+
+    # Devanagari without uroman emits compatibility warning and degrades cleanly in TimelineAgent
+    import src.utils.text_normalizer as tn
+    orig_get_uroman = tn.get_optional_uroman
+    tn.get_optional_uroman = lambda: None
+    try:
+        script_path = mock_timeline_run_dir / "script" / "script.json"
+        script_data = json.loads(script_path.read_text(encoding="utf-8"))
+        script_data["scenes"][0]["narration"] = "नेपाल समाचार आजको मुख्य खबर।"
+        script_path.write_text(json.dumps(script_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        agent = TimelineAgent(mock_timeline_run_dir)
+        # Simulate MMS-like aligner marking empty-token words unplaced
+        class EmptyTokenUnplacedAligner(FakeAligner):
+            def align_scenes(self, scene_jobs, settings):
+                res = super().align_scenes(scene_jobs, settings)
+                for job in scene_jobs:
+                    sc_words = res["scenes"][job["id"]]["words"]
+                    for tok, w_out in zip(job["words"], sc_words):
+                        if not tok["tokens"]:
+                            w_out["unplaced"] = True
+                            w_out["start"] = None
+                            w_out["end"] = None
+                return res
+
+        import src.agents.timeline as t_module
+        orig_get_aligner = t_module.get_timeline_aligner
+        t_module.get_timeline_aligner = lambda name, cfg: EmptyTokenUnplacedAligner()
+        try:
+            agent.run(aligner_override="fake", no_preview=True)
+        finally:
+            t_module.get_timeline_aligner = orig_get_aligner
+    finally:
+        tn.get_optional_uroman = orig_get_uroman
+
+    tl_out = json.loads((mock_timeline_run_dir / "timeline" / "timeline.json").read_text(encoding="utf-8"))
+    assert any("uroman" in w for w in tl_out["warnings"])
+    assert len(tl_out["scenes"][0]["words"]) == 5
+
 

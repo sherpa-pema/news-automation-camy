@@ -1,6 +1,6 @@
 """Editor Agent implementation for Nepal News Bot."""
 import argparse
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -14,8 +14,13 @@ from src.utils.editor_budget import (
     calculate_words_per_second,
     calculate_words_per_second_details,
     compute_word_budget,
+    estimate_scene_duration_sec,
 )
-from src.utils.editor_cluster import cluster_articles
+from src.utils.editor_cluster import (
+    cluster_articles,
+    extract_spine_numbers,
+    parse_timestamp,
+)
 from src.utils.editor_validator import (
     compute_validator_fingerprint,
     extract_script_validation_fingerprint,
@@ -31,6 +36,7 @@ from src.utils.manifest import (
     save_manifest,
     update_stage_status,
 )
+from src.utils.office_events import emit_office_event
 
 logger = setup_logger("editor")
 
@@ -113,6 +119,81 @@ class EditorAgent(BaseAgent):
 
         return self.prepare(manifest)
 
+    def _load_prior_stories(self) -> list[dict[str, Any]]:
+        """Loads aired story scenes from recent prior run directories for cross-day deduplication."""
+        try:
+            target_dt = date.fromisoformat(self.run_dir.name)
+        except ValueError:
+            return []
+
+        dedup_cfg = self.editor_cfg.get("deduplication", {})
+        lookback_days = int(dedup_cfg.get("cross_day_lookback_days", 2))
+        if lookback_days <= 0:
+            return []
+
+        prior_stories: list[dict[str, Any]] = []
+        runs_root = self.run_dir.parent
+        for delta in range(1, lookback_days + 1):
+            prev_date = (target_dt - timedelta(days=delta)).isoformat()
+            prev_script_dir = runs_root / prev_date / "script"
+            prev_script_path = prev_script_dir / "script.json"
+            if not prev_script_path.exists():
+                continue
+
+            try:
+                prev_script = json.loads(prev_script_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            approved_ts = 0.0
+            prev_approval_path = prev_script_dir / "approval.json"
+            if prev_approval_path.exists():
+                try:
+                    app_data = json.loads(prev_approval_path.read_text(encoding="utf-8"))
+                    approved_ts = parse_timestamp(app_data.get("approved_at"))
+                except Exception:
+                    pass
+            if approved_ts == 0.0:
+                approved_ts = parse_timestamp(prev_script.get("validated_at")) or prev_script_path.stat().st_mtime
+
+            # Also read selection.json if present for completeness
+            prev_selection_path = prev_script_dir / "selection.json"
+            selected_cluster_ids: list[str] = []
+            if prev_selection_path.exists():
+                try:
+                    sel_data = json.loads(prev_selection_path.read_text(encoding="utf-8"))
+                    selected_cluster_ids = [
+                        str(item.get("cluster_id", ""))
+                        for item in sel_data.get("selected_clusters", [])
+                        if isinstance(item, dict)
+                    ]
+                except Exception:
+                    pass
+
+            for sc in prev_script.get("scenes", []):
+                if sc.get("type") != "story":
+                    continue
+                headline = sc.get("headline", "")
+                narration = sc.get("narration", "")
+                prior_stories.append({
+                    "run_date": prev_date,
+                    "title": headline,
+                    "narration": narration,
+                    "source_urls": sc.get("source_urls", []),
+                    "approved_ts": approved_ts,
+                    "selected_cluster_ids": selected_cluster_ids,
+                    "numbers": extract_spine_numbers(
+                        f"{headline} {narration}",
+                        exclude_years={target_dt.year},
+                    ),
+                    "pseudo_article": {
+                        "title": headline,
+                        "text_summary": narration,
+                        "full_text": narration,
+                    },
+                })
+        return prior_stories
+
     def prepare(self, manifest: dict[str, Any]) -> list[str]:
         """Step 1 (prepare): Clusters raw articles, calculates budget, generates shortlist and editor_brief.md."""
         if manifest.get("status") == "abandoned":
@@ -128,9 +209,14 @@ class EditorAgent(BaseAgent):
 
         logger.info(f"Read {len(articles)} raw articles from {raw_articles_path}.")
 
-        # 1. Cluster and rank
+        # 1. Cluster and rank (including 48-hour cross-day deduplication memory)
+        prior_stories = self._load_prior_stories()
         shortlist, opinion_clusters, stale_clusters = cluster_articles(
-            articles, self.editor_cfg, return_opinion=True, return_stale=True
+            articles,
+            self.editor_cfg,
+            return_opinion=True,
+            return_stale=True,
+            prior_stories=prior_stories,
         )
         logger.info(
             f"Clustering complete. Formed {len(shortlist)} shortlisted news clusters, "
@@ -148,9 +234,13 @@ class EditorAgent(BaseAgent):
             with open(budget_path, "r", encoding="utf-8") as bf:
                 frozen = json.load(bf)
             wps = float(frozen["words_per_second"])
+            sps = float(frozen.get("syllables_per_second", 3.3))
             calib_msg = frozen.get("calculation") or f"Frozen budget: {wps:.2f} words/sec"
-            budget = compute_word_budget(wps)
+            budget = compute_word_budget(wps, sps=sps)
             for k in (
+                "syllables_per_second",
+                "comma_pause_sec",
+                "period_pause_sec",
                 "target_duration_sec",
                 "duration_range_sec",
                 "target_total_words",
@@ -164,14 +254,29 @@ class EditorAgent(BaseAgent):
         else:
             details = calculate_words_per_second_details(self.run_dir.parent)
             wps = float(details["words_per_second"])
+            sps = float(details.get("syllables_per_second", 3.3))
+            comma_pause = float(details.get("comma_pause_sec", 0.25))
+            period_pause = float(details.get("period_pause_sec", 0.55))
             calib_msg = str(details["message"])
-            budget = compute_word_budget(wps)
+            budget = compute_word_budget(
+                wps,
+                sps=sps,
+                comma_pause_sec=comma_pause,
+                period_pause_sec=period_pause,
+            )
             frozen_payload = {
                 "words_per_second": wps,
+                "syllables_per_second": sps,
+                "comma_pause_sec": comma_pause,
+                "period_pause_sec": period_pause,
                 "source": details.get("source"),
                 "source_file": details.get("source_file"),
                 "calculation": details.get("calculation"),
-                **{k: v for k, v in budget.items() if k != "words_per_second"},
+                **{
+                    k: v
+                    for k, v in budget.items()
+                    if k not in ("words_per_second", "syllables_per_second", "comma_pause_sec", "period_pause_sec")
+                },
             }
             with open(budget_path, "w", encoding="utf-8") as bf:
                 json.dump(frozen_payload, bf, indent=2)
@@ -222,6 +327,23 @@ class EditorAgent(BaseAgent):
             save_manifest(manifest, manifest_path)
             write_status_md(self.run_dir, manifest)
 
+        emit_office_event(
+            self.run_dir,
+            "packet_handoff",
+            stage="editor",
+            from_station="editor",
+            to_station="boss",
+            artifact="script/editor_brief.md",
+            label="editor_brief.md (Needs Writer)",
+        )
+        emit_office_event(
+            self.run_dir,
+            "boss_alert",
+            stage="editor",
+            status="prepared",
+            message="Editor brief ready — draft script needed.",
+        )
+
         next_action = (
             f"Next action: Read {brief_path}, write draft_script.json and selection.json, then run:\n"
             f"  python -m src.agents.editor validate --date {self.run_dir.name}"
@@ -244,8 +366,12 @@ class EditorAgent(BaseAgent):
             with open(budget_path, "r", encoding="utf-8") as bf:
                 frozen = json.load(bf)
             wps = float(frozen["words_per_second"])
-            budget = compute_word_budget(wps)
+            sps = float(frozen.get("syllables_per_second", 3.3))
+            budget = compute_word_budget(wps, sps=sps)
             for k in (
+                "syllables_per_second",
+                "comma_pause_sec",
+                "period_pause_sec",
                 "target_duration_sec",
                 "duration_range_sec",
                 "target_total_words",
@@ -257,8 +383,14 @@ class EditorAgent(BaseAgent):
                 if k in frozen:
                     budget[k] = frozen[k]
         else:
-            wps, _calib_msg = calculate_words_per_second(self.run_dir.parent)
-            budget = compute_word_budget(wps)
+            details = calculate_words_per_second_details(self.run_dir.parent)
+            wps = float(details["words_per_second"])
+            budget = compute_word_budget(
+                wps,
+                sps=float(details.get("syllables_per_second", 3.3)),
+                comma_pause_sec=float(details.get("comma_pause_sec", 0.25)),
+                period_pause_sec=float(details.get("period_pause_sec", 0.55)),
+            )
 
         is_valid, errors, warnings, report = validate_script_draft(
             draft_path=draft_path,
@@ -332,12 +464,11 @@ class EditorAgent(BaseAgent):
         draft_sha256 = hashlib.sha256(draft_path.read_bytes()).hexdigest()
         validated_at = datetime.now(timezone.utc).isoformat()
         total_words = report["metrics"]["total_words"]
-        total_duration = round(total_words / wps, 1)
 
-        # Enrich scenes with est_duration_sec
+        # Enrich scenes with syllable + pause blended est_duration_sec
         for sc in draft_data.get("scenes", []):
-            sc_words = len(sc.get("narration", "").split())
-            sc["est_duration_sec"] = round(sc_words / wps, 1)
+            sc["est_duration_sec"] = estimate_scene_duration_sec(sc.get("narration", ""), budget)
+        total_duration = round(sum(float(sc.get("est_duration_sec", 0.0)) for sc in draft_data.get("scenes", [])), 1)
 
         # Add scene_04 warning if event time has passed on 2026-11-07 run
         warn_scene_04 = "Scene 04: The match event time (17:00 on 2026-11-07) has passed; match preview narration is now historical."
@@ -394,6 +525,23 @@ class EditorAgent(BaseAgent):
             reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
             save_manifest(manifest, manifest_path)
             write_status_md(self.run_dir, manifest)
+
+        emit_office_event(
+            self.run_dir,
+            "packet_handoff",
+            stage="editor",
+            from_station="editor",
+            to_station="boss",
+            artifact="script/script_preview.md",
+            label="script_preview.md (Sign-Off)",
+        )
+        emit_office_event(
+            self.run_dir,
+            "boss_alert",
+            stage="editor",
+            status="awaiting_approval",
+            message="Script validated — awaiting Boss approval.",
+        )
 
         logger.info(f"Validation PASSED. Wrote {script_path} and {preview_path}.")
         next_action = (
@@ -465,14 +613,31 @@ class EditorAgent(BaseAgent):
             write_status_md(self.run_dir, manifest)
 
         logger.info(f"Script approved successfully. Hash: {script_sha256}")
+        emit_office_event(
+            self.run_dir,
+            "packet_handoff",
+            stage="editor",
+            from_station="boss",
+            to_station="editor",
+            artifact="script/approval.json",
+            label="approval.json (SIGNED)",
+        )
+        emit_office_event(
+            self.run_dir,
+            "stage_status",
+            stage="editor",
+            status="done",
+            message="Boss approved script.",
+        )
         print(f"\n[OK] Script approved. Stage 'editor' marked as done.")
         return [str(script_path), str(approval_path)]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Editor Agent CLI.")
-    parser.add_argument("action", choices=["prepare", "validate", "approve"], help="Action to execute")
+    parser.add_argument("action", choices=["prepare", "validate", "approve", "write"], help="Action to execute")
     parser.add_argument("--date", default=date.today().isoformat(), help="Run date (YYYY-MM-DD)")
+    parser.add_argument("--provider", default=None, help="Optional LLM provider (gemini, anthropic, openai, ollama)")
     return parser.parse_args()
 
 
@@ -490,6 +655,12 @@ def main() -> int:
     if args.action == "prepare":
         agent.prepare(manifest)
         return 0
+    elif args.action == "write":
+        from src.utils.llm_writer import generate_and_validate_draft
+
+        res = generate_and_validate_draft(run_dir, provider=args.provider)
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
     elif args.action == "validate":
         agent.validate_draft(manifest)
         stage_status = manifest.get("stages", {}).get("editor", {}).get("status")

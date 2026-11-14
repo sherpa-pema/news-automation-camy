@@ -80,8 +80,8 @@ class MediaAgent(BaseAgent):
     def schema_contract_path(self) -> str | None:
         return "contracts/media_manifest.schema.json"
 
-    def _load_inputs(self) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Loads script.json and timeline.json from run directory."""
+    def _load_inputs(self, require_timeline: bool = True) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Loads script.json and optionally timeline.json from run directory."""
         script_path = self.run_dir / "script" / "script.json"
         if not script_path.exists():
             script_path = self.run_dir.parent.parent / "runs" / self.run_dir.name / "script" / "script.json"
@@ -92,13 +92,16 @@ class MediaAgent(BaseAgent):
 
         if not script_path.exists():
             raise FileNotFoundError(f"Missing required script.json at {script_path}")
-        if not timeline_path.exists():
+        if require_timeline and not timeline_path.exists():
             raise FileNotFoundError(f"Missing required timeline.json at {timeline_path}")
 
         with open(script_path, "r", encoding="utf-8") as f:
             script_data = json.load(f)
-        with open(timeline_path, "r", encoding="utf-8") as f:
-            timeline_data = json.load(f)
+
+        timeline_data = None
+        if timeline_path.exists():
+            with open(timeline_path, "r", encoding="utf-8") as f:
+                timeline_data = json.load(f)
 
         return script_data, timeline_data
 
@@ -486,7 +489,7 @@ class MediaAgent(BaseAgent):
         (clip if score >= min_relevance else card proposal), and writes candidates.json, picker.html,
         and wanted_clips.md."""
         logger.info(f"Starting Media Agent candidates mode (k={candidates_k}) for run: {self.run_dir.name}")
-        script_data, timeline_data = self._load_inputs()
+        script_data, timeline_data = self._load_inputs(require_timeline=False)
 
         # Check script provenance origin
         script_origin = script_data.get("origin", "fixture")
@@ -518,7 +521,14 @@ class MediaAgent(BaseAgent):
                 if rep_fp and rep_fp != curr_fp:
                     raise ValueError("validator or editor config changed since validation, re-run validate and approve")
 
-        scenes = timeline_data.get("scenes", [])
+        if timeline_data is not None:
+            scenes = timeline_data.get("scenes", [])
+            is_provisional = False
+        else:
+            from src.utils.shot_planner import estimate_timeline_scenes_from_script
+            scenes = estimate_timeline_scenes_from_script(script_data.get("scenes", []))
+            is_provisional = True
+
         script_scenes = {s["id"]: s for s in script_data.get("scenes", [])}
 
         media_dir = self.run_dir / "media"
@@ -547,6 +557,7 @@ class MediaAgent(BaseAgent):
             "date": self.run_dir.name,
             "scene_count": len(planned_scenes),
             "target_shot_sec": target_shot_sec,
+            "provisional": is_provisional,
             "scenes": [
                 {
                     "scene_id": ps.scene_id,
@@ -590,23 +601,29 @@ class MediaAgent(BaseAgent):
                 if not overlapping_sentences and sc_timeline.get("sentences"):
                     overlapping_sentences = [sc_timeline["sentences"][0]["text"]]
 
-                # Collect distinct candidates
+                # Collect distinct candidates across sources & query rungs
                 pool_cands: dict[str, Candidate] = {}
+                pool_limit = max(candidates_k * 5, 30)
                 for cand, matched_query, src_name in self.selector.iter_candidates_for_shot(
                     scene=sc_script,
                     shot=shot,
                     stills_in_scene=0,
                     max_stills=10,
                 ):
-                    if cand.id not in pool_cands:
+                    prev = pool_cands.get(cand.id)
+                    if prev is None or float(getattr(cand, "score", 0.0)) > float(getattr(prev, "score", 0.0)):
                         pool_cands[cand.id] = cand
-                    if len(pool_cands) >= max(candidates_k * 2, 12):
+                    if len(pool_cands) >= pool_limit:
                         break
 
-                # Sort: local_library first, then by relevance score descending
+                # Sort: local_library first, unused auto-picks ahead of already-picked ones, then score descending
                 sorted_cands = sorted(
                     pool_cands.values(),
-                    key=lambda c: (0 if c.source == "local_library" else 1, -getattr(c, "score", 0.0)),
+                    key=lambda c: (
+                        0 if c.source == "local_library" else 1,
+                        1 if c.id in used_auto_pick_ids else 0,
+                        -float(getattr(c, "score", 0.0)),
+                    ),
                 )
                 top_k = sorted_cands[:candidates_k]
 
@@ -803,7 +820,7 @@ class MediaAgent(BaseAgent):
 
         manifest_shots: list[dict[str, Any]] = []
         round2_research: list[dict[str, Any]] = []
-        action_counts = {"pick": 0, "card": 0, "own_file": 0, "research": 0}
+        action_counts = {"pick": 0, "card": 0, "own_file": 0, "upload": 0, "link": 0, "research": 0}
         applied_picks: list[dict[str, Any]] = []
         refused_picks: list[dict[str, Any]] = []
         failed_downloads: list[dict[str, Any]] = []
@@ -1029,11 +1046,17 @@ class MediaAgent(BaseAgent):
                         "style": "card",
                     })
 
-                elif action == "own_file":
-                    own_path = Path(pick.get("file_path", ""))
+                elif action in ("own_file", "upload"):
+                    file_val = pick.get("file_path", "")
+                    own_path = Path(file_val)
                     if not own_path.exists():
-                        raise FileNotFoundError(f"Own file not found for shot {shot_key}: {own_path}")
-                    is_video = own_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm")
+                        if (self.run_dir / file_val).exists():
+                            own_path = self.run_dir / file_val
+                        elif (self.run_dir / "media" / file_val).exists():
+                            own_path = self.run_dir / "media" / file_val
+                        else:
+                            raise FileNotFoundError(f"Own file not found for shot {shot_key}: {file_val}")
+                    is_video = own_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".avi")
                     out_filename = f"shot_{shot.shot_index:02d}.mp4" if is_video else f"shot_{shot.shot_index:02d}.jpg"
                     out_path = scene_shots_dir / out_filename
                     if is_video:
@@ -1041,7 +1064,7 @@ class MediaAgent(BaseAgent):
                     else:
                         probe = normalize_image(own_path, out_path, target_res)
 
-                    user_license = pick.get("license", "own work")
+                    user_license = pick.get("license", "user-provided")
                     manifest_shots.append({
                         "scene_id": sc_id,
                         "shot_index": shot.shot_index,
@@ -1055,17 +1078,123 @@ class MediaAgent(BaseAgent):
                         "license": user_license,
                         "license_url": None,
                         "author": pick.get("author", "User"),
-                        "attribution_text": pick.get("attribution", "User-provided footage"),
+                        "attribution_text": pick.get("attribution", "User-provided media"),
                         "attribution_required": False,
                         "width": probe.get("width"),
                         "height": probe.get("height"),
                         "duration_sec": probe.get("duration", round(shot.duration, 3)),
                         "sha256": probe.get("sha256"),
-                        "query": "own_file",
+                        "query": "user_upload" if action == "upload" else "own_file",
                         "motion": None if is_video else "ken_burns",
                         "sensitive_scene": is_sensitive,
                         "style": None,
                     })
+
+                elif action in ("link", "url"):
+                    media_url = (pick.get("url") or pick.get("link") or pick.get("file_path", "")).strip()
+                    if not media_url:
+                        raise ValueError(f"Shot {shot_key} link action specified but no URL provided.")
+
+                    if self.selector.is_domain_blocklisted(media_url):
+                        reason = f"Shot {shot_key} link uses blocklisted news domain: {media_url}"
+                        refused_picks.append({"shot_id": shot_key, "url": media_url, "reason": reason})
+                        raise ValueError(reason)
+
+                    raw_path = self.cache_mgr.download_file(media_url, offline=self.offline)
+                    download_err: str | None = None
+                    if not raw_path or not raw_path.exists():
+                        download_err = f"Failed to download asset from {media_url}"
+                    else:
+                        try:
+                            from src.utils.media_normalizer import probe_media
+                            try:
+                                probe_info = probe_media(raw_path)
+                                is_video = bool(probe_info.get("duration", 0) > 0 and probe_info.get("fps", 0) > 0)
+                            except Exception:
+                                is_video = raw_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".avi")
+
+                            out_filename = f"shot_{shot.shot_index:02d}.mp4" if is_video else f"shot_{shot.shot_index:02d}.jpg"
+                            out_path = scene_shots_dir / out_filename
+                            if is_video:
+                                probe = normalize_video(raw_path, out_path, shot.duration, target_res, fps)
+                            else:
+                                probe = normalize_image(raw_path, out_path, target_res)
+
+                            total_download_bytes += raw_path.stat().st_size
+                            manifest_shots.append({
+                                "scene_id": sc_id,
+                                "shot_index": shot.shot_index,
+                                "start": shot.start,
+                                "end": shot.end,
+                                "type": "video" if is_video else "image",
+                                "card_text": None,
+                                "file": f"media/shots/{sc_id}/{out_filename}",
+                                "source": "user-link",
+                                "origin_url": media_url,
+                                "license": "user-provided",
+                                "license_url": None,
+                                "author": pick.get("author", "User"),
+                                "attribution_text": pick.get("attribution", f"Media via {media_url}"),
+                                "attribution_required": False,
+                                "width": probe.get("width"),
+                                "height": probe.get("height"),
+                                "duration_sec": probe.get("duration", round(shot.duration, 3)),
+                                "sha256": probe.get("sha256"),
+                                "query": "user_link",
+                                "motion": None if is_video else "ken_burns",
+                                "sensitive_scene": is_sensitive,
+                                "style": None,
+                            })
+                        except Exception as norm_exc:
+                            download_err = f"Failed to normalize linked asset from {media_url}: {norm_exc}"
+
+                    if download_err:
+                        warn_msg = f"Shot {shot_key} link ({media_url}): {download_err}. Created headline card instead."
+                        logger.warning(warn_msg)
+                        self.warnings.append(warn_msg)
+                        failed_downloads.append({
+                            "shot_id": shot_key,
+                            "scene_id": sc_id,
+                            "shot_index": shot.shot_index,
+                            "source": "user-link",
+                            "download_url": media_url,
+                            "reason": download_err,
+                        })
+                        card_text = sc_script.get("headline", sc_id)
+                        out_filename = f"card_{shot.shot_index:02d}.png"
+                        out_path = scene_shots_dir / out_filename
+                        draw_card_image(card_text, out_path, width=target_res[0], height=target_res[1])
+                        card_sha256 = compute_sha256(out_path)
+                        cards_created.append({
+                            "shot_id": shot_key,
+                            "file": f"media/shots/{sc_id}/{out_filename}",
+                            "reason": "link_download_failed",
+                            "card_text": card_text,
+                        })
+                        manifest_shots.append({
+                            "scene_id": sc_id,
+                            "shot_index": shot.shot_index,
+                            "start": shot.start,
+                            "end": shot.end,
+                            "type": "card",
+                            "card_text": card_text,
+                            "file": f"media/shots/{sc_id}/{out_filename}",
+                            "source": "system",
+                            "origin_url": None,
+                            "license": "N/A",
+                            "license_url": None,
+                            "author": "System",
+                            "attribution_text": "Graphic card",
+                            "attribution_required": False,
+                            "width": target_res[0],
+                            "height": target_res[1],
+                            "duration_sec": round(shot.duration, 3),
+                            "sha256": card_sha256,
+                            "query": None,
+                            "motion": "zoom_in",
+                            "sensitive_scene": is_sensitive,
+                            "style": "card",
+                        })
 
                 elif action == "research":
                     new_query = pick.get("query", sc_script.get("headline", sc_id))
@@ -1168,6 +1297,36 @@ class MediaAgent(BaseAgent):
         with open(manifest_root_path, "w", encoding="utf-8") as f:
             json.dump(manifest_payload, f, indent=2)
 
+        # Write final non-provisional shot_plan.json
+        shot_plan_path = media_dir / "shot_plan.json"
+        shot_plan_data = {
+            "date": self.run_dir.name,
+            "scene_count": len(planned_scenes),
+            "target_shot_sec": target_shot_sec,
+            "provisional": False,
+            "scenes": [
+                {
+                    "scene_id": ps.scene_id,
+                    "start": ps.start,
+                    "end": ps.end,
+                    "duration": ps.duration,
+                    "shots": [
+                        {
+                            "shot_index": sh.shot_index,
+                            "start": sh.start,
+                            "end": sh.end,
+                            "duration": sh.duration,
+                            "snapped_to_sentence": sh.snapped_to_sentence,
+                        }
+                        for sh in ps.shots
+                    ],
+                }
+                for ps in planned_scenes
+            ],
+        }
+        with open(shot_plan_path, "w", encoding="utf-8") as f:
+            json.dump(shot_plan_data, f, indent=2)
+
         # Regenerate credits.md
         credits_path = media_dir / "credits.md"
         generate_credits_markdown(manifest_shots, credits_path, disclose_synthetic_voice=disclose_voice)
@@ -1235,7 +1394,20 @@ class MediaAgent(BaseAgent):
             f"Applied picks: {len(applied_picks)}, Cards created: {len(cards_created)}, "
             f"Failed downloads: {len(failed_downloads)}"
         )
-        return ["media/media_manifest.json", "media/credits.md", "media/picks_log.json"]
+        return ["media/media_manifest.json", "media/shot_plan.json", "media/credits.md", "media/picks_log.json"]
+
+    def run_conform(self, picks_file: Path | str | None = None) -> list[str]:
+        """Conforms visual review picks or auto picks to the actual audio timeline."""
+        if picks_file is None:
+            review_dir = self.run_dir / "media" / "review"
+            for candidate_name in ("picks_ui.json", "picks.json", "auto_picks.json"):
+                p = review_dir / candidate_name
+                if p.exists():
+                    picks_file = p
+                    break
+            if picks_file is None:
+                raise FileNotFoundError(f"No picks file found in {review_dir} to conform.")
+        return self.apply_picks(picks_file)
 
     def run_auto(
         self,

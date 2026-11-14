@@ -3,6 +3,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import threading
 import time
 from typing import Any, Callable
 import yaml
@@ -38,6 +39,18 @@ from src.utils.manifest import (
     save_manifest,
     update_stage_status,
 )
+from src.utils.office_events import emit_office_event
+
+
+STAGE_HANDOFFS: dict[str, tuple[str, str, str]] = {
+    "scraper": ("editor", "raw/articles.json", "articles.json"),
+    "editor": ("voice", "script/script.json", "script.json"),
+    "voice": ("timeline", "audio/narration.wav", "narration.wav"),
+    "timeline": ("media", "timeline.json", "timeline.json"),
+    "media": ("motion", "media/media_manifest.json", "media_manifest.json"),
+    "motion": ("render", "motion/render_plan.json", "render_plan.json"),
+    "render": ("qa", "render/final.mp4", "final.mp4"),
+}
 
 
 class PipelinePausedException(Exception):
@@ -83,6 +96,7 @@ class Orchestrator:
         self.backfill = backfill
         self.media_auto = media_auto
         self.run_kind = run_kind
+        self._manifest_lock = threading.Lock()
 
         # Setup logger
         self.logger = setup_logger("orchestrator", self.run_dir / "run.log")
@@ -90,6 +104,12 @@ class Orchestrator:
         # Load configs
         self.pipeline_config = self._load_yaml(self.config_dir / "pipeline.yaml")
         self.sources_config = self._load_yaml(self.config_dir / "sources.yaml")
+
+    def _save_manifest_locked(self, manifest: dict[str, Any], active_process: bool = True) -> None:
+        """Saves manifest and status.md under the thread lock."""
+        with self._manifest_lock:
+            save_manifest(manifest, self.manifest_path)
+            write_status_md(self.run_dir, manifest, active_process=active_process)
 
     def _load_yaml(self, path: Path) -> dict[str, Any]:
         with open(path, "r", encoding="utf-8") as f:
@@ -171,13 +191,19 @@ class Orchestrator:
             self.logger.info(f"Stage '{stage_id}' already completed. Skipping.")
             return True
 
-        if not force and stage_meta["status"] in PAUSE_STATES:
+        if not force and stage_meta["status"] in PAUSE_STATES and not (stage_id == "media" and self.media_auto):
             current_stage_status = stage_meta["status"]
             manifest["status"] = "paused"
             save_manifest(manifest, self.manifest_path)
             write_status_md(self.run_dir, manifest, active_process=False)
             next_act = ""
-            if current_stage_status == "prepared":
+            if stage_id == "media":
+                next_act = (
+                    f"Next action: Open data/runs/{self.run_date}/media/review/picker.html to select visuals, "
+                    f"apply picks with:\n"
+                    f"  python run_daily.py --apply-picks data/runs/{self.run_date}/media/picks.json --date {self.run_date}"
+                )
+            elif current_stage_status == "prepared":
                 next_act = (
                     f"Next action: Read data/runs/{self.run_date}/script/editor_brief.md, "
                     f"write draft_script.json and selection.json, then run:\n"
@@ -271,8 +297,16 @@ class Orchestrator:
             attempt = stage_meta["retry_count"] + 1
             self.logger.info(f"Starting stage '{stage_id}' (attempt {attempt}/{max_retries + 1})...")
 
-            update_stage_status(manifest, stage_id, "running")
-            save_manifest(manifest, self.manifest_path)
+            with self._manifest_lock:
+                update_stage_status(manifest, stage_id, "running")
+                save_manifest(manifest, self.manifest_path)
+            emit_office_event(
+                self.run_dir,
+                "stage_status",
+                stage=stage_id,
+                status="running",
+                message=f"Orchestrator dispatched {stage_id} (attempt {attempt})",
+            )
 
             try:
                 # Execute agent
@@ -281,9 +315,17 @@ class Orchestrator:
                 # Check if agent entered a pause state (prepared, needs_revision, awaiting_approval)
                 current_stage_status = manifest.get("stages", {}).get(stage_id, {}).get("status")
                 if current_stage_status in PAUSE_STATES:
-                    manifest["status"] = "paused"
-                    save_manifest(manifest, self.manifest_path)
-                    write_status_md(self.run_dir, manifest, active_process=False)
+                    with self._manifest_lock:
+                        manifest["status"] = "paused"
+                        save_manifest(manifest, self.manifest_path)
+                        write_status_md(self.run_dir, manifest, active_process=False)
+                    emit_office_event(
+                        self.run_dir,
+                        "stage_status",
+                        stage=stage_id,
+                        status=current_stage_status,
+                        message=f"Paused at {current_stage_status}",
+                    )
                     next_act = ""
                     if current_stage_status == "prepared":
                         next_act = (
@@ -310,9 +352,48 @@ class Orchestrator:
                     raise ValueError(f"Contract validation failed: {validation_err}")
 
                 # Mark stage done
-                update_stage_status(manifest, stage_id, "done", output_files=output_files)
-                save_manifest(manifest, self.manifest_path)
-                write_status_md(self.run_dir, manifest)
+                with self._manifest_lock:
+                    update_stage_status(manifest, stage_id, "done", output_files=output_files)
+                    save_manifest(manifest, self.manifest_path)
+                    write_status_md(self.run_dir, manifest)
+                emit_office_event(
+                    self.run_dir,
+                    "stage_status",
+                    stage=stage_id,
+                    status="done",
+                    message=f"Completed {stage_id}",
+                )
+                if stage_id == "editor":
+                    # Twin courier handoffs to Sound Booth and Archive Studio
+                    emit_office_event(
+                        self.run_dir,
+                        "packet_handoff",
+                        stage="editor",
+                        from_station="editor",
+                        to_station="voice",
+                        artifact="script/script.json",
+                        label="script.json -> Sound Booth",
+                    )
+                    emit_office_event(
+                        self.run_dir,
+                        "packet_handoff",
+                        stage="editor",
+                        from_station="editor",
+                        to_station="media",
+                        artifact="script/script.json",
+                        label="script.json -> Archive Studio",
+                    )
+                elif stage_id in STAGE_HANDOFFS:
+                    to_st, art_path, lbl = STAGE_HANDOFFS[stage_id]
+                    emit_office_event(
+                        self.run_dir,
+                        "packet_handoff",
+                        stage=stage_id,
+                        from_station=stage_id,
+                        to_station=to_st,
+                        artifact=art_path,
+                        label=lbl,
+                    )
                 self.logger.info(f"Stage '{stage_id}' finished successfully.")
                 return True
 
@@ -340,6 +421,24 @@ class Orchestrator:
                     )
                     save_manifest(manifest, self.manifest_path)
                     write_status_md(self.run_dir, manifest)
+                    emit_office_event(
+                        self.run_dir,
+                        "stage_status",
+                        stage=stage_id,
+                        status="failed",
+                        message=str(e),
+                    )
+                    if stage_id == "qa":
+                        emit_office_event(
+                            self.run_dir,
+                            "packet_handoff",
+                            stage="qa",
+                            from_station="qa",
+                            to_station="orchestrator",
+                            artifact="qa/qa_report.json",
+                            label="redo_stage",
+                            status="alert",
+                        )
                     return False
                 else:
                     self.logger.info(f"Retrying stage '{stage_id}'...")
@@ -626,7 +725,7 @@ class Orchestrator:
         try:
             with run_process_lock(self.run_dir):
                 manifest["status"] = "running"
-                save_manifest(manifest, self.manifest_path)
+                self._save_manifest_locked(manifest)
 
                 for st_id in downstream_stages:
                     if not self.execute_stage(st_id, manifest, force=force):
@@ -644,7 +743,7 @@ class Orchestrator:
                         }
 
                 reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
-                save_manifest(manifest, self.manifest_path)
+                self._save_manifest_locked(manifest, active_process=False)
                 status_path = write_status_md(self.run_dir, manifest, active_process=False)
         finally:
             self.media_auto = prev_media_auto
@@ -655,6 +754,26 @@ class Orchestrator:
             manifest=manifest,
             config_dir=self.config_dir,
         )
+        emit_office_event(
+            self.run_dir,
+            "packet_handoff",
+            stage="qa",
+            from_station="qa",
+            to_station="publish",
+            artifact="render/final.mp4",
+            label="final.mp4 → Latest & OneDrive",
+        )
+        emit_office_event(
+            self.run_dir,
+            "publish_complete",
+            stage="qa",
+            status="done",
+            message="Published to data/latest & OneDrive mirror",
+            extra={
+                "latest_dir": str(latest_info.get("latest_dir", "")),
+                "mirror_dir": str(latest_info.get("mirror_dir", "")),
+            },
+        )
         next_action = get_next_action_text(self.run_dir, manifest, active_process=False)
         return {
             "ok": True,
@@ -664,6 +783,404 @@ class Orchestrator:
             "status": manifest["status"],
             "run_kind": manifest.get("run_kind", "test"),
             "next_action": next_action,
+            "status_path": str(status_path),
+            "storyboard_path": str(self.run_dir / "qa" / "storyboard.html"),
+            "final_mp4": str(self.run_dir / "render" / "final.mp4"),
+            "description_md": str(self.run_dir / "render" / "description.md"),
+            "latest": latest_info,
+        }
+
+    def run_prepare_media(
+        self,
+        candidates_k: int = 6,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Two-step workflow checkpoint: runs voice + timeline + media candidates discovery,
+        pauses with stages.media.status = 'awaiting_approval' so the user can pick visuals
+        in picker.html BEFORE motion, render, qa, or publish run.
+        """
+        if not self.manifest_path.exists():
+            reason = f"Manifest not found at {self.manifest_path}. Run --morning first."
+            return {"ok": False, "refused": True, "reason": reason}
+
+        manifest = load_manifest(self.manifest_path)
+        gate_ok, gate_reason = verify_editor_gate(self.run_dir, allow_fixture=self.allow_fixture)
+        if not gate_ok:
+            return {"ok": False, "refused": True, "reason": gate_reason}
+
+        media_stage = manifest.get("stages", {}).get("media", {})
+        picker_path = self.run_dir / "media" / "review" / "picker.html"
+        candidates_path = self.run_dir / "media" / "review" / "candidates.json"
+
+        if (
+            not force
+            and media_stage.get("status") == "awaiting_approval"
+            and picker_path.exists()
+            and candidates_path.exists()
+        ):
+            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
+            save_manifest(manifest, self.manifest_path)
+            status_path = write_status_md(self.run_dir, manifest, active_process=False)
+            c_data = json.loads(candidates_path.read_text(encoding="utf-8"))
+            shots = c_data.get("shots", [])
+            clips_cnt = sum(1 for sh in shots if sh.get("auto_pick_type") == "clip")
+            cards_cnt = len(shots) - clips_cnt
+            return {
+                "ok": True,
+                "refused": False,
+                "already_prepared": True,
+                "status": manifest["status"],
+                "media_status": "awaiting_approval",
+                "total_shots": len(shots),
+                "auto_clips_count": clips_cnt,
+                "auto_cards_count": cards_cnt,
+                "picker_html": str(picker_path),
+                "candidates_json": str(candidates_path),
+                "status_path": str(status_path),
+                "next_action": get_next_action_text(self.run_dir, manifest, active_process=False),
+            }
+
+        with run_process_lock(self.run_dir):
+            manifest["status"] = "running"
+            self._save_manifest_locked(manifest)
+
+            # Emit twin packet handoffs from editor to voice and media
+            emit_office_event(
+                self.run_dir,
+                "packet_handoff",
+                stage="editor",
+                from_station="editor",
+                to_station="voice",
+                artifact="script/script.json",
+                label="script.json -> Sound Booth",
+            )
+            emit_office_event(
+                self.run_dir,
+                "packet_handoff",
+                stage="editor",
+                from_station="editor",
+                to_station="media",
+                artifact="script/script.json",
+                label="script.json -> Archive Studio",
+            )
+
+            import concurrent.futures
+
+            audio_err_info: dict[str, Any] = {"failed_stage": None, "reason": None}
+
+            def _prep_audio() -> bool:
+                for st_id in ("voice", "timeline"):
+                    if not self.execute_stage(st_id, manifest, force=force):
+                        err_msg = manifest["stages"][st_id].get("error_message") or f"Stage '{st_id}' failed"
+                        audio_err_info["failed_stage"] = st_id
+                        audio_err_info["reason"] = err_msg
+                        return False
+                return True
+
+            visual_err_info: dict[str, Any] = {"reason": None}
+            candidates_holder: dict[str, Any] = {}
+
+            def _prep_visuals() -> bool:
+                with self._manifest_lock:
+                    update_stage_status(manifest, "media", "running")
+                    save_manifest(manifest, self.manifest_path)
+                emit_office_event(
+                    self.run_dir,
+                    "stage_status",
+                    stage="media",
+                    status="running",
+                    message="Discovering visual candidates for picker...",
+                )
+                try:
+                    media_cls = AGENT_REGISTRY.get("media", MediaAgent)
+                    agent = media_cls(
+                        self.run_dir,
+                        config=self.pipeline_config,
+                        allow_fixture=self.allow_fixture,
+                        auto=False,
+                    )
+                    c_data = agent.run_candidates(candidates_k=candidates_k)
+                    candidates_holder["data"] = c_data
+                    return True
+                except Exception as exc:
+                    visual_err_info["reason"] = str(exc)
+                    with self._manifest_lock:
+                        update_stage_status(manifest, "media", "failed", error_message=str(exc))
+                        save_manifest(manifest, self.manifest_path)
+                    emit_office_event(
+                        self.run_dir,
+                        "stage_status",
+                        stage="media",
+                        status="failed",
+                        message=str(exc),
+                    )
+                    return False
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                fut_visuals = executor.submit(_prep_visuals)
+                fut_audio = executor.submit(_prep_audio)
+
+                vis_ok = fut_visuals.result()
+                audio_ok = fut_audio.result()
+
+            if not audio_ok:
+                st_id = audio_err_info["failed_stage"]
+                self._mark_run_failed(manifest, f"Prepare-media stage '{st_id}' failed")
+                status_path = write_status_md(self.run_dir, manifest, active_process=False)
+                return {
+                    "ok": False,
+                    "refused": False,
+                    "failed_stage": st_id,
+                    "reason": audio_err_info["reason"],
+                    "status_path": str(status_path),
+                }
+
+            if not vis_ok:
+                self._mark_run_failed(manifest, f"Media candidates discovery failed: {visual_err_info['reason']}")
+                status_path = write_status_md(self.run_dir, manifest, active_process=False)
+                return {
+                    "ok": False,
+                    "refused": False,
+                    "failed_stage": "media",
+                    "reason": visual_err_info["reason"],
+                    "status_path": str(status_path),
+                }
+
+            candidates_data = candidates_holder.get("data", {})
+
+            shots = candidates_data.get("shots", [])
+            clips_cnt = sum(1 for sh in shots if sh.get("auto_pick_type") == "clip")
+            cards_cnt = len(shots) - clips_cnt
+
+            update_stage_status(
+                manifest,
+                "media",
+                "awaiting_approval",
+                output_files=[
+                    "media/shot_plan.json",
+                    "media/review/candidates.json",
+                    "media/review/picker.html",
+                    "media/review/wanted_clips.md",
+                ],
+                error_message=None,
+            )
+            manifest["stages"]["media"]["metrics"] = {
+                "auto_mode": False,
+                "prepared_for_picking": True,
+                "total_shots": len(shots),
+                "auto_clips_count": clips_cnt,
+                "auto_cards_count": cards_cnt,
+                "min_relevance": candidates_data.get("min_relevance"),
+            }
+            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
+            save_manifest(manifest, self.manifest_path)
+            status_path = write_status_md(self.run_dir, manifest, active_process=False)
+
+            emit_office_event(
+                self.run_dir,
+                "stage_status",
+                stage="media",
+                status="awaiting_approval",
+                message=f"Picker ready: {clips_cnt} clips, {cards_cnt} cards proposed",
+            )
+            emit_office_event(
+                self.run_dir,
+                "packet_handoff",
+                stage="media",
+                from_station="media",
+                to_station="boss",
+                artifact="media/review/picker.html",
+                label="Visual Picker Ready",
+            )
+            emit_office_event(
+                self.run_dir,
+                "boss_alert",
+                stage="media",
+                message=f"Visual candidates ready ({clips_cnt} clips, {cards_cnt} cards)! Open Visual Picker before rendering.",
+            )
+
+        return {
+            "ok": True,
+            "refused": False,
+            "already_prepared": False,
+            "status": manifest["status"],
+            "media_status": "awaiting_approval",
+            "total_shots": len(shots),
+            "auto_clips_count": clips_cnt,
+            "auto_cards_count": cards_cnt,
+            "picker_html": str(picker_path),
+            "candidates_json": str(candidates_path),
+            "status_path": str(status_path),
+            "next_action": get_next_action_text(self.run_dir, manifest, active_process=False),
+        }
+
+    def run_apply_picks_and_finish(
+        self,
+        picks_file: Path | str,
+        latest_dir: Path | str = "data/latest",
+    ) -> dict[str, Any]:
+        """Applies human visual picks from picks_file, marks media done, runs motion -> render -> qa,
+        and publishes deliverables to data/latest and OneDrive mirror.
+        """
+        if not self.manifest_path.exists():
+            reason = f"Manifest not found at {self.manifest_path}. Run --morning first."
+            return {"ok": False, "refused": True, "reason": reason}
+
+        manifest = load_manifest(self.manifest_path)
+        gate_ok, gate_reason = verify_editor_gate(self.run_dir, allow_fixture=self.allow_fixture)
+        if not gate_ok:
+            return {"ok": False, "refused": True, "reason": gate_reason}
+
+        with run_process_lock(self.run_dir):
+            manifest["status"] = "running"
+            save_manifest(manifest, self.manifest_path)
+
+            for st_id in ("voice", "timeline"):
+                if not self.execute_stage(st_id, manifest, force=False):
+                    self._mark_run_failed(manifest, f"Prerequisite stage '{st_id}' failed")
+                    status_path = write_status_md(self.run_dir, manifest, active_process=False)
+                    err_msg = manifest["stages"][st_id].get("error_message") or f"Stage '{st_id}' failed"
+                    return {
+                        "ok": False,
+                        "refused": False,
+                        "failed_stage": st_id,
+                        "reason": err_msg,
+                        "status_path": str(status_path),
+                    }
+
+            update_stage_status(manifest, "media", "running", error_message=None)
+            save_manifest(manifest, self.manifest_path)
+            emit_office_event(
+                self.run_dir,
+                "stage_status",
+                stage="media",
+                status="running",
+                message="Applying Boss Visual Picker selections...",
+            )
+
+            try:
+                media_cls = AGENT_REGISTRY.get("media", MediaAgent)
+                agent = media_cls(
+                    self.run_dir,
+                    config=self.pipeline_config,
+                    allow_fixture=self.allow_fixture,
+                    auto=False,
+                )
+                applied_outputs = agent.apply_picks(picks_file)
+                is_valid, val_err = agent.validate(applied_outputs)
+                if not is_valid:
+                    raise ValueError(f"Media contract validation failed after apply_picks: {val_err}")
+            except Exception as exc:
+                update_stage_status(manifest, "media", "failed", error_message=str(exc))
+                self._mark_run_failed(manifest, f"Applying visual picks failed: {exc}")
+                status_path = write_status_md(self.run_dir, manifest, active_process=False)
+                emit_office_event(
+                    self.run_dir,
+                    "stage_status",
+                    stage="media",
+                    status="failed",
+                    message=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "refused": False,
+                    "failed_stage": "media",
+                    "reason": str(exc),
+                    "status_path": str(status_path),
+                }
+
+            all_media_outputs = list(
+                dict.fromkeys(
+                    list(applied_outputs)
+                    + (["media/shot_plan.json"] if (self.run_dir / "media" / "shot_plan.json").exists() else [])
+                    + (["media/review/picker.html"] if (self.run_dir / "media" / "review" / "picker.html").exists() else [])
+                )
+            )
+            media_metrics: dict[str, Any] = {"auto_mode": False, "picked_by_user": True}
+            picks_log_path = self.run_dir / "media" / "picks_log.json"
+            if picks_log_path.exists():
+                try:
+                    plog = json.loads(picks_log_path.read_text(encoding="utf-8"))
+                    ac = plog.get("action_counts", {})
+                    media_metrics.update({
+                        "total_shots": plog.get("total_shots", 0),
+                        "applied_clips_count": len(plog.get("applied_picks", [])),
+                        "cards_created_count": len(plog.get("cards_created", [])),
+                        "failed_downloads_count": len(plog.get("failed_downloads", [])),
+                        "action_counts": ac,
+                    })
+                except Exception:
+                    pass
+
+            update_stage_status(manifest, "media", "done", output_files=all_media_outputs)
+            manifest["stages"]["media"]["metrics"] = media_metrics
+            save_manifest(manifest, self.manifest_path)
+            emit_office_event(
+                self.run_dir,
+                "stage_status",
+                stage="media",
+                status="done",
+                message="Applied visual selections",
+            )
+            emit_office_event(
+                self.run_dir,
+                "packet_handoff",
+                stage="media",
+                from_station="media",
+                to_station="motion",
+                artifact="media/media_manifest.json",
+                label="media_manifest.json",
+            )
+
+            for st_id in ("motion", "render", "qa"):
+                if not self.execute_stage(st_id, manifest, force=True):
+                    self._mark_run_failed(manifest, f"Post-picks stage '{st_id}' failed")
+                    status_path = write_status_md(self.run_dir, manifest, active_process=False)
+                    err_msg = manifest["stages"][st_id].get("error_message") or f"Stage '{st_id}' failed"
+                    return {
+                        "ok": False,
+                        "refused": False,
+                        "failed_stage": st_id,
+                        "reason": err_msg,
+                        "status_path": str(status_path),
+                    }
+
+            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
+            save_manifest(manifest, self.manifest_path)
+            status_path = write_status_md(self.run_dir, manifest, active_process=False)
+
+        latest_info = publish_to_latest(
+            self.run_dir,
+            latest_dir=latest_dir,
+            manifest=manifest,
+            config_dir=self.config_dir,
+        )
+        emit_office_event(
+            self.run_dir,
+            "packet_handoff",
+            stage="qa",
+            from_station="qa",
+            to_station="publish",
+            artifact="render/final.mp4",
+            label="final.mp4 → Latest & OneDrive",
+        )
+        emit_office_event(
+            self.run_dir,
+            "publish_complete",
+            stage="qa",
+            status="done",
+            message="Published visual picks broadcast to data/latest & OneDrive mirror",
+            extra={
+                "latest_dir": str(latest_info.get("latest_dir", "")),
+                "mirror_dir": str(latest_info.get("mirror_dir", "")),
+            },
+        )
+        return {
+            "ok": True,
+            "refused": False,
+            "status": manifest["status"],
+            "run_kind": manifest.get("run_kind", "test"),
+            "next_action": get_next_action_text(self.run_dir, manifest, active_process=False),
             "status_path": str(status_path),
             "storyboard_path": str(self.run_dir / "qa" / "storyboard.html"),
             "final_mp4": str(self.run_dir / "render" / "final.mp4"),

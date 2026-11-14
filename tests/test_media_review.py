@@ -866,3 +866,130 @@ def test_apply_picks_download_or_norm_failure_creates_card_and_syncs_render_plan
     assert not any(ov.get("type") == "illustrative_tag" for ov in synced_plan["overlays"])
     assert any(ov.get("type") == "lower_third" for ov in synced_plan["overlays"])
 
+
+def test_score_relevance_no_dilution_multi_keyword_and_sensitive():
+    """Verify scoring against active query does not dilute across unsearched visual_keywords or cap sensitive queries."""
+    scene_multi = {
+        "id": "intro",
+        "headline": "Morning Nepal News",
+        "visual_keywords": ["Kathmandu valley", "news studio", "map of Nepal"],
+        "narration": "Good morning from Nepal.",
+    }
+    cand_valley = Candidate(
+        source="wikimedia_commons",
+        id="wc_1",
+        kind="video",
+        page_url="https://commons.wikimedia.org/wiki/File:Kathmandu.webm",
+        download_url="https://upload.wikimedia.org/Kathmandu.webm",
+        width=1920,
+        height=1080,
+        duration=8.0,
+        license_id="CC0",
+        license_url="",
+        author="Author",
+        title="Kathmandu valley morning view",
+        tags=["kathmandu", "valley", "nepal"],
+    )
+    score_multi, tokens_multi = score_candidate_relevance(
+        cand=cand_valley,
+        query="Kathmandu valley",
+        visual_keywords=scene_multi["visual_keywords"],
+        scene=scene_multi,
+        foreign_places=DEFAULT_FOREIGN_PLACES,
+        is_sensitive=False,
+    )
+    assert score_multi >= 0.5
+    assert "kathmandu" in tokens_multi
+
+    # Sensitive scene atmospheric query should exceed min_relevance (0.5) when matching atmospheric tokens
+    scene_sens = {
+        "id": "scene_01",
+        "headline": "Court Remands Suspect After Highway Accident",
+        "visual_keywords": ["courtroom exterior", "police car", "nepal flag"],
+        "narration": "Police arrested a suspect following a fatal crash.",
+    }
+    cand_atmos = Candidate(
+        source="pixabay",
+        id="pix_road",
+        kind="video",
+        page_url="https://pixabay.com/v/999",
+        download_url="https://pixabay.com/999.mp4",
+        width=1920,
+        height=1080,
+        duration=10.0,
+        license_id="Pixabay Content License",
+        license_url="",
+        author="Artist",
+        title="Empty road landscape morning mist",
+        tags=["empty", "road", "landscape"],
+    )
+    score_sens, _ = score_candidate_relevance(
+        cand=cand_atmos,
+        query="empty road landscape",
+        visual_keywords=scene_sens["visual_keywords"],
+        scene=scene_sens,
+        foreign_places=DEFAULT_FOREIGN_PLACES,
+        is_sensitive=True,
+    )
+    assert score_sens >= 0.5
+
+    # Sensitive scene with person tag still rejected at 0.0
+    cand_atmos_people = Candidate(
+        source="pixabay",
+        id="pix_road_people",
+        kind="video",
+        page_url="https://pixabay.com/v/1000",
+        download_url="https://pixabay.com/1000.mp4",
+        width=1920,
+        height=1080,
+        duration=10.0,
+        license_id="Pixabay Content License",
+        license_url="",
+        author="Artist",
+        title="Empty road landscape with walking person",
+        tags=["empty", "road", "landscape", "person"],
+    )
+    score_people, _ = score_candidate_relevance(
+        cand=cand_atmos_people,
+        query="empty road landscape",
+        visual_keywords=scene_sens["visual_keywords"],
+        scene=scene_sens,
+        foreign_places=DEFAULT_FOREIGN_PLACES,
+        is_sensitive=True,
+    )
+    assert score_people == 0.0
+
+
+def test_picker_html_has_direct_apply_picks_controls(tmp_path):
+    """Verify picker.html includes direct Apply Picks button and auto-pick fallback control without external links."""
+    candidates_data = {
+        "date": "2026-11-12",
+        "min_relevance": 0.5,
+        "total_shots": 1,
+        "shots": [
+            {
+                "shot_id": "scene_01_00",
+                "scene_id": "scene_01",
+                "shot_index": 0,
+                "scene_headline": "Test Headline",
+                "start": 0.0,
+                "end": 5.0,
+                "duration": 5.0,
+                "narration_sentences": ["Test sentence."],
+                "visual_keywords": ["nepal"],
+                "auto_pick_id": None,
+                "auto_pick_type": "card",
+                "best_score": 0.4,
+                "candidates": [],
+            }
+        ],
+    }
+    out_html = tmp_path / "picker.html"
+    generate_picker_html(candidates_data, out_html)
+    html_text = out_html.read_text(encoding="utf-8")
+    assert "applyPicksToOffice()" in html_text
+    assert "fillCardsWithTopClips()" in html_text
+    assert "/apply-picks" in html_text
+    assert "<script src=\"http" not in html_text
+
+

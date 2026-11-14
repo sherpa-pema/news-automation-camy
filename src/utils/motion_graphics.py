@@ -327,3 +327,215 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     full_ass = header + "\n".join(dialogues) + "\n"
     output_path.write_text(full_ass, encoding="utf-8")
+
+
+def draw_stat_callout(
+    stat_value: str,
+    stat_label: str,
+    stat_delta: str | None,
+    source_credit: str,
+    output_path: Path,
+    width: int = 1400,
+    height: int = 520,
+    font_candidates: list[str] | None = None,
+) -> None:
+    """Draws a high-impact broadcast statistic card (Shotcraft stat_callout recipe)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Rounded panel background (Deep Navy with 94% opacity)
+    bg_color = (11, 31, 58, 240)
+    border_color = (245, 166, 35, 220)  # Amber border
+    draw_rounded_panel(draw, (0, 0, width, height), radius=24, fill=bg_color, border_color=border_color, border_width=3)
+
+    # Accent top strip
+    draw.rounded_rectangle((24, 16, width - 24, 24), radius=4, fill=(245, 166, 35, 255))
+
+    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
+    font_val = get_font(fonts, 80)
+    font_delta = get_font(fonts, 32)
+    font_label = get_font(fonts, 38)
+    font_credit = get_font(regular_fonts, 24)
+
+    # Giant stat value
+    draw.text((64, 60), stat_value, font=font_val, fill=(255, 255, 255, 255))
+
+    # Delta badge (e.g. +14.2% or RECORD HIGH) if present
+    curr_x = 64
+    val_bbox = font_val.getbbox(stat_value)
+    val_w = val_bbox[2] - val_bbox[0]
+    badge_x = min(width - 340, 64 + val_w + 32)
+    if stat_delta:
+        # Green tint for positive, amber for neutral
+        delta_bg = (40, 167, 69, 220) if ("+" in stat_delta or "▲" in stat_delta) else (245, 166, 35, 220)
+        draw.rounded_rectangle((badge_x, 90, badge_x + 240, 142), radius=12, fill=delta_bg)
+        draw.text((badge_x + 18, 98), stat_delta, font=font_delta, fill=(255, 255, 255, 255))
+
+    # Divider line
+    draw.line((64, 175, width - 64, 175), fill=(255, 255, 255, 50), width=2)
+
+    # Label text (up to 2 lines)
+    label_lines = wrap_text(stat_label.upper(), font_label, max_width=width - 128, max_lines=2)
+    y_text = 205
+    for line in label_lines:
+        draw.text((64, y_text), line, font=font_label, fill=(245, 166, 35, 255))
+        y_text += 50
+
+    # Source credit at bottom
+    credit_str = source_credit if source_credit.lower().startswith("source:") else f"Source: {source_credit}"
+    draw.text((64, height - 58), credit_str, font=font_credit, fill=(180, 200, 220, 240))
+
+    img.save(str(output_path), "PNG")
+
+
+def draw_headline_split(
+    kicker: str,
+    headline: str,
+    bullets: list[str],
+    source_credit: str,
+    output_path: Path,
+    width: int = 760,
+    height: int = 760,
+    font_candidates: list[str] | None = None,
+) -> None:
+    """Draws a vertical split-screen briefing panel (Shotcraft headline_split recipe)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Deep Navy background
+    bg_color = (11, 31, 58, 245)
+    border_color = (245, 166, 35, 200)
+    draw_rounded_panel(draw, (0, 0, width, height), radius=24, fill=bg_color, border_color=border_color, border_width=3)
+
+    # Left accent indicator bar
+    draw.rounded_rectangle((16, 24, 24, height - 24), radius=4, fill=(245, 166, 35, 255))
+
+    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
+    font_kicker = get_font(fonts, 28)
+    font_hl = get_font(fonts, 38)
+    font_bullet = get_font(regular_fonts, 26)
+    font_credit = get_font(regular_fonts, 22)
+
+    # Kicker tag
+    draw.text((56, 40), kicker.upper(), font=font_kicker, fill=(245, 166, 35, 255))
+
+    # Headline (up to 3 lines)
+    hl_lines = wrap_text(headline, font_hl, max_width=width - 100, max_lines=3)
+    y_pos = 90
+    for line in hl_lines:
+        draw.text((56, y_pos), line, font=font_hl, fill=(255, 255, 255, 255))
+        y_pos += 48
+
+    # Separator
+    y_pos += 16
+    draw.line((56, y_pos, width - 56, y_pos), fill=(255, 255, 255, 50), width=2)
+    y_pos += 30
+
+    # Bullets
+    for b in bullets[:3]:
+        bullet_lines = wrap_text(b, font_bullet, max_width=width - 120, max_lines=2)
+        # Bullet diamond
+        draw.polygon([(60, y_pos + 12), (68, y_pos + 6), (76, y_pos + 12), (68, y_pos + 18)], fill=(245, 166, 35, 255))
+        for bl in bullet_lines:
+            draw.text((92, y_pos), bl, font=font_bullet, fill=(225, 235, 245, 255))
+            y_pos += 36
+        y_pos += 14
+
+    # Bottom source credit
+    credit_str = source_credit if source_credit.lower().startswith("source:") else f"Source: {source_credit}"
+    draw.text((56, height - 52), credit_str, font=font_credit, fill=(180, 200, 220, 240))
+
+    img.save(str(output_path), "PNG")
+
+
+def draw_quote_card(
+    quote_text: str,
+    speaker_name: str,
+    speaker_title: str | None,
+    source_credit: str,
+    output_path: Path,
+    width: int = 1400,
+    height: int = 520,
+    font_candidates: list[str] | None = None,
+) -> None:
+    """Draws an authoritative quote card (Shotcraft quote_focus recipe)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Deep Navy background
+    bg_color = (11, 31, 58, 240)
+    border_color = (70, 130, 180, 220)  # Steel blue border
+    draw_rounded_panel(draw, (0, 0, width, height), radius=24, fill=bg_color, border_color=border_color, border_width=3)
+
+    # Top accent bar
+    draw.rounded_rectangle((24, 16, width - 24, 24), radius=4, fill=(70, 130, 180, 255))
+
+    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
+    font_glyph = get_font(fonts, 100)
+    font_quote = get_font(regular_fonts, 36)
+    font_speaker = get_font(fonts, 34)
+    font_title = get_font(regular_fonts, 26)
+    font_credit = get_font(regular_fonts, 22)
+
+    # Large quotation mark glyph
+    draw.text((54, 30), "\u201C", font=font_glyph, fill=(245, 166, 35, 160))
+
+    # Quote body (up to 3 lines)
+    clean_quote = quote_text.strip().strip('"').strip("'")
+    q_lines = wrap_text(f'"{clean_quote}"', font_quote, max_width=width - 180, max_lines=3)
+    y_pos = 110
+    for line in q_lines:
+        draw.text((120, y_pos), line, font=font_quote, fill=(255, 255, 255, 255))
+        y_pos += 48
+
+    # Attribution divider
+    y_pos = max(y_pos + 16, 280)
+    draw.line((120, y_pos, width - 120, y_pos), fill=(255, 255, 255, 50), width=2)
+    y_pos += 24
+
+    # Speaker Name and Title
+    draw.text((120, y_pos), f"\u2014 {speaker_name}", font=font_speaker, fill=(245, 166, 35, 255))
+    if speaker_title:
+        draw.text((120, y_pos + 46), speaker_title, font=font_title, fill=(180, 205, 230, 240))
+
+    # Bottom source credit
+    credit_str = source_credit if source_credit.lower().startswith("source:") else f"Source: {source_credit}"
+    draw.text((120, height - 52), credit_str, font=font_credit, fill=(160, 185, 210, 200))
+
+    img.save(str(output_path), "PNG")
+
+
+def draw_news_ticker(
+    ticker_text: str,
+    output_path: Path,
+    width: int = 1728,
+    height: int = 44,
+    font_candidates: list[str] | None = None,
+) -> None:
+    """Draws a breaking news / bulletin bottom ticker strap."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Navy ticker background
+    bg_color = (11, 31, 58, 245)
+    draw.rectangle((0, 0, width, height), fill=bg_color)
+
+    # Amber tag on left
+    draw.rectangle((0, 0, 180, height), fill=(245, 166, 35, 255))
+    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
+    font_tag = get_font(fonts, 22)
+    font_txt = get_font(regular_fonts, 24)
+
+    draw.text((20, 8), "LATEST UPDATE", font=font_tag, fill=(11, 31, 58, 255))
+    draw.text((204, 8), ticker_text, font=font_txt, fill=(255, 255, 255, 255))
+
+    img.save(str(output_path), "PNG")
+

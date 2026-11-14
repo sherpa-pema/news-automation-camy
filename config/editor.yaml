@@ -179,3 +179,127 @@ categories:
     - "school"
     - "university"
     - "community"
+
+entity_aliases:
+  uml:
+    - "cpn-uml"
+    - "cpn (uml)"
+    - "uml"
+    - "एमाले"
+    - "नेकपा एमाले"
+  rsp:
+    - "rsp"
+    - "rastriya swatantra party"
+    - "रास्वपा"
+    - "राष्ट्रिय स्वतन्त्र पार्टी"
+  nc:
+    - "nepali congress"
+    - "नेपाली कांग्रेस"
+    - "कांग्रेस"
+  maoist:
+    - "cpn-maoist"
+    - "maoist centre"
+    - "माओवादी"
+    - "माओवादी केन्द्र"
+  nrb:
+    - "nrb"
+    - "nepal rastra bank"
+    - "राष्ट्र बैंक"
+    - "नेपाल राष्ट्र बैंक"
+  nepse:
+    - "nepse"
+    - "nepal stock exchange"
+    - "नेप्से"
+  ciaa:
+    - "ciaa"
+    - "अख्तियार"
+  nea:
+    - "nea"
+    - "nepal electricity authority"
+    - "विद्युत प्राधिकरण"
+    - "नेपाल विद्युत प्राधिकरण"
+  caan:
+    - "caan"
+    - "civil aviation authority of nepal"
+    - "नागरिक उड्डयन प्राधिकरण"
+  noc:
+    - "noc"
+    - "nepal oil corporation"
+    - "आयल निगम"
+    - "नेपाल आयल निगम"
+  kmc:
+    - "kmc"
+    - "kathmandu metropolitan city"
+    - "काठमाडौं महानगर"
+    - "महानगरपालिका"
+  muglin:
+    - "muglin"
+    - "mugling"
+    - "मुग्लिन"
+  balen:
+    - "balen"
+    - "balendra"
+    - "बालेन"
+    - "बालेन्द्र"
+  prachanda:
+    - "prachanda"
+    - "pushpa kamal dahal"
+    - "प्रचण्ड"
+    - "पुष्पकमल दाहाल"
+  oli:
+    - "kp oli"
+    - "k.p. oli"
+    - "kp sharma oli"
+    - "केपी ओली"
+    - "ओली"
+  deuba:
+    - "sher bahadur deuba"
+    - "deuba"
+    - "शेरबहादुर देउवा"
+    - "देउवा"
+  kathmandu:
+    - "kathmandu"
+    - "ktm"
+    - "काठमाडौं"
+    - "काठमाडौँ"
+  pokhara:
+    - "pokhara"
+    - "पोखरा"
+
+acronym_blocklist:
+  - "NEA"
+  - "NRB"
+  - "NEPSE"
+  - "CIAA"
+  - "CIB"
+  - "CAAN"
+  - "NOC"
+  - "KMC"
+  - "TU"
+  - "UML"
+  - "RSP"
+  - "NCELL"
+  - "NTC"
+  - "IRD"
+  - "NIA"
+
+visual_keyword_rules:
+  blocked_western_terms:
+    - "dollar bills"
+    - "us dollar"
+    - "capitol dome"
+    - "white house"
+    - "police cruiser"
+    - "nyse"
+    - "wall street"
+    - "euro notes"
+
+deduplication:
+  cross_day_lookback_days: 2
+  cross_day_repeat_penalty: -600
+
+llm_curator:
+  enabled: true
+  timeout_sec: 60
+  max_candidates: 60
+

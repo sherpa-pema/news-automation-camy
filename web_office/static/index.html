@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nepal News Bot HQ — 2D Agent Office</title>
+  <link rel="stylesheet" href="/css/office.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Top Control Room HUD -->
+    <header class="hud-bar">
+      <div class="hud-left">
+        <div class="brand">
+          <span class="brand-dot" id="liveDot"></span>
+          <span class="brand-title">NEPAL NEWS BOT HQ</span>
+          <span class="badge badge-neutral" id="runKindBadge">TEST</span>
+          <span class="badge badge-status" id="overallStatusBadge">LOADING</span>
+        </div>
+
+        <label class="run-picker">
+          <span>Run:</span>
+          <select id="runDateSelect"></select>
+        </label>
+
+        <div class="replay-group">
+          <button class="btn btn-sm btn-ghost" id="replayBtn" title="Replay stage & packet flow">
+            ▶ Replay
+          </button>
+          <select id="replaySpeedSelect" class="select-sm" title="Replay speed">
+            <option value="1">1x</option>
+            <option value="3" selected>3x</option>
+            <option value="8">8x</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="hud-right">
+        <button class="btn btn-sm btn-ghost" id="soundToggleBtn" title="Toggle office audio chimes">🔇 Sound Off</button>
+        <button class="btn btn-sm btn-ghost" id="doctorBtn" title="Run system readiness check">🩺 Doctor</button>
+        <button class="btn btn-sm btn-ghost" id="bossDrawerBtn" title="Open Boss Controls">👔 Boss Desk</button>
+        <button class="btn btn-primary" id="primaryActionBtn">Loading...</button>
+      </div>
+    </header>
+
+    <!-- Main 2D Office Canvas Stage -->
+    <main class="stage-wrap">
+      <div class="canvas-container">
+        <canvas id="officeCanvas"></canvas>
+        <div id="hoverTooltip" class="tooltip hidden"></div>
+
+        <!-- Floating Replay Banner -->
+        <div id="replayBanner" class="replay-banner hidden">
+          <span id="replayLabel">Replaying run...</span>
+          <button class="btn btn-xs btn-ghost" id="stopReplayBtn">Stop Replay</button>
+        </div>
+      </div>
+
+      <!-- Slide-out Right Inspector / Boss Drawer -->
+      <aside id="sideDrawer" class="drawer hidden">
+        <div class="drawer-header">
+          <div>
+            <h2 id="drawerTitle">Station Inspector</h2>
+            <p id="drawerSubtitle" class="muted">Click any desk or Boss Office to inspect</p>
+          </div>
+          <button class="btn btn-xs btn-ghost" id="closeDrawerBtn">✕</button>
+        </div>
+
+        <div class="drawer-tabs" id="drawerTabs"></div>
+        <div class="drawer-body" id="drawerBody"></div>
+      </aside>
+    </main>
+
+    <!-- Bottom Live Activity Ticker & Log Strip -->
+    <footer class="ticker-bar">
+      <div class="ticker-status">
+        <span class="ticker-tag">FEED</span>
+        <span id="tickerLatest">Connecting to Nepal News Bot HQ...</span>
+      </div>
+      <div class="ticker-actions">
+        <button class="btn btn-xs btn-ghost" id="toggleLogDrawerBtn">📜 Live Logs</button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Modal for Video / Storyboard / Picker / Doctor -->
+  <div id="modalOverlay" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modalTitle">Preview</h3>
+        <button class="btn btn-xs btn-ghost" id="closeModalBtn">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

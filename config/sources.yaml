@@ -6,49 +6,111 @@ settings:
   request_delay_seconds: 2
   timezone: "Asia/Kathmandu"
   lookback_hours: 30
+  max_undated_feed_position: 5
+  default_trust_weight: 0.70
+  priority_tags:
+    - "cover"
+    - "breaking news"
+    - "breaking"
+    - "top story"
+    - "top stories"
+    - "exclusive"
+    - "trending"
+    - "featured"
+    - "मुख्य समाचार"
+    - "ब्रेकिङ"
 
 sources:
   - name: "Onlinekhabar English"
     homepage: "https://english.onlinekhabar.com"
     rss: "https://english.onlinekhabar.com/feed"
+    language: "en"
     method: "rss"
     max_articles: 20
     robots_ok: true
     enabled: true
+    trust_weight: 0.82
     notes: "Verified working. RSS 2.0 with 20 entries containing title, link, and publication timestamp. robots.txt only disallows /wp-admin/."
 
   - name: "The Kathmandu Post"
     homepage: "https://kathmandupost.com"
     rss: "https://kathmandupost.com/rss"
+    language: "en"
     method: "rss"
     max_articles: 20
     robots_ok: true
     enabled: true
+    trust_weight: 0.95
     notes: "Verified working. RSS feed returns 40 entries with title, link, and summary. robots.txt allows all crawling. Publication date embedded in article URL structure."
 
   - name: "Republica"
     homepage: "https://myrepublica.nagariknetwork.com"
     rss: "https://myrepublica.nagariknetwork.com/feeds"
+    language: "en"
     method: "rss"
     max_articles: 20
     robots_ok: true
     enabled: true
+    trust_weight: 0.88
     notes: "Verified working. RSS feed returns 30 entries with title, link, and published date. robots.txt allows all crawling."
 
   - name: "The Himalayan Times"
     homepage: "https://thehimalayantimes.com"
     rss: "https://thehimalayantimes.com/rssFeed/0"
+    language: "en"
     method: "rss"
     max_articles: 20
     robots_ok: true
     enabled: true
+    trust_weight: 0.88
     notes: "Verified working. General site-wide latest news feed at /rssFeed/0 returns 50 entries across all sections (Kathmandu, Nepal, etc.) with full titles, links, and timestamps. (Category feed #15 also available)."
 
   - name: "Setopati English"
     homepage: "https://en.setopati.com"
     rss: null
+    language: "en"
     method: "html_only"
     max_articles: 20
     robots_ok: true
-    enabled: false
-    notes: "Feed endpoint https://en.setopati.com/feed returns HTTP 500 internal server error. Disabled for RSS-first ingestion until feed is restored or HTML fallback is permitted."
+    enabled: true
+    trust_weight: 0.82
+    include_url_patterns:
+      - "^/[a-zA-Z0-9_-]+/\\d+$"
+    exclude_url_patterns:
+      - "^/unicode-converter"
+      - "^/special/"
+      - "^/multimedia"
+    notes: "RSS endpoint https://en.setopati.com/feed returns HTTP 500; enabled via hardened html_only fallback matching /<category>/<id> article URLs with HTML metadata date filtering."
+
+  - name: "Ratopati English"
+    homepage: "https://english.ratopati.com"
+    rss: "https://english.ratopati.com/rss/"
+    language: "en"
+    method: "rss"
+    max_articles: 20
+    robots_ok: true
+    enabled: true
+    trust_weight: 0.75
+    notes: "Verified working. RSS feed returns ~30 entries in English; robots.txt allows crawling."
+
+  - name: "Nagarik News"
+    homepage: "https://nagariknews.nagariknetwork.com"
+    rss: "https://nagariknews.nagariknetwork.com/feed"
+    language: "ne"
+    method: "rss"
+    max_articles: 20
+    robots_ok: true
+    enabled: true
+    trust_weight: 0.85
+    notes: "Verified working. Nepali-language RSS feed (20 entries) with +0545 timestamps and category URL paths; robots.txt allows crawling."
+
+  - name: "Rajdhani Daily"
+    homepage: "https://rajdhanidaily.com"
+    rss: "https://rajdhanidaily.com/feed"
+    language: "ne"
+    method: "rss"
+    max_articles: 15
+    robots_ok: true
+    enabled: true
+    trust_weight: 0.75
+    notes: "Verified working. Nepali-language RSS feed (10 entries) with Breaking News/Exclusive/province tags; robots.txt only disallows /imunify-bot-check."

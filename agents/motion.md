@@ -22,18 +22,22 @@ The Motion Agent orchestrates the graphic design and motion composition plan for
 - Structure: `{ resolution, fps, scenes: [{ id, media, lower_third, caption_style, transition }] }`
 
 ## 5. Tools & Modules
-- Design Rule Engine / LLM prompt: Generates motion parameters adhering to broadcast television standards.
-- Color & Palette System: High-contrast news palette (navy/crimson/white/gold).
-- Filter-Graph Generator: Synthesizes FFmpeg complex filter graphs or Remotion composition JSON.
+- Design Rule Engine / Opus Prompt Rules: Semantic shot classifier mapping news stories into Video Shotcraft broadcast recipes (`stat_callout`, `quote_card`, `headline_split`, `cinematic_broll_full`).
+- Librosa Rhythmic Audio Engine (`src/utils/audio_sync.py`): Extracts musical downbeats, performs cut snapping, and precomputes automated sidechain ducking curves.
+- Video Shotcraft Component Generator (`src/utils/motion_graphics.py`): Pillow-based high-contrast broadcast cards adhering to 5% action-safe television boundaries.
+- Color & Palette System: High-contrast news palette (navy/amber/crimson/white).
+- Filter-Graph Generator: Synthesizes FFmpeg complex filter graphs with multi-layer overlays and ASS subtitles.
 
 ## 6. Failure Modes
 - **Missing Scene Specification**: If any scene from `timeline.json` is omitted from `render_plan.json`, validation fails immediately.
 - **Transition Overlap Conflict**: Transition duration exceeding scene length triggers duration auto-clamping.
 - **Unreadable Typography**: Missing font parameters or low-contrast presets trigger default fallback template.
+- **Safe Zone Collision**: Any card or text violating the 5% boundary or overlapping the caption band triggers an assertion failure.
 
 ## 7. Definition of Done Checklist
 - [ ] Every scene from `timeline.json` has an entry in `render_plan.json`.
 - [ ] On-screen source credit specified for every news story.
+- [ ] Broadcast shot recipe assigned (`stat_callout`, `quote_card`, `headline_split`, etc.).
 - [ ] Target resolution (e.g. `1920x1080`) and FPS (e.g. 30) defined.
-- [ ] Transition types and durations specified between adjacent scenes.
+- [ ] Transition types, durations, and beat-snapped cuts defined.
 - [ ] Output `render_plan.json` validates against `render_plan.schema.json`.

@@ -25,6 +25,7 @@ def generate_editor_brief(
     """Assembles the comprehensive editor brief markdown document."""
     spoken_date = format_spoken_date(run_date)
     wps = budget["words_per_second"]
+    sps = budget.get("syllables_per_second", 3.3)
     target_words = budget["target_total_words"]
     min_words = budget["min_total_words"]
     max_words = budget["max_total_words"]
@@ -42,7 +43,7 @@ def generate_editor_brief(
     lines.append("---")
     lines.append("## 1. Word Budget & Speech Rate Calibration")
     lines.append(f"- **Calibration**: {calib_msg}")
-    lines.append(f"- **Speech Rate**: `{wps:.2f}` words per second")
+    lines.append(f"- **Speech Rate**: `{wps:.2f}` words per second (`{sps:.2f}` syllables per second)")
     lines.append(f"- **Target Video Duration**: 2:00 to 3:00 (120 to 180 seconds, target {budget['target_duration_sec']:.0f}s)")
     lines.append(f"- **Total Word Budget**: **{target_words} words** (allowed range: **{min_words} to {max_words} words**)")
     lines.append("- **Scene Breakdown** (7 scenes total):")
@@ -58,6 +59,10 @@ def generate_editor_brief(
     lines.append("3. **Attribution**: Explicitly attribute claims ('officials said', 'the Ministry of Finance reported').")
     lines.append("4. **Sensitivity & Protection**: Crime, fatal accidents, deaths, abuse, or stories involving minors MUST set `sensitive: true`. Never name minors, victims, or unconvicted suspects. No graphic details.")
     lines.append("5. **Temporal & Event Timing**: Never write preview wording (e.g. 'is scheduled to face', 'will begin at five') for an event whose start time has already passed at writing time. A source that says an event is scheduled does not show it happened, so never rewrite a preview as past tense; skip it.")
+    lines.append("6. **Source Trust & Undated Items**: When outlets report conflicting figures or details, favor higher-trust outlets (`Trust` weight). Treat items marked `[DATE UNVERIFIED]` with caution.")
+    lines.append("7. **Developing Stories (Superseded Updates)**: If a cluster contains articles marked `[OLDER UPDATE — DO NOT USE FOR NUMBERS]`, ground all casualty, vote, and financial counts strictly from the latest non-superseded article.")
+    lines.append("8. **Cross-Day Repeats**: Clusters marked `[COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]` were already aired in the last 48 hours; skip them unless a fresh developing angle justifies inclusion.")
+    lines.append("9. **Multi-Source Synthesis**: When a cluster contains multiple member outlets, synthesize complementary details across sentences (e.g. combine casualties from one outlet with vehicle/route context or quotes from another) while citing the exact source URL for each sentence in the `evidence` list.")
     lines.append("")
     lines.append("### Broadcast Style & TTS Optimization")
     lines.append("1. **TTS-Friendly**: Short, punchy broadcast sentences. Standard English spelling for Nepali names and places.")
@@ -164,13 +169,45 @@ def generate_editor_brief(
     lines.append("")
 
     for c in shortlist:
-        lines.append(f"### [{c['cluster_id']}] {c['primary_title']}")
-        lines.append(f"- **Category Guess**: `{c['category_guess']}`")
+        repeat_tag = " [COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]" if c.get("covered_recently") else ""
+        lines.append(f"### [{c['cluster_id']}] {c['primary_title']}{repeat_tag}")
+        cluster_meta = f"- **Category Guess**: `{c['category_guess']}`"
+        if c.get("max_importance_hint") is not None:
+            cluster_meta += f" | **Max Importance**: `{c['max_importance_hint']}`"
+        if c.get("max_source_trust") is not None:
+            cluster_meta += f" | **Top Trust**: `{c['max_source_trust']}`"
+        if c.get("all_dates_missing"):
+            cluster_meta += " | **[DATE UNVERIFIED — verify freshness]**"
+        if c.get("covered_recently") and c.get("repeat_reason"):
+            cluster_meta += f" | **[COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]** ({c['repeat_reason']})"
+        lines.append(cluster_meta)
         lines.append(f"- **Confirmed Outlets ({c['source_count']})**: {', '.join(c['sources'])}")
+        if c.get("synthesis_notes"):
+            lines.append(f"- **Multi-Source Synthesis**: {c['synthesis_notes']}")
+        if c.get("conflicting_figures_resolution"):
+            lines.append(f"- **Numbers Resolution**: {c['conflicting_figures_resolution']}")
         lines.append("- **Member Articles**:")
         for a in c["articles"]:
-            lines.append(f"  - **{a['source']}**: [{a['title']}]({a['url']})")
-            lines.append(f"    *Published*: {a.get('published_at') or 'Unknown'}")
+            sup_tag = " **[OLDER UPDATE — DO NOT USE FOR NUMBERS]**" if a.get("superseded") else ""
+            lines.append(f"  - **{a['source']}**: [{a['title']}]({a['url']}){sup_tag}")
+            pub_str = a.get("published_at") or "Unknown"
+            date_conf = a.get("date_confidence")
+            meta_bits: list[str] = []
+            if a.get("source_trust") is not None:
+                meta_bits.append(f"Trust: {a['source_trust']}")
+            if a.get("importance_hint") is not None:
+                meta_bits.append(f"Imp: {a['importance_hint']}")
+            if a.get("feed_position") is not None:
+                meta_bits.append(f"Pos: #{a['feed_position']}")
+            if a.get("category_hint"):
+                meta_bits.append(f"Cat: {a['category_hint']}")
+            if date_conf:
+                meta_bits.append(f"Date: {date_conf}")
+            if a.get("language") and a.get("language") != "en":
+                meta_bits.append(f"Lang: {a['language']}")
+            warn_tag = " **[DATE UNVERIFIED]**" if date_conf == "missing" else ""
+            meta_suffix = f" ({' | '.join(meta_bits)})" if meta_bits else ""
+            lines.append(f"    *Published*: {pub_str}{meta_suffix}{warn_tag}{sup_tag}")
             lines.append(f"    *Summary*: {a.get('text_summary', '').strip()}")
             lines.append("    <details><summary>Click to view extracted full text</summary>")
             lines.append("")

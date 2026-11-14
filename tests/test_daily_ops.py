@@ -1444,3 +1444,159 @@ def test_publish_to_latest_mirrors_and_replaces_stale_files(tmp_path: Path) -> N
     assert (mirror_dir / "final.mp4").read_bytes() == b"MP4_V1"
     assert (mirror_dir / "storyboard_frames" / "frame_0000.jpg").read_bytes() == b"F0"
     assert not (mirror_dir / "storyboard_frames" / "stale.jpg").exists()
+
+
+def test_prepare_media_and_apply_picks_pre_render_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify two-step workflow pauses after media candidates for picking BEFORE render/publish, then applies picks cleanly."""
+    cfg_dir = tmp_path / "config"
+    _copy_configs(cfg_dir)
+    pipe_text = (cfg_dir / "pipeline.yaml").read_text(encoding="utf-8").replace(
+        "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest",
+        (tmp_path / "mirror_latest").as_posix(),
+    )
+    (cfg_dir / "pipeline.yaml").write_text(pipe_text, encoding="utf-8")
+
+    runs_dir = tmp_path / "runs"
+    latest_dir = tmp_path / "latest"
+    orch = Orchestrator(run_date="2026-11-12", config_dir=cfg_dir, runs_dir=runs_dir)
+    manifest = orch.initialize_run()
+    manifest["stages"]["scraper"]["status"] = "done"
+    manifest["stages"]["editor"]["status"] = "done"
+    manifest["run_kind"] = "production"
+    (orch.run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _create_approved_script(orch.run_dir, run_kind="production")
+
+    class FakeVoice:
+        def __init__(self, run_dir: Path, config=None, **kwargs):
+            self.run_dir = Path(run_dir)
+
+        def run(self, m):
+            (self.run_dir / "audio").mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "audio" / "narration.wav").write_bytes(b"RIFF")
+            return ["audio/narration.wav"]
+
+        def validate(self, outs):
+            return True, None
+
+    class FakeTimeline:
+        def __init__(self, run_dir: Path, config=None, **kwargs):
+            self.run_dir = Path(run_dir)
+
+        def run(self, m):
+            (self.run_dir / "timeline").mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "timeline" / "timeline.json").write_text('{"duration_sec": 7.0, "scenes": []}', encoding="utf-8")
+            (self.run_dir / "timeline" / "captions.json").write_text("[]", encoding="utf-8")
+            return ["timeline/timeline.json", "timeline/captions.json"]
+
+        def validate(self, outs):
+            return True, None
+
+    applied_calls: list[Path] = []
+
+    class FakeMedia:
+        def __init__(self, run_dir: Path, config=None, **kwargs):
+            self.run_dir = Path(run_dir)
+
+        def run_candidates(self, candidates_k: int = 6):
+            (self.run_dir / "media" / "review").mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "media" / "shot_plan.json").write_text("{}", encoding="utf-8")
+            (self.run_dir / "media" / "review" / "wanted_clips.md").write_text("# Wanted\n", encoding="utf-8")
+            cands = {
+                "date": "2026-11-12",
+                "min_relevance": 0.5,
+                "shots": [
+                    {"shot_id": "scene_01_00", "auto_pick_type": "clip", "best_score": 0.8},
+                ],
+            }
+            (self.run_dir / "media" / "review" / "candidates.json").write_text(json.dumps(cands), encoding="utf-8")
+            (self.run_dir / "media" / "review" / "picker.html").write_text("<html>picker</html>", encoding="utf-8")
+            return cands
+
+        def apply_picks(self, picks_file):
+            applied_calls.append(Path(picks_file))
+            (self.run_dir / "media").mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "media" / "media_manifest.json").write_text('{"shots": []}', encoding="utf-8")
+            (self.run_dir / "media" / "credits.md").write_text("# Credits\n", encoding="utf-8")
+            (self.run_dir / "media" / "picks_log.json").write_text(
+                json.dumps({"total_shots": 1, "applied_picks": ["scene_01_00"], "cards_created": [], "failed_downloads": [], "action_counts": {"pick": 1}}),
+                encoding="utf-8",
+            )
+            return ["media/media_manifest.json", "media/credits.md"]
+
+        def validate(self, outs):
+            return True, None
+
+    class FakeMotion:
+        def __init__(self, run_dir: Path, config=None, **kwargs):
+            self.run_dir = Path(run_dir)
+
+        def run(self, m):
+            (self.run_dir / "motion").mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "motion" / "render_plan.json").write_text('{"scenes": [], "overlays": []}', encoding="utf-8")
+            return ["motion/render_plan.json"]
+
+        def validate(self, outs):
+            return True, None
+
+    class FakeRender:
+        def __init__(self, run_dir: Path, config=None, **kwargs):
+            self.run_dir = Path(run_dir)
+
+        def run(self, m):
+            (self.run_dir / "render").mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "render" / "final.mp4").write_bytes(b"PICKED_MP4")
+            (self.run_dir / "render" / "description.md").write_text("# Desc\n", encoding="utf-8")
+            return ["render/final.mp4", "render/description.md"]
+
+        def validate(self, outs):
+            return True, None
+
+    class FakeQA:
+        def __init__(self, run_dir: Path, config=None, **kwargs):
+            self.run_dir = Path(run_dir)
+
+        def run(self, m):
+            (self.run_dir / "qa" / "storyboard_frames").mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "qa" / "qa_report.json").write_text('{"passed": true, "checks": [], "warnings": []}', encoding="utf-8")
+            (self.run_dir / "qa" / "contact_sheet.jpg").write_bytes(b"CS")
+            (self.run_dir / "qa" / "storyboard.html").write_text("<html>sb</html>", encoding="utf-8")
+            return ["qa/qa_report.json", "qa/contact_sheet.jpg", "qa/storyboard.html"]
+
+        def validate(self, outs):
+            return True, None
+
+    monkeypatch.setitem(orch_mod.AGENT_REGISTRY, "voice", FakeVoice)
+    monkeypatch.setitem(orch_mod.AGENT_REGISTRY, "timeline", FakeTimeline)
+    monkeypatch.setitem(orch_mod.AGENT_REGISTRY, "media", FakeMedia)
+    monkeypatch.setitem(orch_mod.AGENT_REGISTRY, "motion", FakeMotion)
+    monkeypatch.setitem(orch_mod.AGENT_REGISTRY, "render", FakeRender)
+    monkeypatch.setitem(orch_mod.AGENT_REGISTRY, "qa", FakeQA)
+
+    prep_res = orch.run_prepare_media(candidates_k=6)
+    assert prep_res["ok"] is True
+    assert prep_res["media_status"] == "awaiting_approval"
+    assert prep_res["status"] == "paused"
+    assert prep_res["auto_clips_count"] == 1
+    assert (orch.run_dir / "media" / "review" / "picker.html").exists()
+    # Crucially, render/final.mp4 has NOT been created yet!
+    assert not (orch.run_dir / "render" / "final.mp4").exists()
+
+    # Idempotent re-call without force returns already_prepared=True
+    prep_again = orch.run_prepare_media(candidates_k=6)
+    assert prep_again["ok"] is True
+    assert prep_again["already_prepared"] is True
+
+    picks_file = orch.run_dir / "media" / "review" / "picks_ui.json"
+    picks_file.write_text(json.dumps({"date": "2026-11-12", "picks": {"scene_01_00": {"action": "pick", "candidate_id": "x"}}}), encoding="utf-8")
+
+    fin_res = orch.run_apply_picks_and_finish(picks_file, latest_dir=latest_dir)
+    assert fin_res["ok"] is True
+    assert fin_res["status"] == "done"
+    assert len(applied_calls) == 1
+    assert (orch.run_dir / "render" / "final.mp4").read_bytes() == b"PICKED_MP4"
+    assert (latest_dir / "final.mp4").read_bytes() == b"PICKED_MP4"
+
+    final_manifest = json.loads((orch.run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert final_manifest["stages"]["media"]["status"] == "done"
+    assert final_manifest["stages"]["media"]["metrics"]["picked_by_user"] is True
+

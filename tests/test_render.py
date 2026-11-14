@@ -7,6 +7,7 @@ from PIL import Image
 
 from src.agents.render import RenderAgent, format_chapter_time
 from src.agents.qa import probe_file
+from src.utils.audio_sync import generate_synthetic_broadcast_theme
 from src.utils.tts import create_silence_wav
 
 
@@ -320,6 +321,87 @@ def test_render_agent_cache_invalidation_and_card_concat(tmp_path: Path) -> None
         "overlays": [],
     }
     (motion_dir / "render_plan.json").write_text(json.dumps(stale_plan), encoding="utf-8")
+    (motion_dir / "captions.ass").write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name\nStyle: Default\n[Events]\nFormat: Layer, Start, End, Style, Text\n",
+        encoding="utf-8",
+    )
+
+    agent = RenderAgent(run_dir=tmp_path)
+    agent.run(preview=True)
+    final_mp4 = tmp_path / "render" / "final_preview.mp4"
+    assert final_mp4.exists()
+    probe = probe_file(final_mp4)
+    assert any(s.get("codec_type") == "video" for s in probe.get("streams", []))
+    assert any(s.get("codec_type") == "audio" for s in probe.get("streams", []))
+    vid_dur = float(probe.get("format", {}).get("duration", 0.0))
+    assert abs(vid_dur - 4.0) < 0.1
+
+
+def test_render_agent_with_bgm_and_ducking(tmp_path: Path) -> None:
+    # Setup test run environment with background music
+    (tmp_path / "script").mkdir(parents=True)
+    (tmp_path / "script" / "script.json").write_text(
+        json.dumps({
+            "origin": "fixture",
+            "run_kind": "test",
+            "scenes": [
+                {"id": "intro", "type": "intro", "headline": "Intro"},
+                {"id": "scene_01", "type": "story", "headline": "Story 1"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "timeline").mkdir(parents=True)
+    (tmp_path / "timeline" / "timeline.json").write_text(
+        json.dumps({
+            "duration_sec": 4.0,
+            "scenes": [
+                {"id": "intro", "type": "intro", "start": 0.0, "end": 2.0},
+                {"id": "scene_01", "type": "story", "start": 2.0, "end": 4.0},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "audio").mkdir(parents=True)
+    create_silence_wav(tmp_path / "audio" / "narration.wav", duration_sec=4.0, sample_rate=48000)
+    bgm_file = tmp_path / "audio" / "bg_track.wav"
+    generate_synthetic_broadcast_theme(bgm_file, duration_sec=4.0, bpm=120.0)
+
+    shots_dir = tmp_path / "media" / "shots"
+    shots_dir.mkdir(parents=True)
+    Image.new("RGB", (320, 240), color=(15, 45, 90)).save(str(shots_dir / "shot_00.jpg"))
+    Image.new("RGB", (320, 240), color=(90, 20, 20)).save(str(shots_dir / "card_00.png"))
+
+    media_data = {
+        "resolution": [1920, 1080],
+        "fps": 30,
+        "shots": [
+            {"scene_id": "intro", "shot_index": 0, "start": 0.0, "end": 2.0, "type": "image", "file": "media/shots/shot_00.jpg", "sha256": "h1"},
+            {"scene_id": "scene_01", "shot_index": 0, "start": 2.0, "end": 4.0, "type": "card", "file": "media/shots/card_00.png", "sha256": "h2"},
+        ],
+    }
+    (tmp_path / "media" / "media_manifest.json").write_text(json.dumps(media_data), encoding="utf-8")
+
+    motion_dir = tmp_path / "motion"
+    motion_dir.mkdir(parents=True)
+    plan_with_bgm = {
+        "resolution": "1920x1080",
+        "fps": 30,
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 4.0,
+        "captions_ass": "motion/captions.ass",
+        "audio_grid": {
+            "enabled": True,
+            "bgm_file": str(bgm_file),
+            "tempo_bpm": 120.0,
+        },
+        "scenes": [
+            {"id": "intro", "start": 0.0, "end": 2.0, "duration": 2.0, "shots": [{"shot_index": 0, "file": "media/shots/shot_00.jpg", "start": 0.0, "end": 2.0, "duration": 2.0, "type": "image"}], "overlays": []},
+            {"id": "scene_01", "start": 2.0, "end": 4.0, "duration": 2.0, "shots": [{"shot_index": 0, "file": "media/shots/card_00.png", "start": 2.0, "end": 4.0, "duration": 2.0, "type": "image"}], "overlays": []},
+        ],
+        "overlays": [],
+    }
+    (motion_dir / "render_plan.json").write_text(json.dumps(plan_with_bgm), encoding="utf-8")
     (motion_dir / "captions.ass").write_text(
         "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name\nStyle: Default\n[Events]\nFormat: Layer, Start, End, Style, Text\n",
         encoding="utf-8",

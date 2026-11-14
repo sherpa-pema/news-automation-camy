@@ -8,29 +8,79 @@ import re
 from typing import Any
 import yaml
 
+from src.utils.editor_budget import count_syllables_in_text, estimate_scene_duration_sec
 from src.utils.schema_validate import validate_contract
 
-WORD_TO_NUMBER = {
+DEFAULT_ACRONYM_BLOCKLIST = [
+    "NEA", "NRB", "NEPSE", "CIAA", "CIB", "CAAN", "NOC",
+    "KMC", "TU", "UML", "RSP", "NCELL", "NTC", "IRD", "NIA",
+]
+
+DEFAULT_BLOCKED_WESTERN_TERMS = [
+    "dollar bills", "us dollar", "capitol dome", "white house",
+    "police cruiser", "nyse", "wall street", "euro notes",
+]
+
+UNIT_MULTIPLIERS: dict[str, float] = {
+    "hundred": 100.0,
+    "hundreds": 100.0,
+    "thousand": 1e3,
+    "thousands": 1e3,
+    "हजार": 1e3,
+    "lakh": 1e5,
+    "lakhs": 1e5,
+    "lac": 1e5,
+    "lacs": 1e5,
+    "लाख": 1e5,
+    "million": 1e6,
+    "millions": 1e6,
+    "crore": 1e7,
+    "crores": 1e7,
+    "करोड": 1e7,
+    "arab": 1e9,
+    "arabs": 1e9,
+    "अर्ब": 1e9,
+    "billion": 1e9,
+    "billions": 1e9,
+    "kharba": 1e11,
+    "kharbas": 1e11,
+    "kharab": 1e11,
+    "kharabs": 1e11,
+    "खर्ब": 1e11,
+}
+
+WORD_TO_NUMBER: dict[str, float] = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
     "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
     "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
     "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
-    "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
-    "lakh": 100000, "crore": 10000000, "million": 1000000, "billion": 1000000000,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+    "hundred": 100, "hundreds": 100,
+    "thousand": 1000, "thousands": 1000,
+    "lakh": 100000, "lakhs": 100000, "lac": 100000, "lacs": 100000,
+    "million": 1000000, "millions": 1000000,
+    "crore": 10000000, "crores": 10000000,
+    "arab": 1000000000, "arabs": 1000000000,
+    "billion": 1000000000, "billions": 1000000000,
+    "kharba": 100000000000, "kharbas": 100000000000,
+    "kharab": 100000000000, "kharabs": 100000000000,
 }
+
+SCALE_MULTIPLIER_VALUES = {100.0, 1000.0, 100000.0, 1000000.0, 10000000.0, 1000000000.0, 100000000000.0}
 
 
 def parse_spoken_number_phrase(tokens: list[str]) -> list[float]:
-    """Parses spoken number words into numeric values, supporting spoken decimals ('point')."""
-    numbers = []
+    """Parses spoken number words into numeric values, supporting spoken decimals ('point') and scale multipliers."""
+    numbers: list[float] = []
     current_val = 0.0
     current_acc = 0.0
     in_number = False
     in_decimal = False
     decimal_digits = ""
+    last_multiplier = 0.0
 
-    def flush_current():
-        nonlocal current_val, current_acc, in_number, in_decimal, decimal_digits
+    def flush_current() -> None:
+        nonlocal current_val, current_acc, in_number, in_decimal, decimal_digits, last_multiplier
         if not in_number:
             return
         dec_val = 0.0
@@ -47,21 +97,41 @@ def parse_spoken_number_phrase(tokens: list[str]) -> list[float]:
         in_number = False
         in_decimal = False
         decimal_digits = ""
+        last_multiplier = 0.0
 
-    for tok in tokens:
+    n_toks = len(tokens)
+    for idx, tok in enumerate(tokens):
         clean_tok = tok.lower().strip(",.")
         if clean_tok == "point":
             in_number = True
             in_decimal = True
+            last_multiplier = 0.0
             continue
+
+        # Allow 'and' inside compound phrases like "one hundred and five" or "one crore and fifty lakh"
+        if clean_tok == "and" and in_number and last_multiplier >= 100.0 and idx + 1 < n_toks:
+            next_tok = tokens[idx + 1].lower().strip(",.")
+            if next_tok in WORD_TO_NUMBER and WORD_TO_NUMBER[next_tok] < last_multiplier:
+                continue
 
         if in_decimal:
             if clean_tok in WORD_TO_NUMBER:
                 val = WORD_TO_NUMBER[clean_tok]
-                if 0 <= val <= 9:
-                    decimal_digits += str(val)
+                if val in SCALE_MULTIPLIER_VALUES:
+                    dec_val = float("0." + decimal_digits) if decimal_digits else 0.0
+                    base = (current_acc or 0.0) + dec_val
+                    if val == 100.0:
+                        current_acc = base * 100.0
+                    else:
+                        current_val += base * val
+                        current_acc = 0.0
+                        last_multiplier = val
+                    in_decimal = False
+                    decimal_digits = ""
+                elif 0 <= val <= 9:
+                    decimal_digits += str(int(val))
                 else:
-                    decimal_digits += str(val)
+                    decimal_digits += str(int(val))
             else:
                 flush_current()
             continue
@@ -69,14 +139,21 @@ def parse_spoken_number_phrase(tokens: list[str]) -> list[float]:
         if clean_tok in WORD_TO_NUMBER:
             in_number = True
             val = WORD_TO_NUMBER[clean_tok]
-            if val == 100:
-                current_acc = (current_acc or 1.0) * 100
-            elif val in (1000, 100000, 1000000, 10000000, 1000000000):
+            if val == 100.0:
+                current_acc = (current_acc or 1.0) * 100.0
+                last_multiplier = 100.0
+            elif val in SCALE_MULTIPLIER_VALUES:
                 current_acc = (current_acc or 1.0) * val
                 current_val += current_acc
                 current_acc = 0.0
+                last_multiplier = val
             else:
-                current_acc += val
+                # Support spoken year form like "twenty eighty three" (20 * 100 + 83 = 2083)
+                if current_val == 0.0 and current_acc in (19.0, 20.0) and 10.0 <= val < 100.0:
+                    current_acc = current_acc * 100.0 + val
+                else:
+                    current_acc += val
+                last_multiplier = 0.0
         else:
             flush_current()
 
@@ -84,16 +161,20 @@ def parse_spoken_number_phrase(tokens: list[str]) -> list[float]:
     return numbers
 
 
+DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+
 def extract_numbers_from_text(text: str) -> set[float]:
-    """Extracts all numeric quantities (digits and spelled words) from text."""
-    found = set()
+    """Extracts all numeric quantities (digits, unit scales, and spelled words) from text."""
+    found: set[float] = set()
+    text = text.translate(DEVANAGARI_DIGITS)
 
     # Normalize currency prefixes by inserting a space: e.g. "Rs105.92" -> "Rs 105.92"
     norm_text = re.sub(r"\b(Rs|NRs|NPR|\$|€|£)\s*", r"\1 ", text, flags=re.IGNORECASE)
     norm_text = re.sub(r"([$€£])(\d)", r"\1 \2", norm_text)
 
-    # 1. Regex for digit quantities with optional commas, decimals, suffixes
-    digit_matches = re.findall(r"\b\d+(?:,\d{3})*(?:\.\d+)?\b", norm_text)
+    # 1. Regex for digit quantities with optional commas, decimals
+    digit_matches = re.findall(r"(?<![\d.])\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])", norm_text)
     for m in digit_matches:
         try:
             val = float(m.replace(",", ""))
@@ -101,41 +182,67 @@ def extract_numbers_from_text(text: str) -> set[float]:
         except ValueError:
             pass
 
-    # 2. Extract spelled-out numbers
+    # 2. Extract spelled-out numbers (including unit scales and spoken decimals)
     words = re.findall(r"\b[a-zA-Z]+\b", text)
     parsed_spoken = parse_spoken_number_phrase(words)
     for val in parsed_spoken:
         found.add(val)
 
-    # 3. Currency / multipliers: e.g. "Rs 50,000", "50 thousand", "10 million"
-    multipliers = {
-        "hundred": 100, "thousand": 1000, "lakh": 100000, "million": 1000000,
-        "crore": 10000000, "billion": 1000000000,
-    }
-    for mult_name, mult_val in multipliers.items():
-        pattern = rf"\b(\d+(?:\.\d+)?)\s+{mult_name}\b"
-        for m in re.finditer(pattern, norm_text, re.IGNORECASE):
-            try:
-                base = float(m.group(1))
-                found.add(base * mult_val)
-                found.add(base)
-            except ValueError:
-                pass
+    # 3. Currency / South Asian & Western multipliers (English + Devanagari) + compound descending pairs
+    unit_regex = (
+        r"(?<![\d.])(\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+        r"(hundreds?|thousands?|lakhs?|lacs?|millions?|crores?|arabs?|billions?|kharbas?|kharabs?|हजार|लाख|करोड|अर्ब|खर्ब)"
+        r"(?![a-zA-Z\u0900-\u097F])"
+    )
+    unit_matches = list(re.finditer(unit_regex, norm_text, re.IGNORECASE))
+    compound_acc = 0.0
+    prev_mult = 0.0
+    prev_end = -1
+    for m in unit_matches:
+        try:
+            base = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        unit_key = m.group(2).lower()
+        mult_val = UNIT_MULTIPLIERS.get(unit_key)
+        if not mult_val:
+            continue
+        scaled = base * mult_val
+        found.add(scaled)
+        found.add(base)
+
+        gap = norm_text[prev_end:m.start()].strip().lower() if prev_end >= 0 else None
+        if prev_end >= 0 and gap in ("", "and", "र") and prev_mult > mult_val:
+            compound_acc += scaled
+            found.add(compound_acc)
+        else:
+            compound_acc = scaled
+        prev_mult = mult_val
+        prev_end = m.end()
 
     return found
 
 
 def find_number_spans_in_text(text: str) -> list[tuple[float, int, int]]:
     """Finds all numbers (digits and spelled words) along with their character span (start, end) in text."""
-    spans = []
+    spans: list[tuple[float, int, int]] = []
+    text = text.translate(DEVANAGARI_DIGITS)
 
-    # 1. Digits
-    for m in re.finditer(r"\b\d+(?:,\d{3})*(?:\.\d+)?\b", text):
+    # 1. Digits (with optional adjacent unit multiplier)
+    unit_regex = (
+        r"(?<![\d.])(\d+(?:,\d{3})*(?:\.\d+)?)"
+        r"(?:\s*(hundreds?|thousands?|lakhs?|lacs?|millions?|crores?|arabs?|billions?|kharbas?|kharabs?|हजार|लाख|करोड|अर्ब|खर्ब)(?![a-zA-Z\u0900-\u097F]))?"
+    )
+    for m in re.finditer(unit_regex, text, re.IGNORECASE):
         try:
-            val = float(m.group(0).replace(",", ""))
-            spans.append((val, m.start(), m.end()))
+            base = float(m.group(1).replace(",", ""))
         except ValueError:
-            pass
+            continue
+        unit_str = m.group(2)
+        if unit_str and unit_str.lower() in UNIT_MULTIPLIERS:
+            spans.append((base * UNIT_MULTIPLIERS[unit_str.lower()], m.start(), m.end()))
+        else:
+            spans.append((base, m.start(), m.end()))
 
     # 2. Spoken word phrases
     token_matches = list(re.finditer(r"\b[a-zA-Z]+\b", text))
@@ -145,11 +252,27 @@ def find_number_spans_in_text(text: str) -> list[tuple[float, int, int]]:
         tok = tm.group(0).lower()
         if tok in WORD_TO_NUMBER or tok == "point":
             start_pos = tm.start()
-            phrase_tokens = []
+            phrase_tokens: list[str] = []
             j = i
+            last_mult = 0.0
             while j < len(token_matches):
                 w = token_matches[j].group(0).lower()
-                if w in WORD_TO_NUMBER or w == "point":
+                if w in WORD_TO_NUMBER:
+                    phrase_tokens.append(w)
+                    val = WORD_TO_NUMBER[w]
+                    last_mult = val if val in SCALE_MULTIPLIER_VALUES else 0.0
+                    j += 1
+                elif w == "point":
+                    phrase_tokens.append(w)
+                    last_mult = 0.0
+                    j += 1
+                elif (
+                    w == "and"
+                    and last_mult >= 100.0
+                    and j + 1 < len(token_matches)
+                    and token_matches[j + 1].group(0).lower() in WORD_TO_NUMBER
+                    and WORD_TO_NUMBER[token_matches[j + 1].group(0).lower()] < last_mult
+                ):
                     phrase_tokens.append(w)
                     j += 1
                 else:
@@ -169,6 +292,40 @@ def split_sentences(text: str) -> list[str]:
     """Splits text into sentences."""
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     return [s for s in sentences if s.strip()]
+
+
+def load_pronunciation_keys(pronunciations_path: Path | str = "config/pronunciations.yaml") -> set[str]:
+    """Loads lowercased keys from config/pronunciations.yaml."""
+    p_path = Path(pronunciations_path)
+    if not p_path.exists():
+        return set()
+    try:
+        with open(p_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict) and isinstance(data.get("pronunciations"), dict):
+            data = data["pronunciations"]
+        if isinstance(data, dict):
+            return {str(k).strip().lower() for k in data.keys() if str(k).strip()}
+    except Exception:
+        pass
+    return set()
+
+
+def is_bs_fiscal_or_date_context(sent: str, start_idx: int, end_idx: int) -> bool:
+    """Checks whether a number span sits inside a Bikram Sambat fiscal year or date context."""
+    window = sent[max(0, start_idx - 55) : min(len(sent), end_idx + 40)].lower()
+    if re.search(
+        r"\b(fiscal|bikram|sambat|bs|b\.s\.|year|budget|calendar|"
+        r"baisakh|baishakh|jestha|jeth|ashad|asar|ashadh|shrawan|saun|"
+        r"bhadra|bhadau|ashwin|asoj|kartik|mangsir|poush|push|magh|falgun|phagun|chaitra|chait|"
+        r"january|february|march|april|may|june|july|august|september|october|november|december)\b",
+        window,
+    ):
+        return True
+    prefix = sent[max(0, start_idx - 20) : start_idx].lower()
+    if re.search(r"\b(in|for|of|since|by|from|through|during)\s*$", prefix):
+        return True
+    return False
 
 
 def load_editor_config() -> tuple[dict[str, Any], set[str]]:
@@ -432,20 +589,34 @@ def validate_script_draft(
     """
     errors: list[str] = []
     warnings: list[str] = []
+    structured_errors: list[dict[str, Any]] = []
+    structured_warnings: list[dict[str, Any]] = []
+
+    def add_global_error(msg: str) -> None:
+        errors.append(msg)
+        structured_errors.append({"scene_index": None, "scene_id": None, "message": msg})
+
+    def add_global_warning(msg: str) -> None:
+        warnings.append(msg)
+        structured_warnings.append({"scene_index": None, "scene_id": None, "message": msg})
+
     report: dict[str, Any] = {
         "validator_fingerprint": compute_validator_fingerprint(),
         "validated_at": datetime.now(timezone.utc).isoformat(),
         "is_valid": False,
         "errors": [],
         "warnings": [],
+        "structured_errors": [],
+        "structured_warnings": [],
         "scene_results": {},
         "metrics": {},
     }
 
     if not draft_path.exists():
         msg = f"Draft script file not found at {draft_path}"
-        errors.append(msg)
+        add_global_error(msg)
         report["errors"] = errors
+        report["structured_errors"] = structured_errors
         return False, errors, warnings, report
 
     try:
@@ -453,8 +624,9 @@ def validate_script_draft(
             draft_data = json.load(f)
     except Exception as e:
         msg = f"Failed to parse draft JSON: {e}"
-        errors.append(msg)
+        add_global_error(msg)
         report["errors"] = errors
+        report["structured_errors"] = structured_errors
         return False, errors, warnings, report
 
     # 1. Schema Validation against contracts/script.schema.json
@@ -462,7 +634,7 @@ def validate_script_draft(
     if schema_path.exists():
         is_schema_valid, schema_err = validate_contract(draft_data, schema_path)
         if not is_schema_valid:
-            errors.append(f"Schema validation failed: {schema_err}")
+            add_global_error(f"Schema validation failed: {schema_err}")
 
     # Load shortlist for grounding and cluster checks
     shortlist = []
@@ -477,14 +649,52 @@ def validate_script_draft(
             cluster_by_url[a["url"]] = c
 
     cfg, proper_noun_whitelist = load_editor_config()
+    pron_keys = load_pronunciation_keys()
     sensitive_triggers = set(cfg.get("sensitive_triggers", []))
+    acronym_blocklist = cfg.get("acronym_blocklist", DEFAULT_ACRONYM_BLOCKLIST)
+    blocked_acronyms = {
+        str(a).strip().lower(): str(a).strip()
+        for a in acronym_blocklist
+        if str(a).strip() and str(a).strip().lower() not in pron_keys
+    }
+    blocked_western_terms = [
+        str(t).strip().lower()
+        for t in cfg.get("visual_keyword_rules", {}).get("blocked_western_terms", DEFAULT_BLOCKED_WESTERN_TERMS)
+        if str(t).strip()
+    ]
+
+    # Expand multi-word entries in whitelist & pronunciations for single-token lookups
+    whitelist_token_words = set(proper_noun_whitelist)
+    for entry in proper_noun_whitelist:
+        for part in entry.split():
+            whitelist_token_words.add(part)
+    pron_token_words = set(pron_keys)
+    for entry in pron_keys:
+        for part in entry.split():
+            pron_token_words.add(part)
+
+    # Determine run Gregorian year for Bikram Sambat (BS) fiscal/date tolerance
+    run_year = datetime.now(timezone.utc).year
+    date_str = str(draft_data.get("date") or "")
+    m_yr = re.match(r"^(\d{4})-\d{2}-\d{2}$", date_str)
+    if m_yr:
+        run_year = int(m_yr.group(1))
+    bs_whitelist_years = {float(run_year + 56), float(run_year + 57), float(run_year + 58)}
+    bs_short_years = {
+        float((run_year + 56) % 100),
+        float((run_year + 57) % 100),
+        float((run_year + 58) % 100),
+    }
 
     scenes = draft_data.get("scenes", [])
     if len(scenes) != 7:
-        errors.append(f"Expected exactly 7 scenes (intro + 5 stories + outro), got {len(scenes)}")
+        add_global_error(f"Expected exactly 7 scenes (intro + 5 stories + outro), got {len(scenes)}")
 
     total_words = 0
+    total_syllables = 0
+    total_est_duration_sec = 0.0
     wps = budget.get("words_per_second", 2.15)
+    sps = budget.get("syllables_per_second", 3.3)
 
     for sc_idx, scene in enumerate(scenes):
         sc_id = scene.get("id", f"scene_{sc_idx}")
@@ -497,8 +707,8 @@ def validate_script_draft(
         evidence = scene.get("evidence", [])
         sensitive = scene.get("sensitive", False)
 
-        sc_errors = []
-        sc_warnings = []
+        sc_errors: list[str] = []
+        sc_warnings: list[str] = []
 
         # Headline checks
         hl_words = headline.strip().split()
@@ -507,21 +717,32 @@ def validate_script_draft(
         if headline.strip().endswith("."):
             sc_errors.append(f"Headline must not end with a period: '{headline}'")
 
-        # Visual keywords count
+        # Visual keywords count & cultural safety
         if not (3 <= len(visual_keywords) <= 5):
             sc_errors.append(f"Visual keywords count must be 3 to 5 (got {len(visual_keywords)})")
 
-        # Visual keywords person name check
         for kw in visual_keywords:
+            kw_lower = kw.strip().lower()
+            for term in blocked_western_terms:
+                if kw_lower == term or re.search(rf"\b{re.escape(term)}\b", kw_lower):
+                    sc_errors.append(
+                        f"Visual keyword '{kw}' matches blocked Western term '{term}'; use Nepal-appropriate stock keywords"
+                    )
+                    break
+
             kw_words = kw.strip().split()
             if len(kw_words) >= 2 and all(w[0].isupper() for w in kw_words if w.isalpha()):
-                if kw.lower() not in proper_noun_whitelist:
+                if kw_lower not in proper_noun_whitelist:
                     sc_warnings.append(f"Visual keyword '{kw}' looks like a proper name or brand")
 
-        # Narration Word Counts
+        # Narration Word & Syllable Counts
         narration_words = narration.strip().split()
         word_count = len(narration_words)
+        syllable_count = count_syllables_in_text(narration)
+        sc_est_dur = estimate_scene_duration_sec(narration, budget)
         total_words += word_count
+        total_syllables += syllable_count
+        total_est_duration_sec += sc_est_dur
 
         if sc_type == "intro":
             if not (15 <= word_count <= 40):
@@ -555,10 +776,40 @@ def validate_script_draft(
         if non_ascii:
             sc_errors.append(f"Non-ASCII characters or emojis found: {set(non_ascii)}")
 
+        # Case-insensitive Acronym Blocklist check
+        seen_blocked_acronyms: set[str] = set()
+        for tok in re.findall(r"\b[a-zA-Z]+\b", narration):
+            tok_l = tok.lower()
+            if tok_l in blocked_acronyms and tok_l not in seen_blocked_acronyms:
+                seen_blocked_acronyms.add(tok_l)
+                sc_errors.append(
+                    f"Blocked acronym '{tok}' ({blocked_acronyms[tok_l]}) in narration without pronunciation mapping; expand the full institution name"
+                )
+
         # All-caps words (>1 letter) warning
         all_caps = [w for w in re.findall(r"\b[A-Z]{2,}\b", narration)]
         if all_caps:
             sc_warnings.append(f"All-caps words found: {all_caps}")
+
+        # Unmapped proper noun warning for TTS pronunciation coverage (all scene types)
+        seen_unmapped_tts: set[str] = set()
+        for sent in sentences:
+            sent_words = sent.strip().split()
+            for w_idx, w in enumerate(sent_words):
+                if w_idx == 0:
+                    continue
+                clean_w = re.sub(r"[^a-zA-Z]", "", w)
+                if (
+                    len(clean_w) >= 2
+                    and clean_w[0].isupper()
+                    and clean_w.lower() not in whitelist_token_words
+                    and clean_w.lower() not in pron_token_words
+                    and clean_w.lower() not in seen_unmapped_tts
+                ):
+                    seen_unmapped_tts.add(clean_w.lower())
+                    sc_warnings.append(
+                        f"Potential unmapped proper noun for TTS: '{clean_w}' is absent from editor_whitelist.yaml and pronunciations.yaml"
+                    )
 
         # Grounding & cluster checks for story scenes
         if sc_type == "story":
@@ -623,18 +874,31 @@ def validate_script_draft(
                         sc_errors.append(f"Verbatim 8-word overlap with source text: '{bad_phrase}'")
                         break
 
-                # Number verification: numbers in narration must appear in cluster text
+                # Number verification: numbers in narration must appear in cluster text (with unit-scale & BS date tolerance)
                 cluster_numbers = extract_numbers_from_text(cluster_combined_text)
 
                 for sent in sentences:
                     sent_spans = find_number_spans_in_text(sent)
+                    sent_nums = {sp[0] for sp in sent_spans}
+                    has_bs_year_in_sent = bool(sent_nums & bs_whitelist_years)
+                    is_fiscal_sent = bool(re.search(r"\b(fiscal|bikram|sambat)\b", sent, re.IGNORECASE))
+
                     for num, start_idx, end_idx in sent_spans:
                         # Allow 0 or 1 for general speech
                         if num in (0.0, 1.0):
                             continue
 
-                        # Check exact match in cluster (with float tolerance 1e-5)
-                        is_exact = any(abs(num - c) < 1e-5 for c in cluster_numbers)
+                        # Bikram Sambat (BS) fiscal year / date context whitelist
+                        if num in bs_whitelist_years and is_bs_fiscal_or_date_context(sent, start_idx, end_idx):
+                            continue
+                        if is_fiscal_sent and has_bs_year_in_sent and num in bs_short_years:
+                            continue
+
+                        # Check exact match in cluster (with float tolerance 1e-5 or relative 1e-6 for large numbers)
+                        is_exact = any(
+                            abs(num - c) < 1e-5 or (c != 0 and abs(num - c) / abs(c) < 1e-6)
+                            for c in cluster_numbers
+                        )
                         if is_exact:
                             continue
 
@@ -663,7 +927,7 @@ def validate_script_draft(
                         else:
                             sc_errors.append(f"Invented number {num} in narration does not appear in source cluster")
 
-                # Proper nouns warning check
+                # Proper nouns warning check (absent from cluster text)
                 cluster_text_lower = cluster_combined_text.lower()
                 for sent in sentences:
                     sent_words = sent.strip().split()
@@ -671,7 +935,7 @@ def validate_script_draft(
                         if w_idx == 0:
                             continue  # First word of sentence is capitalized by grammar
                         clean_w = re.sub(r"[^a-zA-Z]", "", w)
-                        if clean_w and clean_w[0].isupper() and clean_w.lower() not in proper_noun_whitelist:
+                        if clean_w and clean_w[0].isupper() and clean_w.lower() not in whitelist_token_words:
                             if clean_w.lower() not in cluster_text_lower:
                                 sc_warnings.append(f"Proper noun '{clean_w}' in narration not found in cluster text")
 
@@ -684,25 +948,37 @@ def validate_script_draft(
                     if overlap_ratio > 0.20:
                         sc_warnings.append(f"High 4-word sequence overlap with source ({overlap_ratio*100:.1f}% > 20%)")
 
+        sc_struct_errors = [{"scene_index": sc_idx, "scene_id": sc_id, "message": e} for e in sc_errors]
+        sc_struct_warnings = [{"scene_index": sc_idx, "scene_id": sc_id, "message": w} for w in sc_warnings]
+
         errors.extend(sc_errors)
         warnings.extend(sc_warnings)
+        structured_errors.extend(sc_struct_errors)
+        structured_warnings.extend(sc_struct_warnings)
         report["scene_results"][sc_id] = {
+            "scene_index": sc_idx,
+            "scene_id": sc_id,
             "errors": sc_errors,
             "warnings": sc_warnings,
+            "structured_errors": sc_struct_errors,
+            "structured_warnings": sc_struct_warnings,
             "word_count": word_count,
-            "est_duration_sec": round(word_count / wps, 1),
+            "syllable_count": syllable_count,
+            "est_duration_sec": sc_est_dur,
         }
 
     # Total word count budget check (10% tolerance)
     min_budget = budget.get("min_total_words", 250)
     max_budget = budget.get("max_total_words", 380)
     if not (min_budget <= total_words <= max_budget):
-        errors.append(f"Total word count {total_words} outside budget range [{min_budget}, {max_budget}]")
+        add_global_error(f"Total word count {total_words} outside budget range [{min_budget}, {max_budget}]")
 
     report["metrics"] = {
         "total_words": total_words,
+        "total_syllables": total_syllables,
         "words_per_second": wps,
-        "total_est_duration_sec": round(total_words / wps, 1),
+        "syllables_per_second": sps,
+        "total_est_duration_sec": round(total_est_duration_sec, 1),
         "scene_count": len(scenes),
     }
 
@@ -710,6 +986,8 @@ def validate_script_draft(
     report["is_valid"] = is_valid
     report["errors"] = errors
     report["warnings"] = warnings
+    report["structured_errors"] = structured_errors
+    report["structured_warnings"] = structured_warnings
 
     return is_valid, errors, warnings, report
 

@@ -7,6 +7,7 @@ Masters the master narration to broadcast loudness (-16 LUFS / -1.5 dB True Peak
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -21,6 +22,7 @@ import yaml
 from src.agents.base import BaseAgent
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest, save_manifest, update_stage_status
+from src.utils.text_normalizer import normalize_for_speech
 from src.utils.tts import (
     FakeTTS as FakeTTS,
     MingEngine as MingEngine,
@@ -101,36 +103,56 @@ def get_unverified_pronunciations_applied(
 
 
 def clean_narration_text(text: str, pronunciations: dict[str, str] | None = None) -> str:
-    """Cleans script text for broadcast narration.
+    """Cleans and normalizes script text for broadcast narration.
 
-    1. Strips any bracketed paralinguistic tags like [Sigh] or [Laughter].
-    2. Normalizes smart quotes and whitespace.
-    3. Applies whole-word, case-insensitive phonetic replacements.
+    Delegates to the shared normalizer (src.utils.text_normalizer.normalize_for_speech)
+    so VoiceAgent and TimelineAgent expand pronunciations, currency, percentages,
+    decimals, numbers, and acronyms identically.
     """
-    if not text:
-        return ""
+    return normalize_for_speech(text, pronunciations)
 
-    # Strip bracketed tags
-    cleaned = re.sub(r"\[.*?\]", "", text)
 
-    # Normalize unicode quotes and dashes
-    cleaned = cleaned.replace("“", '"').replace("”", '"')
-    cleaned = cleaned.replace("‘", "'").replace("’", "'")
-    cleaned = cleaned.replace("—", " - ").replace("–", " - ")
+def _compute_file_sha256(path: Path) -> str:
+    """Returns SHA-256 hex digest of a file, or 'missing' if absent."""
+    if not path.exists() or not path.is_file():
+        return "missing"
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    # Normalize spaces around punctuation
-    cleaned = re.sub(r"\s+([.,!?;:])", r"\1", cleaned)
 
-    # Normalize whitespace
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    # Apply pronunciation dictionary (case-insensitive whole-word replacement)
-    if pronunciations:
-        for word, respelling in pronunciations.items():
-            pattern = re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)
-            cleaned = pattern.sub(respelling, cleaned)
-
-    return cleaned
+def _compute_scene_cache_key(
+    cleaned_text: str,
+    engine_name: str,
+    voice: str,
+    task: str,
+    language_id: str,
+    chunk_mode: str,
+    ref_sha256: str,
+    engine_settings: dict[str, Any],
+) -> str:
+    """Computes deterministic cache key for a scene's synthesized audio."""
+    payload = {
+        "v": 2,
+        "text": cleaned_text,
+        "engine": engine_name,
+        "voice": voice,
+        "task": task,
+        "language_id": language_id,
+        "chunk_mode": chunk_mode,
+        "ref_sha256": ref_sha256,
+        "speed": engine_settings.get("speed"),
+        "cfg": engine_settings.get("cfg"),
+        "sigma": engine_settings.get("sigma"),
+        "temperature": engine_settings.get("temperature"),
+        "max_length": engine_settings.get("max_length"),
+        "crossfade_ms": engine_settings.get("crossfade_ms"),
+        "text_normalization": engine_settings.get("text_normalization"),
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def split_into_sentences(text: str) -> list[str]:
@@ -140,7 +162,7 @@ def split_into_sentences(text: str) -> list[str]:
 
     # Protect common abbreviations before splitting
     protected = text
-    abbrevs = ["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "e.g.", "i.e.", "vs.", "No."]
+    abbrevs = ["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "e.g.", "i.e.", "vs.", "No.", "Rs.", "NRs."]
     for idx, abb in enumerate(abbrevs):
         protected = protected.replace(abb, f"__ABB_{idx}__")
 
@@ -249,6 +271,12 @@ class VoiceAgent(BaseAgent):
         language_id = voice_cfg.get("language_id", "en")
         instruction_schema = voice_cfg.get("instruction_schema", "en")
         speed = voice_cfg.get("speed")
+        cfg = float(voice_cfg.get("cfg", 2.0))
+        sigma = float(voice_cfg.get("sigma", 0.25))
+        temperature = float(voice_cfg.get("temperature", 0.0))
+        max_length = int(voice_cfg.get("max_length", 24))
+        crossfade_ms = float(voice_cfg.get("crossfade_ms", 12.0))
+        daemon_url = voice_cfg.get("daemon_url")
         text_normalization = voice_cfg.get("text_normalization", False)
         chunk_mode = voice_cfg.get("chunk_mode", "scene").lower().strip()
         reference_wav = voice_cfg.get("reference_wav", "config/voice/reference.wav")
@@ -260,6 +288,9 @@ class VoiceAgent(BaseAgent):
         pad_before = float(voice_cfg.get("pad_before", 0.4))
         pad_after = float(voice_cfg.get("pad_after", 0.6))
         target_lufs = float(voice_cfg.get("target_lufs", -16.0))
+        raw_scene_rms = voice_cfg.get("target_scene_rms_dbfs", -20.0)
+        target_scene_rms_dbfs = float(raw_scene_rms) if raw_scene_rms is not None else None
+        highpass_hz = float(voice_cfg.get("highpass_hz", 80.0))
         output_sample_rate = int(voice_cfg.get("output_sample_rate", 48000))
         disclose_synthetic_voice = bool(voice_cfg.get("disclose_synthetic_voice", True))
 
@@ -320,15 +351,76 @@ class VoiceAgent(BaseAgent):
         total_retries = 0
         all_scene_durations: list[dict[str, Any]] = []
         scene_consistency_map: dict[str, Any] = {}
+        reference_f0_hz = 0.0
 
-        all_items = []
+        engine_settings = {
+            "model_path": model_path,
+            "task": task,
+            "voice": voice,
+            "language_id": language_id,
+            "instruction_schema": instruction_schema,
+            "device": device,
+            "dtype": dtype,
+            "speed": speed,
+            "cfg": cfg,
+            "sigma": sigma,
+            "temperature": temperature,
+            "max_length": max_length,
+            "crossfade_ms": crossfade_ms,
+            "daemon_url": daemon_url,
+            "text_normalization": text_normalization,
+            "reference_wav": reference_wav,
+            "reference_txt": reference_txt,
+            "similarity_threshold": similarity_threshold,
+            "f0_tolerance_pct": f0_tolerance_pct,
+            "max_retries": max_retries,
+        }
+
+        ref_sha256 = _compute_file_sha256(Path(reference_wav)) if engine_name != "fake" else "fake"
+        all_items: list[dict[str, Any]] = []
         scene_items_map: dict[str, list[Path]] = {}
+        scene_cache_keys: dict[str, str] = {}
+        cached_scenes: set[str] = set()
 
         for scene in target_scenes:
             scene_id = scene["id"]
             # READ ONLY narration text
             raw_narration = scene.get("narration", "")
             cleaned_text = clean_narration_text(raw_narration, pronunciations)
+            cache_key = _compute_scene_cache_key(
+                cleaned_text=cleaned_text,
+                engine_name=engine_name,
+                voice=voice,
+                task=task,
+                language_id=language_id,
+                chunk_mode=chunk_mode,
+                ref_sha256=ref_sha256,
+                engine_settings=engine_settings,
+            )
+            scene_cache_keys[scene_id] = cache_key
+
+            scene_wav_path = scenes_dir / f"{scene_id}.wav"
+            scene_meta_path = scenes_dir / f"{scene_id}.meta.json"
+            force_regen = (only_scene is not None and scene_id == only_scene)
+
+            if not force_regen and scene_wav_path.exists() and scene_meta_path.exists() and scene_wav_path.stat().st_size > 1000:
+                try:
+                    meta_data = json.loads(scene_meta_path.read_text(encoding="utf-8"))
+                    info = read_wav_info(scene_wav_path)
+                    if (
+                        meta_data.get("cache_key") == cache_key
+                        and info["duration_sec"] > 0.1
+                        and all(m.get("passes_gate", True) for m in meta_data.get("consistency", {}).values())
+                    ):
+                        cached_scenes.add(scene_id)
+                        for k_id, k_metrics in meta_data.get("consistency", {}).items():
+                            scene_consistency_map[k_id] = k_metrics
+                        if not reference_f0_hz and meta_data.get("reference_f0_hz"):
+                            reference_f0_hz = float(meta_data["reference_f0_hz"])
+                        self.logger.info(f"Reusing cached scene audio (hash match): {scene_id}")
+                        continue
+                except Exception:
+                    pass
 
             if chunk_mode == "scene":
                 s_id = scene_id
@@ -365,24 +457,7 @@ class VoiceAgent(BaseAgent):
                     s_path.unlink()
                 items_to_synthesize.append(item)
             else:
-                self.logger.info(f"Using existing cached audio: {item['id']}")
-
-        engine_settings = {
-            "model_path": model_path,
-            "task": task,
-            "voice": voice,
-            "language_id": language_id,
-            "instruction_schema": instruction_schema,
-            "device": device,
-            "dtype": dtype,
-            "speed": speed,
-            "text_normalization": text_normalization,
-            "reference_wav": reference_wav,
-            "reference_txt": reference_txt,
-            "similarity_threshold": similarity_threshold,
-            "f0_tolerance_pct": f0_tolerance_pct,
-            "max_retries": max_retries,
-        }
+                self.logger.info(f"Using existing cached chunk audio: {item['id']}")
 
         total_synthesis_time = 0.0
         total_model_load_time = 0.0
@@ -390,13 +465,15 @@ class VoiceAgent(BaseAgent):
         if items_to_synthesize:
             self.logger.info(
                 f"Synthesizing {len(items_to_synthesize)} {chunk_mode}(s) "
-                f"({len(all_items) - len(items_to_synthesize)} already cached) "
+                f"({len(cached_scenes)} scene(s) cached, {len(all_items) - len(items_to_synthesize)} chunk(s) cached) "
                 f"across {len(target_scenes)} scene(s)..."
             )
             t0 = time.time()
             batch_result = tts_engine.synthesize_batch(items_to_synthesize, engine_settings)
             total_synthesis_time = time.time() - t0
             total_model_load_time = batch_result.get("model_load_time_sec", 0.0)
+            if batch_result.get("reference_f0_hz"):
+                reference_f0_hz = float(batch_result["reference_f0_hz"])
 
             # Inspect per-item result for failures and retries
             for res_item in batch_result.get("results", []):
@@ -413,13 +490,15 @@ class VoiceAgent(BaseAgent):
                     raise RuntimeError(f"Failed to synthesize {chunk_mode} {r_id}: {err_msg}")
         else:
             self.logger.info(
-                f"All {len(all_items)} {chunk_mode}(s) already synthesized and valid on disk."
+                f"All {len(target_scenes)} scene(s) already synthesized and valid on disk."
             )
 
-        # Assemble each scene with padding and pauses
+        # Assemble each newly synthesized scene with padding, pauses, and active RMS leveling
         pause_to_use = 0.0 if chunk_mode == "scene" else pause_between_sentences
         for scene in target_scenes:
             scene_id = scene["id"]
+            if scene_id in cached_scenes:
+                continue
             wav_paths = scene_items_map[scene_id]
             scene_wav_path = scenes_dir / f"{scene_id}.wav"
             scene_dur = assemble_scene_audio(
@@ -428,7 +507,26 @@ class VoiceAgent(BaseAgent):
                 pause_sec=pause_to_use,
                 pad_before=pad_before,
                 pad_after=pad_after,
-                target_sample_rate=44100 if engine_name == "ming" else 44100,
+                target_sample_rate=44100,
+                target_rms_dbfs=target_scene_rms_dbfs,
+            )
+
+            # Save per-scene content-hash metadata for future cache hits
+            scene_meta_path = scenes_dir / f"{scene_id}.meta.json"
+            scene_cons = {
+                k: v for k, v in scene_consistency_map.items()
+                if k == scene_id or k.startswith(f"{scene_id}_s")
+            }
+            scene_meta_path.write_text(
+                json.dumps(
+                    {
+                        "cache_key": scene_cache_keys[scene_id],
+                        "reference_f0_hz": reference_f0_hz,
+                        "consistency": scene_cons,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
             )
 
             # Also create aliases audio/scene_<id>.wav and audio/<id>.wav for convenience
@@ -436,7 +534,6 @@ class VoiceAgent(BaseAgent):
             shutil.copyfile(scene_wav_path, alias_path)
             if scene_id.startswith("scene_"):
                 shutil.copyfile(scene_wav_path, audio_dir / f"{scene_id}.wav")
-            self.logger.info(f"Scene '{scene_id}' assembled: duration = {scene_dur:.2f}s")
             self.logger.info(f"Scene '{scene_id}' assembled: duration = {scene_dur:.2f}s")
 
         # Clean up temporary sentence wavs
@@ -483,7 +580,7 @@ class VoiceAgent(BaseAgent):
         raw_concat_path = audio_dir / "raw_concat.wav"
         raw_total_dur = concatenate_scenes(scene_files_in_order, raw_concat_path)
 
-        # Loudness normalization and mastering (two-pass loudnorm to 48kHz)
+        # Loudness normalization and mastering (high-pass + two-pass loudnorm to 48kHz)
         master_narration_path = audio_dir / "narration.wav"
         self.logger.info(f"Mastering narration with FFmpeg two-pass loudnorm (target={target_lufs} LUFS)...")
         master_stats = master_audio_loudnorm(
@@ -492,6 +589,7 @@ class VoiceAgent(BaseAgent):
             target_lufs=target_lufs,
             true_peak=-1.5,
             sample_rate=output_sample_rate,
+            highpass_hz=highpass_hz,
         )
         # Clean up intermediate raw concat
         raw_concat_path.unlink(missing_ok=True)
@@ -502,6 +600,15 @@ class VoiceAgent(BaseAgent):
 
         # Build voice_report.json
         unverified_applied = get_unverified_pronunciations_applied(scenes)
+        speaker_consistency_payload: dict[str, Any] = {
+            "reference_wav": str(reference_wav),
+            "similarity_threshold": similarity_threshold,
+            "f0_tolerance_pct": f0_tolerance_pct,
+            "metrics": scene_consistency_map,
+        }
+        if reference_f0_hz > 0.0:
+            speaker_consistency_payload["reference_f0_hz"] = reference_f0_hz
+
         voice_report = {
             "engine": engine_name,
             "model": model_path,
@@ -516,12 +623,9 @@ class VoiceAgent(BaseAgent):
             "total_audio_duration_sec": final_duration_sec,
             "real_time_factor": rtf,
             "retries": total_retries,
-            "speaker_consistency": {
-                "reference_wav": str(reference_wav),
-                "similarity_threshold": similarity_threshold,
-                "f0_tolerance_pct": f0_tolerance_pct,
-                "metrics": scene_consistency_map,
-            },
+            "loudness_after_lufs": master_stats.get("after_lufs"),
+            "true_peak_after_db": master_stats.get("after_true_peak"),
+            "speaker_consistency": speaker_consistency_payload,
             "loudnorm": master_stats,
             "scenes": scene_metrics,
             "unverified_pronunciations_applied": unverified_applied,

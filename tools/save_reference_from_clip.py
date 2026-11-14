@@ -6,29 +6,42 @@ import torch
 import torchaudio
 
 def main():
+    src_wav = Path(r"C:\Users\Chungba Sherpa\Downloads\female_voice.wav")
     src_mp3 = Path(r"C:\Users\Chungba Sherpa\Downloads\NP_lemi.mp3")
-    if not src_mp3.exists():
-        print(f"Error: {src_mp3} does not exist.")
+
+    target_src = src_wav if src_wav.exists() else src_mp3
+    if not target_src.exists():
+        print(f"Error: Neither {src_wav} nor {src_mp3} exists.")
         return 1
 
-    wav, sr = torchaudio.load(str(src_mp3))
+    wav, sr = torchaudio.load(str(target_src))
     if wav.shape[0] > 1:
         wav = wav.mean(dim=0, keepdim=True)
 
+    # If processing female_voice.wav, trim leading/trailing digital silence
+    if target_src == src_wav:
+        threshold = 10.0 ** (-45.0 / 20.0)
+        abs_sig = np.abs(wav.squeeze(0).numpy())
+        idx = np.where(abs_sig > threshold)[0]
+        start_idx = max(0, idx[0] - int(sr * 0.10))
+        end_idx = min(wav.shape[1], idx[-1] + int(sr * 0.15))
+        wav = wav[:, start_idx:end_idx]
+        ref_text = "In the Game of Football, every player is a hero embarking on their quest."
+    else:
+        ref_text = (
+            "Hi guys, I don't even know where to begin, but one of my biggest dreams "
+            "of my career is finally coming true. I'm in Paris. I am here for Paris "
+            "Fashion Week as a backstage makeup artist."
+        )
+
     # Resample to 24000 Hz
-    wav_24k = torchaudio.transforms.Resample(sr, 24000)(wav)
+    wav_24k = torchaudio.transforms.Resample(sr, 24000)(wav) if sr != 24000 else wav
 
     # Scale peak to -3.0 dBFS
     max_val = torch.max(torch.abs(wav_24k)).item()
     target_peak = 10.0 ** (-3.0 / 20.0)
-    if max_val > target_peak:
+    if max_val > 0:
         wav_24k = wav_24k * (target_peak / max_val)
-
-    ref_text = (
-        "Hi guys, I don't even know where to begin, but one of my biggest dreams "
-        "of my career is finally coming true. I'm in Paris. I am here for Paris "
-        "Fashion Week as a backstage makeup artist."
-    )
 
     # Save to config/voice
     cfg_dir = Path("config/voice")

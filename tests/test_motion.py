@@ -13,6 +13,10 @@ from src.utils.motion_graphics import (
     draw_lower_third,
     draw_outro_card,
     draw_title_card,
+    draw_stat_callout,
+    draw_headline_split,
+    draw_quote_card,
+    draw_news_ticker,
     generate_ass_subtitles,
 )
 from src.utils.schema_validate import validate_contract
@@ -90,13 +94,17 @@ def test_overlay_safe_zone_and_non_overlap(style_config: dict[str, Any]) -> None
         f"Lower third bottom ({lt['y'] + lt['h']}) collides with caption band top ({cb['y']})"
     )
 
-    # Tags
-    for tag_key in ["illustrative_tag", "test_run_tag"]:
+    # Tags and Shotcraft cards
+    for tag_key in ["illustrative_tag", "test_run_tag", "stat_callout", "quote_card", "headline_split", "news_ticker"]:
         tag = layout[tag_key]
         assert tag["x"] >= min_x
         assert tag["x"] + tag["w"] <= max_x
         assert tag["y"] >= min_y
         assert tag["y"] + tag["h"] <= max_y
+        # All news cards and tickers must sit strictly above or at caption band boundary
+        assert (tag["y"] + tag["h"]) <= cb["y"], (
+            f"Layout {tag_key} bottom ({tag['y'] + tag['h']}) collides with caption band top ({cb['y']})"
+        )
 
 
 def test_pillow_overlay_generation(tmp_path: Path, style_config: dict[str, Any]) -> None:
@@ -126,6 +134,48 @@ def test_pillow_overlay_generation(tmp_path: Path, style_config: dict[str, Any])
     )
     assert outro_path.exists()
     assert outro_path.stat().st_size > 500
+
+    # Test Shotcraft cards
+    stat_path = tmp_path / "stat.png"
+    draw_stat_callout(
+        stat_value="Rs. 2.4 Trillion",
+        stat_label="Annual Remittance Inflow",
+        stat_delta="+14.2% YoY",
+        source_credit="Nepal Rastra Bank",
+        output_path=stat_path,
+    )
+    assert stat_path.exists()
+    assert stat_path.stat().st_size > 500
+
+    split_path = tmp_path / "split.png"
+    draw_headline_split(
+        kicker="Energy Pact",
+        headline="Nepal and India Sign 10,000 MW Electricity Trade Deal",
+        bullets=["25-year bilateral treaty", "Cross-border transmission upgrade"],
+        source_credit="Kathmandu Post",
+        output_path=split_path,
+    )
+    assert split_path.exists()
+    assert split_path.stat().st_size > 500
+
+    quote_path = tmp_path / "quote.png"
+    draw_quote_card(
+        quote_text="This agreement secures our clean energy transition.",
+        speaker_name="Kul Man Ghising",
+        speaker_title="Managing Director, NEA",
+        source_credit="OnlineKhabar",
+        output_path=quote_path,
+    )
+    assert quote_path.exists()
+    assert quote_path.stat().st_size > 500
+
+    ticker_path = tmp_path / "ticker.png"
+    draw_news_ticker(
+        ticker_text="Gold prices surge by Rs 1,200 per tola in Kathmandu market",
+        output_path=ticker_path,
+    )
+    assert ticker_path.exists()
+    assert ticker_path.stat().st_size > 500
 
 
 def test_motion_agent_plan_creation_and_watermark(tmp_path: Path) -> None:
@@ -227,3 +277,10 @@ def test_motion_agent_plan_creation_and_watermark(tmp_path: Path) -> None:
     overlays = plan.get("overlays", [])
     has_test_tag = any(ov.get("type") in ("test_tag", "test_run_tag") for ov in overlays)
     assert has_test_tag, "Test run watermark tag should be scheduled when run_kind is 'test'"
+
+    # Verify audio_grid and shotcraft recipe fields
+    assert "audio_grid" in plan
+    scenes = plan.get("scenes", [])
+    assert len(scenes) == 3
+    assert scenes[1].get("shot_recipe") is not None
+    assert "beat_aligned" in scenes[1]

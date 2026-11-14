@@ -51,7 +51,7 @@ stages:
     engine: "ming"
     model_path: "models/Ming-3.0-tts-0.5b"
     task: "TTS"
-    voice: "NP_lemi"
+    voice: "female_broadcast"
     reference_wav: "config/voice/reference.wav"
     reference_txt: "config/voice/reference.txt"
     use_spk_emb: true
@@ -69,6 +69,13 @@ stages:
     pause_between_sentences: 0.25
     pad_before: 0.4
     pad_after: 0.6
+    cfg: 2.0
+    sigma: 0.25
+    temperature: 0.0
+    max_length: 24
+    crossfade_ms: 12.0
+    target_scene_rms_dbfs: -20.0
+    highpass_hz: 80.0
     target_lufs: -16
     output_sample_rate: 48000
     text_normalization: false

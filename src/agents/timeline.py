@@ -175,6 +175,7 @@ class TimelineAgent(BaseAgent):
         # 4. Prepare scene alignment jobs
         scene_jobs: list[dict[str, Any]] = []
         script_scenes_map = {s["id"]: s for s in script_data.get("scenes", [])}
+        prep_warnings: list[str] = []
 
         for s_meta in scene_durations:
             sc_id = s_meta["id"]
@@ -189,7 +190,17 @@ class TimelineAgent(BaseAgent):
             if not audio_path.exists():
                 raise FileNotFoundError(f"Scene audio file not found: {audio_path}")
 
-            token_words = prepare_scene_tokens(sc_script["narration"], pronunciations)
+            sc_token_warnings: list[str] = []
+            token_words = prepare_scene_tokens(
+                sc_script["narration"],
+                pronunciations,
+                warnings_out=sc_token_warnings,
+            )
+            for tw in sc_token_warnings:
+                msg = f"Scene '{sc_id}': {tw}"
+                self.logger.warning(msg)
+                prep_warnings.append(msg)
+
             scene_jobs.append({
                 "id": sc_id,
                 "audio_path": str(audio_path),
@@ -226,7 +237,8 @@ class TimelineAgent(BaseAgent):
         scenes_output: list[dict[str, Any]] = []
         global_captions: list[dict[str, Any]] = []
         caption_id_counter = 1
-        warnings: list[str] = []
+        warnings: list[str] = list(prep_warnings)
+        degraded_scenes: list[dict[str, Any]] = []
 
         total_words_count = 0
         total_unplaced_count = 0
@@ -240,8 +252,21 @@ class TimelineAgent(BaseAgent):
 
             raw_scene_res = align_result["scenes"].get(sc_id, {})
             scene_words_rel = raw_scene_res.get("words", [])
+            if not scene_words_rel and job["words"]:
+                scene_words_rel = [
+                    {
+                        "w": w.get("orig", ""),
+                        "tts": w.get("tts", ""),
+                        "tokens": w.get("tokens", []),
+                        "start": None,
+                        "end": None,
+                        "score": 0.0,
+                        "unplaced": True,
+                    }
+                    for w in job["words"]
+                ]
 
-            # Interpolate unplaced words
+            # Interpolate unplaced words proportionally by word weight
             scene_words_rel, unplaced_in_scene = interpolate_unplaced_words(
                 scene_words_rel,
                 scene_duration=sc_duration,
@@ -254,11 +279,24 @@ class TimelineAgent(BaseAgent):
             if n_words > 0:
                 scene_unplaced_ratio = unplaced_in_scene / n_words
                 if scene_unplaced_ratio > max_unplaced_scene_ratio:
-                    raise ValueError(
-                        f"Scene '{sc_id}' failed alignment: {unplaced_in_scene}/{n_words} "
-                        f"words unplaced ({scene_unplaced_ratio*100:.1f}% > {max_unplaced_scene_ratio*100:.1f}% limit)."
+                    warn_msg = (
+                        f"Scene '{sc_id}': degraded alignment ({unplaced_in_scene}/{n_words} "
+                        f"words unplaced, {scene_unplaced_ratio*100:.1f}% > {max_unplaced_scene_ratio*100:.1f}% limit); "
+                        "fell back to weighted interpolation."
                     )
-                if unplaced_in_scene > 0:
+                    self.logger.warning(warn_msg)
+                    warnings.append(warn_msg)
+                    degraded_scenes.append({
+                        "id": sc_id,
+                        "unplaced_words": unplaced_in_scene,
+                        "total_words": n_words,
+                        "unplaced_ratio": round(scene_unplaced_ratio, 4),
+                        "reason": (
+                            f"unplaced_ratio {scene_unplaced_ratio:.3f} > "
+                            f"{max_unplaced_scene_ratio:.3f}; fell back to weighted interpolation"
+                        ),
+                    })
+                elif unplaced_in_scene > 0:
                     warn_msg = f"Scene '{sc_id}': {unplaced_in_scene}/{n_words} words unplaced and interpolated."
                     self.logger.warning(warn_msg)
                     warnings.append(warn_msg)
@@ -316,9 +354,9 @@ class TimelineAgent(BaseAgent):
             sentences_meta: list[dict[str, Any]] = []
             word_idx = 0
             for sent_text in raw_sentences:
-                sent_words = sent_text.strip().split()
-                n_sw = len(sent_words)
-                if word_idx < len(scene_words_abs):
+                sent_tokens = prepare_scene_tokens(sent_text, pronunciations)
+                n_sw = len(sent_tokens)
+                if n_sw > 0 and word_idx < len(scene_words_abs):
                     s_first = scene_words_abs[word_idx]
                     s_last = scene_words_abs[min(len(scene_words_abs) - 1, word_idx + n_sw - 1)]
                     sentences_meta.append({
@@ -360,14 +398,20 @@ class TimelineAgent(BaseAgent):
             )
             global_captions.extend(scene_captions)
 
-        # Run-wide unplaced ratio check
-        if total_words_count > 0:
-            total_unplaced_ratio = total_unplaced_count / total_words_count
-            if total_unplaced_ratio > max_unplaced_total_ratio:
-                raise ValueError(
-                    f"Run-wide unplaced words limit exceeded: {total_unplaced_count}/{total_words_count} "
-                    f"({total_unplaced_ratio*100:.1f}% > {max_unplaced_total_ratio*100:.1f}% limit)."
-                )
+        # Run-wide unplaced ratio check (degrade instead of abort)
+        total_unplaced_ratio = (total_unplaced_count / total_words_count) if total_words_count > 0 else 0.0
+        if total_words_count > 0 and total_unplaced_ratio > max_unplaced_total_ratio:
+            warn_msg = (
+                f"Run-wide unplaced words exceeded limit: {total_unplaced_count}/{total_words_count} "
+                f"({total_unplaced_ratio*100:.1f}% > {max_unplaced_total_ratio*100:.1f}% limit); "
+                "degraded to weighted interpolation."
+            )
+            self.logger.warning(warn_msg)
+            warnings.append(warn_msg)
+
+        is_degraded = bool(degraded_scenes) or (
+            total_words_count > 0 and total_unplaced_ratio > max_unplaced_total_ratio
+        )
 
         # 7. Build Timeline and Subtitle Data
         timeline_data = {
@@ -454,9 +498,12 @@ class TimelineAgent(BaseAgent):
                 "alignment_wall_time_sec": align_wall_time,
                 "total_words": total_words_count,
                 "unplaced_words": total_unplaced_count,
+                "unplaced_ratio": round(total_unplaced_ratio, 4),
                 "low_score_words": total_low_score_count,
                 "caption_count": len(global_captions),
                 "preview_video_rendered": preview_mp4_path.exists(),
+                "degraded": is_degraded,
+                "degraded_scenes": degraded_scenes,
                 "warnings": warnings,
             }
             manifest.setdefault("stages", {}).setdefault("timeline", {})["metrics"] = metrics

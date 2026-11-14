@@ -508,36 +508,99 @@ class RenderAgent(BaseAgent):
         if not (self.run_dir / ass_rel_path).exists():
             ass_rel_path = plan_data.get("captions_ass", "motion/captions.ass")
 
-        # Run ffmpeg with cwd set to self.run_dir to prevent Windows libass escaping issues
-        final_cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video_noaudio_path.relative_to(self.run_dir)),
-            "-i",
-            str(audio_file.relative_to(self.run_dir)),
-            "-vf",
-            f"ass={ass_rel_path}",
-            "-c:v",
-            "libx264",
-            "-crf",
-            str(crf),
-            "-preset",
-            preset,
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-movflags",
-            "+faststart",
-            str(final_mp4_path.relative_to(self.run_dir)),
-        ]
+        # Check for background music and audio grid configuration
+        audio_grid_cfg = plan_data.get("audio_grid", {})
+        bgm_cand = audio_grid_cfg.get("bgm_file")
+        if not bgm_cand or not Path(bgm_cand).exists():
+            bgm_cand = self.style_config.get("music", {}).get("default_track")
+        if not bgm_cand or not Path(bgm_cand).exists():
+            for cand in [
+                Path("config/audio/broadcast_theme.wav"),
+                Path("config/audio/broadcast_theme.mp3"),
+                self.run_dir / "audio" / "bg_track.mp3",
+                self.run_dir / "audio" / "bg_track.wav",
+            ]:
+                if cand.exists():
+                    bgm_cand = str(cand)
+                    break
+
+        music_enabled = bool(self.style_config.get("music", {}).get("enabled", False))
+        has_bgm = music_enabled and (bgm_cand is not None) and Path(bgm_cand).exists()
+
+        if has_bgm:
+            bgm_vol = float(self.style_config.get("music", {}).get("volume", 0.15))
+            final_cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_noaudio_path.relative_to(self.run_dir)),
+                "-i",
+                str(audio_file.relative_to(self.run_dir)),
+                "-stream_loop",
+                "-1",
+                "-i",
+                str(Path(bgm_cand).resolve()),
+                "-filter_complex",
+                (
+                    f"[0:v]ass={ass_rel_path}[v];"
+                    f"[2:a]volume={bgm_vol:.3f}[bgm_base];"
+                    f"[bgm_base][1:a]sidechaincompress=threshold=0.03:ratio=4:attack=50:release=350[ducked_bgm];"
+                    f"[1:a][ducked_bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+                ),
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "libx264",
+                "-crf",
+                str(crf),
+                "-preset",
+                preset,
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                str(final_mp4_path.relative_to(self.run_dir)),
+            ]
+        else:
+            final_cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_noaudio_path.relative_to(self.run_dir)),
+                "-i",
+                str(audio_file.relative_to(self.run_dir)),
+                "-vf",
+                f"ass={ass_rel_path}",
+                "-c:v",
+                "libx264",
+                "-crf",
+                str(crf),
+                "-preset",
+                preset,
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                str(final_mp4_path.relative_to(self.run_dir)),
+            ]
 
         t_encode_start = time.perf_counter()
         res = subprocess.run(final_cmd, cwd=self.run_dir, capture_output=True, text=True)

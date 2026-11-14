@@ -22,6 +22,10 @@ audio:
 music:
   enabled: false
   volume: 0.15
+  voice_duck_db: -22
+  music_bed_db: -8
+  fade_duration_sec: 0.25
+  snap_tolerance_sec: 0.35
 
 palette:
   navy_panel: "#0B1F3A"
@@ -73,6 +77,26 @@ layout_rectangles:
     x: 1540
     y: 54
     w: 284
+    h: 44
+  stat_callout:
+    x: 260
+    y: 240
+    w: 1400
+    h: 520
+  quote_card:
+    x: 260
+    y: 240
+    w: 1400
+    h: 520
+  headline_split:
+    x: 96
+    y: 100
+    w: 760
+    h: 760
+  news_ticker:
+    x: 96
+    y: 860
+    w: 1728
     h: 44
 
 transitions:

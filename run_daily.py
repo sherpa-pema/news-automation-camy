@@ -42,6 +42,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run morning prep (scraper with 5-min single retry + editor prepare) and stop at needs writer.",
     )
     parser.add_argument(
+        "--prepare-media",
+        action="store_true",
+        help="Verify approval gate, run voice + timeline + media candidates discovery, and pause for visual picking.",
+    )
+    parser.add_argument(
+        "--apply-picks",
+        dest="apply_picks_file",
+        default=None,
+        help="Apply visual review picks JSON, run motion -> render -> qa, and update data/latest.",
+    )
+    parser.add_argument(
         "--finish",
         action="store_true",
         help="Verify editor approval gate, then run voice, timeline, media (--auto), motion, render, qa, and update data/latest.",
@@ -166,6 +177,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f" Target Run Date: {args.run_date}")
     if args.morning:
         print(f" Mode:            --morning (run_kind={effective_run_kind})")
+    elif args.prepare_media:
+        print(" Mode:            --prepare-media (voice + timeline + picker candidates)")
+    elif args.apply_picks_file:
+        print(f" Mode:            --apply-picks ({args.apply_picks_file})")
     elif args.finish:
         print(" Mode:            --finish (media=auto + publish latest)")
     if args.only_stage:
@@ -230,6 +245,50 @@ def main(argv: list[str] | None = None) -> int:
             f"  python -m src.agents.editor approve --date {args.run_date}\n"
             f"  python run_daily.py --finish --date {args.run_date}"
         )
+        return 0
+
+    # 5a. --prepare-media (two-step pre-render visual picker pause)
+    if args.prepare_media:
+        res = orchestrator.run_prepare_media(force=args.force)
+        if res.get("refused"):
+            print(f"\n[REFUSED] Cannot run --prepare-media for {args.run_date}:")
+            print(f"  {res.get('reason')}")
+            return 1
+        if not res.get("ok"):
+            print(f"\n[FAILED] --prepare-media stopped at stage '{res.get('failed_stage')}': {res.get('reason')}")
+            print(f"Status report: {res.get('status_path')}")
+            return 1
+
+        print("\n[MEDIA CANDIDATES READY FOR VISUAL PICKER]")
+        print(f"Date:           {args.run_date}")
+        print(f"Total Shots:    {res.get('total_shots')} (auto-matched clips: {res.get('auto_clips_count')}, cards: {res.get('auto_cards_count')})")
+        print(f"Picker Page:    {res.get('picker_html')}")
+        print(f"Status Report:  {res.get('status_path')}")
+        print(f"\nNext action: {res.get('next_action')}")
+        return 0
+
+    # 5b. --apply-picks (apply user visual choices -> render -> qa -> publish latest)
+    if args.apply_picks_file:
+        res = orchestrator.run_apply_picks_and_finish(args.apply_picks_file)
+        if res.get("refused"):
+            print(f"\n[REFUSED] Cannot apply picks for {args.run_date}:")
+            print(f"  {res.get('reason')}")
+            return 1
+        if not res.get("ok"):
+            print(f"\n[FAILED] --apply-picks stopped at stage '{res.get('failed_stage')}': {res.get('reason')}")
+            print(f"Status report: {res.get('status_path')}")
+            return 1
+
+        print("\n[APPLY PICKS & PUBLISH COMPLETE]")
+        print(f"Date:          {args.run_date}")
+        print(f"Run Kind:      {res['run_kind']}")
+        print(f"Final Video:   {res['final_mp4']}")
+        print(f"Description:   {res['description_md']}")
+        print(f"Storyboard:    {res['storyboard_path']}")
+        print(f"Status Report: {res['status_path']}")
+        print(f"Latest Pack:   {res['latest']['latest_dir']} ({', '.join(res['latest']['copied'])})")
+        if res["latest"].get("mirror_dir"):
+            print(f"Mirror Pack:   {res['latest']['mirror_dir']} ({', '.join(res['latest'].get('mirrored', []))})")
         return 0
 
     # 5. --finish

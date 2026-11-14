@@ -277,6 +277,14 @@ def get_next_action_text(
     if editor_status == "pending":
         return f"Run morning prep (editor prepare): `python run_daily.py --morning --date {run_date}`."
 
+    media_status = stages.get("media", {}).get("status", "pending")
+    if media_status in ("prepared", "awaiting_approval"):
+        return (
+            f"Visual candidates ready: open `data/runs/{run_date}/media/review/picker.html` (or Boss Office Visual Picker), "
+            f"choose visuals, and run `python run_daily.py --apply-picks data/runs/{run_date}/media/picks.json --date {run_date}` "
+            f"(or `python run_daily.py --finish --date {run_date}` for auto selection)."
+        )
+
     downstream = ["voice", "timeline", "media", "motion", "render", "qa"]
     if all(stages.get(s, {}).get("status") == "done" for s in STAGE_ORDER if s in stages):
         return (
@@ -306,6 +314,10 @@ def _stage_detail_note(stage_id: str, st: dict[str, Any]) -> str:
     if stage_id == "voice" and "total_duration_sec" in m:
         return f"{m['total_duration_sec']}s audio"
     if stage_id == "media":
+        if m.get("prepared_for_picking") and st.get("status") in ("prepared", "awaiting_approval"):
+            return f"picker ready: {m.get('auto_clips_count', 0)} clips, {m.get('auto_cards_count', 0)} cards"
+        if m.get("picked_by_user"):
+            return f"picked: {m.get('applied_clips_count', 0)} clips, {m.get('cards_created_count', 0)} cards"
         if m.get("auto_mode"):
             return f"auto: {m.get('auto_clips_count', 0)} clips, {m.get('auto_cards_count', 0)} cards"
         if "total_shots" in m:

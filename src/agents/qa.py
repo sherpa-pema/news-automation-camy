@@ -333,7 +333,18 @@ class QAAgent(BaseAgent):
 
         checks.append({"name": "loudness", "passed": loudness_passed, "detail": loudness_detail})
         if not loudness_passed and not redo_stage:
-            redo_stage = "voice"
+            # If voice synthesis itself was already compliant, the attenuation/gain shift occurred in render stage
+            voice_was_ok = False
+            if voice_report_file.exists():
+                try:
+                    with open(voice_report_file, "r", encoding="utf-8") as vf:
+                        v_rep = json.load(vf)
+                    v_lufs = float(v_rep.get("loudness_after_lufs", -99.0))
+                    if abs(v_lufs - (-18.0)) <= 1.5:
+                        voice_was_ok = True
+                except Exception:
+                    pass
+            redo_stage = "render" if voice_was_ok else "voice"
 
         # ----------------------------------------------------------------------
         # Check 4: Black frame detection

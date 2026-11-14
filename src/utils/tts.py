@@ -12,6 +12,8 @@ import re
 import struct
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 import wave
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -38,17 +40,38 @@ class TTSEngine(ABC):
 
 
 class MingEngine(TTSEngine):
-    """Ming-3.0-TTS engine running via subprocess in .venv-tts."""
+    """Ming-3.0-TTS engine running via persistent daemon or subprocess in .venv-tts."""
 
     def __init__(
         self,
         python_path: str | Path = ".venv-tts/Scripts/python.exe",
         worker_script: str | Path = "tools/ming_worker.py",
         timeout_sec: int = 300,
+        daemon_url: str | None = None,
     ) -> None:
         self.python_path = Path(python_path)
         self.worker_script = Path(worker_script)
         self.timeout_sec = timeout_sec
+        self.daemon_url = daemon_url
+
+    def _try_daemon(self, job_payload: dict[str, Any], daemon_url: str) -> dict[str, Any] | None:
+        url = f"{daemon_url.rstrip('/')}/synthesize"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(job_payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                result_data = json.loads(resp.read().decode("utf-8"))
+                if result_data.get("status") == "fatal_error":
+                    raise RuntimeError(
+                        f"TTS daemon encountered fatal error: {result_data.get('error')}"
+                    )
+                return result_data
+        except (urllib.error.URLError, ConnectionError, OSError):
+            return None
 
     def synthesize_batch(
         self,
@@ -57,16 +80,6 @@ class MingEngine(TTSEngine):
     ) -> dict[str, Any]:
         if not items:
             return {"status": "success", "model_load_time_sec": 0.0, "results": []}
-
-        if not self.python_path.exists():
-            raise FileNotFoundError(
-                f"Subprocess Python interpreter not found at: {self.python_path}. "
-                "Ensure .venv-tts is set up."
-            )
-        if not self.worker_script.exists():
-            raise FileNotFoundError(
-                f"Worker script not found at: {self.worker_script}"
-            )
 
         job_payload = {
             "model_path": settings.get("model_path", "models/Ming-3.0-tts-0.5b"),
@@ -78,6 +91,11 @@ class MingEngine(TTSEngine):
             "dtype": settings.get("dtype", "bfloat16"),
             "seed": settings.get("seed", 1895),
             "speed": settings.get("speed"),
+            "cfg": settings.get("cfg", 2.0),
+            "sigma": settings.get("sigma", 0.25),
+            "temperature": settings.get("temperature", 0.0),
+            "max_length": settings.get("max_length", 24),
+            "crossfade_ms": settings.get("crossfade_ms", 12.0),
             "text_normalization": settings.get("text_normalization", False),
             "reference_wav": settings.get("reference_wav", "config/voice/reference.wav"),
             "reference_txt": settings.get("reference_txt", "config/voice/reference.txt"),
@@ -86,6 +104,22 @@ class MingEngine(TTSEngine):
             "max_retries": settings.get("max_retries", 2),
             "items": items,
         }
+
+        effective_daemon_url = settings.get("daemon_url") or self.daemon_url
+        if effective_daemon_url:
+            daemon_res = self._try_daemon(job_payload, str(effective_daemon_url))
+            if daemon_res is not None:
+                return daemon_res
+
+        if not self.python_path.exists():
+            raise FileNotFoundError(
+                f"Subprocess Python interpreter not found at: {self.python_path}. "
+                "Ensure .venv-tts is set up."
+            )
+        if not self.worker_script.exists():
+            raise FileNotFoundError(
+                f"Worker script not found at: {self.worker_script}"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             job_file = Path(tmpdir) / "job.json"
@@ -249,7 +283,8 @@ def get_tts_engine(engine_name: str, config: dict[str, Any] | None = None) -> TT
     elif engine_lower in ("ming", "ming-3.0-tts", "ming-0.5b"):
         python_path = cfg.get("subprocess_python", ".venv-tts/Scripts/python.exe")
         timeout_sec = cfg.get("worker_timeout_sec", 300)
-        return MingEngine(python_path=python_path, timeout_sec=timeout_sec)
+        daemon_url = cfg.get("daemon_url")
+        return MingEngine(python_path=python_path, timeout_sec=timeout_sec, daemon_url=daemon_url)
     else:
         raise ValueError(f"Unsupported TTS engine: {engine_name}")
 
@@ -301,6 +336,96 @@ def create_silence_wav(output_path: Path | str, duration_sec: float, sample_rate
         wf.writeframes(b"\x00\x00" * num_samples)
 
 
+def _read_pcm16_mono_frames(wav_path: Path, expected_sample_rate: int | None = None) -> tuple[bytes, int]:
+    """Reads mono 16-bit PCM frames from wav_path, converting via FFmpeg if format or rate differs."""
+    needs_convert = False
+    sr = expected_sample_rate or 44100
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            ch = wf.getnchannels()
+            sw = wf.getsampwidth()
+            sr = wf.getframerate()
+            if ch != 1 or sw != 2 or (expected_sample_rate is not None and sr != expected_sample_rate):
+                needs_convert = True
+            else:
+                return wf.readframes(wf.getnframes()), sr
+    except wave.Error:
+        needs_convert = True
+
+    if needs_convert:
+        target_sr = expected_sample_rate or sr
+        temp_pcm = wav_path.with_suffix(".temp_pcm16.wav")
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(wav_path),
+                "-ac", "1", "-ar", str(target_sr), "-c:a", "pcm_s16le",
+                str(temp_pcm),
+            ],
+            capture_output=True,
+            check=True,
+        )
+        try:
+            with wave.open(str(temp_pcm), "rb") as wf:
+                return wf.readframes(wf.getnframes()), wf.getframerate()
+        finally:
+            temp_pcm.unlink(missing_ok=True)
+    return b"", sr
+
+
+def _apply_micro_fade_pcm16(frames: bytes, sample_rate: int, fade_ms: float = 5.0) -> bytes:
+    """Applies a short linear fade-in/out to 16-bit mono PCM bytes to eliminate join clicks."""
+    fade_samples = int(sample_rate * max(0.0, fade_ms) / 1000.0)
+    total_samples = len(frames) // 2
+    if fade_samples <= 1 or total_samples < fade_samples * 2:
+        return frames
+    samples = list(struct.unpack(f"<{total_samples}h", frames))
+    for i in range(fade_samples):
+        gain = i / fade_samples
+        samples[i] = int(samples[i] * gain)
+        samples[total_samples - 1 - i] = int(samples[total_samples - 1 - i] * gain)
+    return struct.pack(f"<{total_samples}h", *samples)
+
+
+def _level_pcm16_active_rms(
+    frames: bytes,
+    sample_rate: int,
+    target_rms_dbfs: float = -20.0,
+    max_peak_dbfs: float = -2.0,
+) -> bytes:
+    """Levels active speech RMS of 16-bit mono PCM bytes without changing duration or clipping."""
+    total_samples = len(frames) // 2
+    if total_samples == 0:
+        return frames
+    samples = list(struct.unpack(f"<{total_samples}h", frames))
+    win = max(1, int(sample_rate * 0.05))
+    silence_thresh_sq = ((10.0 ** (-45.0 / 20.0)) * 32768.0) ** 2
+    active_sq: list[float] = []
+    for start in range(0, total_samples - win + 1, win):
+        chunk = samples[start : start + win]
+        mean_sq = sum(s * s for s in chunk) / win
+        if mean_sq >= silence_thresh_sq:
+            active_sq.append(mean_sq)
+    if not active_sq:
+        return frames
+
+    active_rms = math.sqrt(sum(active_sq) / len(active_sq))
+    if active_rms < 1.0:
+        return frames
+    curr_rms_dbfs = 20.0 * math.log10(active_rms / 32768.0)
+    gain_db = max(-12.0, min(12.0, target_rms_dbfs - curr_rms_dbfs))
+
+    max_sample = max(abs(s) for s in samples)
+    if max_sample > 0:
+        headroom_db = max_peak_dbfs - (20.0 * math.log10(max_sample / 32768.0))
+        gain_db = min(gain_db, headroom_db)
+
+    if abs(gain_db) < 0.25:
+        return frames
+    gain_lin = 10.0 ** (gain_db / 20.0)
+    scaled = [max(-32768, min(32767, int(round(s * gain_lin)))) for s in samples]
+    return struct.pack(f"<{total_samples}h", *scaled)
+
+
 def assemble_scene_audio(
     sentence_wavs: list[Path],
     output_path: Path,
@@ -308,8 +433,10 @@ def assemble_scene_audio(
     pad_before: float = 0.4,
     pad_after: float = 0.6,
     target_sample_rate: int = 44100,
+    micro_fade_ms: float = 5.0,
+    target_rms_dbfs: float | None = None,
 ) -> float:
-    """Combines sentence WAVs with pause insertion and scene padding."""
+    """Combines sentence WAVs with pause insertion, micro-fades, optional RMS leveling, and scene padding."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     all_frames = bytearray()
 
@@ -321,20 +448,9 @@ def assemble_scene_audio(
         add_silence(pad_before)
 
     for idx, s_wav in enumerate(sentence_wavs):
-        try:
-            with wave.open(str(s_wav), "rb") as wf:
-                frames = wf.readframes(wf.getnframes())
-        except wave.Error:
-            temp_pcm = s_wav.with_suffix(".temp_pcm16.wav")
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", str(s_wav), "-c:a", "pcm_s16le", str(temp_pcm)],
-                capture_output=True,
-                check=True,
-            )
-            with wave.open(str(temp_pcm), "rb") as wf:
-                frames = wf.readframes(wf.getnframes())
-            temp_pcm.unlink(missing_ok=True)
-
+        frames, _ = _read_pcm16_mono_frames(s_wav, expected_sample_rate=target_sample_rate)
+        if micro_fade_ms > 0:
+            frames = _apply_micro_fade_pcm16(frames, target_sample_rate, fade_ms=micro_fade_ms)
         all_frames.extend(frames)
 
         if idx < len(sentence_wavs) - 1 and pause_sec > 0:
@@ -343,49 +459,42 @@ def assemble_scene_audio(
     if pad_after > 0:
         add_silence(pad_after)
 
-    total_samples = len(all_frames) // 2
+    final_frames = bytes(all_frames)
+    if target_rms_dbfs is not None:
+        final_frames = _level_pcm16_active_rms(final_frames, target_sample_rate, target_rms_dbfs=target_rms_dbfs)
+
+    total_samples = len(final_frames) // 2
     duration_sec = total_samples / target_sample_rate if target_sample_rate > 0 else 0.0
 
     with wave.open(str(output_path), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(target_sample_rate)
-        wf.writeframes(all_frames)
+        wf.writeframes(final_frames)
 
     return round(duration_sec, 3)
 
 
 def concatenate_scenes(scene_wavs: list[Path], output_path: Path) -> float:
-    """Concatenates multiple scene WAV files in exact order."""
+    """Concatenates multiple scene WAV files in exact order, ensuring consistent format."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     all_frames = bytearray()
-    sample_rate = 44100
+    sample_rate: int | None = None
 
     for s_wav in scene_wavs:
-        try:
-            with wave.open(str(s_wav), "rb") as wf:
-                sample_rate = wf.getframerate()
-                frames = wf.readframes(wf.getnframes())
-        except wave.Error:
-            temp_pcm = s_wav.with_suffix(".temp_pcm16_c.wav")
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", str(s_wav), "-c:a", "pcm_s16le", str(temp_pcm)],
-                capture_output=True,
-                check=True,
-            )
-            with wave.open(str(temp_pcm), "rb") as wf:
-                sample_rate = wf.getframerate()
-                frames = wf.readframes(wf.getnframes())
-            temp_pcm.unlink(missing_ok=True)
+        frames, sr = _read_pcm16_mono_frames(s_wav, expected_sample_rate=sample_rate)
+        if sample_rate is None:
+            sample_rate = sr
         all_frames.extend(frames)
 
+    effective_sr = sample_rate or 44100
     total_samples = len(all_frames) // 2
-    duration_sec = total_samples / sample_rate if sample_rate > 0 else 0.0
+    duration_sec = total_samples / effective_sr if effective_sr > 0 else 0.0
 
     with wave.open(str(output_path), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
+        wf.setframerate(effective_sr)
         wf.writeframes(all_frames)
 
     return round(duration_sec, 3)
@@ -397,12 +506,14 @@ def master_audio_loudnorm(
     target_lufs: float = -16.0,
     true_peak: float = -1.5,
     sample_rate: int = 48000,
+    highpass_hz: float = 80.0,
 ) -> dict[str, Any]:
-    """Applies two-pass EBU R128 loudness normalization and resampling using FFmpeg.
+    """Applies high-pass filtering + two-pass EBU R128 loudness normalization and resampling via FFmpeg.
 
     Falls back to -18 LUFS if target cannot be achieved cleanly in linear mode.
     """
     output_wav.parent.mkdir(parents=True, exist_ok=True)
+    pre_filter = f"highpass=f={highpass_hz}," if highpass_hz and highpass_hz > 0 else ""
 
     def run_two_pass(target: float) -> tuple[dict[str, Any], str, float, float]:
         # Pass 1: Measure
@@ -410,7 +521,7 @@ def master_audio_loudnorm(
             "ffmpeg",
             "-y",
             "-i", str(input_wav),
-            "-af", f"loudnorm=I={target}:TP={true_peak}:LRA=11:print_format=json",
+            "-af", f"{pre_filter}loudnorm=I={target}:TP={true_peak}:LRA=11:print_format=json",
             "-f", "null",
             "-",
         ]
@@ -435,7 +546,7 @@ def master_audio_loudnorm(
             "-y",
             "-i", str(input_wav),
             "-af", (
-                f"loudnorm=I={target}:TP={true_peak}:LRA=11:"
+                f"{pre_filter}loudnorm=I={target}:TP={true_peak}:LRA=11:"
                 f"measured_I={input_i}:measured_TP={input_tp}:measured_LRA={input_lra}:"
                 f"measured_thresh={input_thresh}:offset={target_offset}:linear=true"
             ),

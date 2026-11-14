@@ -14,12 +14,21 @@ from src.utils.editor_validator import (
     compute_validator_fingerprint,
     extract_script_validation_fingerprint,
 )
+from src.utils.audio_sync import (
+    extract_audio_grid,
+    generate_synthetic_broadcast_theme,
+    snap_cuts_to_beats,
+)
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest
 from src.utils.motion_graphics import (
+    draw_headline_split,
     draw_illustrative_tag,
     draw_lower_third,
+    draw_news_ticker,
     draw_outro_card,
+    draw_quote_card,
+    draw_stat_callout,
     draw_test_run_tag,
     draw_title_card,
     generate_ass_subtitles,
@@ -27,6 +36,91 @@ from src.utils.motion_graphics import (
 from src.utils.schema_validate import validate_contract
 
 logger = logging.getLogger("motion")
+
+
+def latch_to_beat(target_time: float, beat_times: list[float], tolerance: float = 0.35) -> float:
+    """Snaps target_time to the nearest musical beat within tolerance."""
+    if not beat_times:
+        return round(target_time, 3)
+    closest = min(beat_times, key=lambda b: abs(b - target_time))
+    if abs(closest - target_time) <= tolerance:
+        return round(float(closest), 3)
+    return round(target_time, 3)
+
+
+def classify_shot_recipe(sc_script: dict[str, Any], has_video: bool = False) -> tuple[str, dict[str, Any]]:
+    """Opus Video Prompts heuristic classifier.
+
+    Maps news story context into a Video Shotcraft broadcast archetype:
+      - stat_callout: For quantitative, economic, currency, or statistical stories.
+      - quote_card: For official statements and spokesperson quotations.
+      - headline_split: For structured multi-point briefings.
+      - cinematic_broll_full: Default broadcast visual layout with lower-third and news ticker.
+    """
+    sc_type = sc_script.get("type", "story")
+    if sc_type in ("intro", "title_card"):
+        return "title_card", {}
+    if sc_type in ("outro", "outro_card"):
+        return "outro_card", {}
+
+    headline = sc_script.get("headline", "")
+    narration = sc_script.get("narration", "")
+    full_text = f"{headline}. {narration}"
+
+    # 1. Quote Card heuristic
+    import re
+    quote_match = re.search(r'["“\']([^"”\']{15,100})["”\']', full_text)
+    if quote_match:
+        quote_snippet = quote_match.group(1).strip()
+        speaker = "Official Statement"
+        sp_match = re.search(r'(?:said|stated|told|according to|spokesperson)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', full_text)
+        if sp_match:
+            speaker = sp_match.group(1).strip()
+        sources = sc_script.get("sources", [])
+        src_str = sources[0] if isinstance(sources, list) and sources else "Verified Outlets"
+        return "quote_card", {
+            "quote": quote_snippet,
+            "speaker": speaker,
+            "title": "Spokesperson / Official",
+            "source": src_str,
+        }
+
+    # 2. Stat Callout heuristic
+    stat_val = None
+    stat_delta = None
+
+    curr_match = re.search(r'((?:Rs\.?|रू|USD|\$)\s*[\d,]+(?:\.\d+)?\s*(?:crore|billion|lakh|million|trillion|tola)?)', full_text, re.IGNORECASE)
+    pct_match = re.search(r'([\+\-]?[\d]+(?:\.\d+)?\s*%)', full_text)
+    mw_match = re.search(r'([\d,]+(?:\.\d+)?\s*(?:MW|megawatt|metric tons|km|tola|spots))', full_text, re.IGNORECASE)
+
+    if curr_match:
+        stat_val = curr_match.group(1).strip()
+    elif pct_match:
+        stat_val = pct_match.group(1).strip()
+    elif mw_match:
+        stat_val = mw_match.group(1).strip()
+
+    if stat_val and len(stat_val) < 25:
+        delta_match = re.search(r'(\b(?:increased|decreased|surged|fell|dropped|jumped|rose|up|down|record\s+high)\s+by\s+[\d\.]+%?)', full_text, re.IGNORECASE)
+        if delta_match:
+            stat_delta = delta_match.group(1).strip()
+        elif "+" in stat_val or "-" in stat_val:
+            stat_delta = "TREND"
+        label = headline[:65]
+        return "stat_callout", {
+            "value": stat_val,
+            "label": label,
+            "delta": stat_delta,
+        }
+
+    # 3. Headline Split heuristic (if multi-point story)
+    sentences = [s.strip() for s in re.split(r'[.!?]+', narration) if s.strip()]
+    if len(sentences) >= 3 and not has_video:
+        kicker = sc_script.get("category") or "DEVELOPING"
+        bullets = [sentences[0][:60], sentences[1][:60]]
+        return "headline_split", {"kicker": kicker, "bullets": bullets}
+
+    return "cinematic_broll_full", {}
 
 
 class MotionAgent(BaseAgent):
@@ -166,8 +260,39 @@ class MotionAgent(BaseAgent):
         outro_rect = rects.get("outro_card", {"x": 260, "y": 280, "w": 1400, "h": 460})
         tag_rect = rects.get("illustrative_tag", {"x": 1540, "y": 54, "w": 284, "h": 44})
         test_rect = rects.get("test_run_tag", {"x": 96, "y": 54, "w": 180, "h": 44})
+        stat_rect = rects.get("stat_callout", {"x": 260, "y": 240, "w": 1400, "h": 520})
+        quote_rect = rects.get("quote_card", {"x": 260, "y": 240, "w": 1400, "h": 520})
+        split_rect = rects.get("headline_split", {"x": 96, "y": 100, "w": 760, "h": 760})
 
         font_candidates = self.style_config.get("fonts", {}).get("primary_candidates", [])
+
+        # 3b. Librosa Audio Grid & Beat Synchronization
+        bgm_path = self.style_config.get("music", {}).get("default_track")
+        if not bgm_path or not Path(bgm_path).exists():
+            candidates = [
+                Path("config/audio/broadcast_theme.wav"),
+                Path("config/audio/broadcast_theme.mp3"),
+                self.run_dir / "audio" / "bg_track.mp3",
+                self.run_dir / "audio" / "bg_track.wav",
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    bgm_path = str(cand)
+                    break
+        if self.style_config.get("music", {}).get("enabled", False) and (not bgm_path or not Path(bgm_path).exists()):
+            self.logger.info("Background music enabled in style.yaml but no audio file found; proceeding with pure narration.")
+            bgm_path = None
+
+        audio_grid = extract_audio_grid(
+            bgm_path=bgm_path,
+            narration_path=audio_file,
+            scene_boundaries=timeline_data.get("scenes", []),
+            style_config=self.style_config,
+        )
+        audio_grid_path = motion_dir / "audio_grid.json"
+        with open(audio_grid_path, "w", encoding="utf-8") as agf:
+            json.dump(audio_grid, agf, indent=2)
+        beat_times = audio_grid.get("beat_times", [])
 
         # 4. Generate ASS Subtitles
         ass_path = motion_dir / "captions.ass"
@@ -331,6 +456,116 @@ class MotionAgent(BaseAgent):
                 if not source_str:
                     source_str = "Verified Outlets"
 
+                # Determine shot recipe via Opus Video Prompts heuristics
+                has_video = any(s.get("type") == "video" for s in sc_shots)
+                shot_recipe, recipe_data = classify_shot_recipe(sc_script, has_video=has_video)
+
+                # Draw Shotcraft card if applicable
+                if shot_recipe == "stat_callout":
+                    stat_png = overlays_dir / f"{sc_id}_stat_callout.png"
+                    draw_stat_callout(
+                        stat_value=recipe_data.get("value", ""),
+                        stat_label=recipe_data.get("label", headline),
+                        stat_delta=recipe_data.get("delta"),
+                        source_credit=source_str,
+                        output_path=stat_png,
+                        width=stat_rect["w"],
+                        height=stat_rect["h"],
+                        font_candidates=font_candidates,
+                    )
+                    stat_start = latch_to_beat(sc_start + 0.3, beat_times)
+                    stat_end = latch_to_beat(min(stat_start + 6.5, sc_end - 0.4), beat_times)
+                    if stat_end <= stat_start:
+                        stat_end = round(sc_end - 0.2, 3)
+
+                    stat_ov = {
+                        "id": f"{sc_id}_stat_callout",
+                        "scene_id": sc_id,
+                        "type": "stat_callout",
+                        "png": f"motion/overlays/{stat_png.name}",
+                        "start": stat_start,
+                        "end": stat_end,
+                        "x": stat_rect["x"],
+                        "y": stat_rect["y"],
+                        "w": stat_rect["w"],
+                        "h": stat_rect["h"],
+                        "animation": "slide_up",
+                        "fade_in": 0.25,
+                        "fade_out": 0.25,
+                    }
+                    scene_overlays.append(stat_ov)
+                    all_overlays.append(stat_ov)
+
+                elif shot_recipe == "quote_card":
+                    quote_png = overlays_dir / f"{sc_id}_quote_card.png"
+                    draw_quote_card(
+                        quote_text=recipe_data.get("quote", ""),
+                        speaker_name=recipe_data.get("speaker", "Official Statement"),
+                        speaker_title=recipe_data.get("title"),
+                        source_credit=recipe_data.get("source", source_str),
+                        output_path=quote_png,
+                        width=quote_rect["w"],
+                        height=quote_rect["h"],
+                        font_candidates=font_candidates,
+                    )
+                    quote_start = latch_to_beat(sc_start + 0.3, beat_times)
+                    quote_end = latch_to_beat(min(quote_start + 7.0, sc_end - 0.4), beat_times)
+                    if quote_end <= quote_start:
+                        quote_end = round(sc_end - 0.2, 3)
+
+                    quote_ov = {
+                        "id": f"{sc_id}_quote_card",
+                        "scene_id": sc_id,
+                        "type": "quote_card",
+                        "png": f"motion/overlays/{quote_png.name}",
+                        "start": quote_start,
+                        "end": quote_end,
+                        "x": quote_rect["x"],
+                        "y": quote_rect["y"],
+                        "w": quote_rect["w"],
+                        "h": quote_rect["h"],
+                        "animation": "fade",
+                        "fade_in": 0.25,
+                        "fade_out": 0.25,
+                    }
+                    scene_overlays.append(quote_ov)
+                    all_overlays.append(quote_ov)
+
+                elif shot_recipe == "headline_split":
+                    split_png = overlays_dir / f"{sc_id}_headline_split.png"
+                    draw_headline_split(
+                        kicker=recipe_data.get("kicker", "DEVELOPING"),
+                        headline=headline,
+                        bullets=recipe_data.get("bullets", []),
+                        source_credit=source_str,
+                        output_path=split_png,
+                        width=split_rect["w"],
+                        height=split_rect["h"],
+                        font_candidates=font_candidates,
+                    )
+                    split_start = latch_to_beat(sc_start + 0.2, beat_times)
+                    split_end = latch_to_beat(min(split_start + 7.5, sc_end - 0.4), beat_times)
+                    if split_end <= split_start:
+                        split_end = round(sc_end - 0.2, 3)
+
+                    split_ov = {
+                        "id": f"{sc_id}_headline_split",
+                        "scene_id": sc_id,
+                        "type": "headline_split",
+                        "png": f"motion/overlays/{split_png.name}",
+                        "start": split_start,
+                        "end": split_end,
+                        "x": split_rect["x"],
+                        "y": split_rect["y"],
+                        "w": split_rect["w"],
+                        "h": split_rect["h"],
+                        "animation": "slide_right",
+                        "fade_in": 0.25,
+                        "fade_out": 0.25,
+                    }
+                    scene_overlays.append(split_ov)
+                    all_overlays.append(split_ov)
+
                 lt_png = overlays_dir / f"{sc_id}_lower_third.png"
                 draw_lower_third(
                     headline=headline,
@@ -341,9 +576,9 @@ class MotionAgent(BaseAgent):
                     font_candidates=font_candidates,
                 )
 
-                # Show from speech_start + 0.3s for up to 7.0s, not past sc_end - 0.5s
-                lt_start = round(speech_start + 0.3, 3)
-                lt_end = round(min(lt_start + 7.0, sc_end - 0.5), 3)
+                # Show from speech_start + 0.3s for up to 7.0s, beat latched
+                lt_start = latch_to_beat(speech_start + 0.3, beat_times)
+                lt_end = latch_to_beat(min(lt_start + 7.0, sc_end - 0.5), beat_times)
                 if lt_end <= lt_start:
                     lt_end = round(sc_end - 0.2, 3)
 
@@ -397,13 +632,15 @@ class MotionAgent(BaseAgent):
 
             # Scene transition: dip to black at scene boundary
             dip_dur = float(self.style_config.get("transitions", {}).get("scene_boundary", {}).get("duration_sec", 0.2))
-            planned_scenes.append({
+            sc_dict: dict[str, Any] = {
                 "id": sc_id,
                 "start": sc_start,
                 "end": sc_end,
                 "media": primary_media,
                 "shots": planned_shots,
                 "overlays": scene_overlays,
+                "shot_recipe": shot_recipe if sc_type == "story" else ("title_card" if sc_type == "intro" else "outro_card"),
+                "beat_aligned": bool(audio_grid.get("enabled")),
                 "lower_third": {
                     "headline": sc_script.get("headline", channel_name),
                     "source_credit": ", ".join(sc_script.get("sources", [])) if sc_script.get("sources") else channel_name,
@@ -419,7 +656,16 @@ class MotionAgent(BaseAgent):
                     "type": "dip_to_black",
                     "duration_sec": dip_dur,
                 },
-            })
+            }
+            if sc_type == "story":
+                if shot_recipe == "stat_callout":
+                    sc_dict["stat_data"] = recipe_data
+                elif shot_recipe == "quote_card":
+                    sc_dict["quote_data"] = recipe_data
+                elif shot_recipe == "headline_split":
+                    sc_dict["split_data"] = recipe_data
+
+            planned_scenes.append(sc_dict)
 
         # 6. Render Plan Payload
         render_plan = {
@@ -430,6 +676,7 @@ class MotionAgent(BaseAgent):
             "duration": total_duration_sec,
             "captions_ass": "motion/captions.ass",
             "overlays": all_overlays,
+            "audio_grid": audio_grid,
             "transitions": {
                 "scene_boundary": {
                     "type": "dip_to_black",
