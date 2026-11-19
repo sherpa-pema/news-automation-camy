@@ -17,6 +17,7 @@ class BaseAgent(ABC):
     def __init__(self, run_dir: Path, config: dict[str, Any] | None = None) -> None:
         self.run_dir = Path(run_dir)
         self.config = config or {}
+        self.last_metrics: dict[str, Any] | None = None
 
     @property
     @abstractmethod

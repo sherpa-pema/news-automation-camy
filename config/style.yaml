@@ -1,6 +1,7 @@
 # Style configuration for Nepal News Bot video generation
 video:
   resolution: [1920, 1080]
+  resolution_vertical: [1080, 1920]
   fps: 30
   codec: "libx264"
   pix_fmt: "yuv420p"
@@ -10,6 +11,7 @@ video:
 
 preview:
   resolution: [960, 540]
+  resolution_vertical: [540, 960]
   crf: 30
   preset: "ultrafast"
 
@@ -46,13 +48,24 @@ fonts:
 
 safe_margin_pct: 0.05
 
+captions:
+  font_family: "Segoe UI Semibold"
+  size_landscape: 44
+  size_vertical: 64
+  max_lines: 2
+  line_height_pct: 1.25
+  highlight_color: "#F5A623"
+  box_rgba: [7, 20, 38, 224]
+  gap_from_band_px: 24
+
 layout_rectangles:
   # Safe zone in 1920x1080 is x: 96..1824, y: 54..1026
+  caption_margin_v: 105
   caption_band:
     x: 160
     y: 910
     w: 1600
-    h: 110
+    h: 100
   lower_third:
     x: 96
     y: 730
@@ -80,12 +93,12 @@ layout_rectangles:
     h: 44
   stat_callout:
     x: 260
-    y: 240
+    y: 180
     w: 1400
     h: 520
   quote_card:
     x: 260
-    y: 240
+    y: 180
     w: 1400
     h: 520
   headline_split:
@@ -98,6 +111,60 @@ layout_rectangles:
     y: 860
     w: 1728
     h: 44
+
+layout_rectangles_vertical:
+  # Safe zone in 1080x1920 is x: 54..1026, y: 96..1824 (calibrated for TikTok & Reels safe UI)
+  caption_margin_v: 380
+  caption_band:
+    x: 60
+    y: 1440
+    w: 960
+    h: 120
+  lower_third:
+    x: 60
+    y: 1240
+    w: 960
+    h: 180
+  title_card:
+    x: 60
+    y: 560
+    w: 960
+    h: 520
+  outro_card:
+    x: 60
+    y: 560
+    w: 960
+    h: 520
+  test_run_tag:
+    x: 54
+    y: 120
+    w: 180
+    h: 44
+  illustrative_tag:
+    x: 742
+    y: 120
+    w: 284
+    h: 44
+  stat_callout:
+    x: 60
+    y: 480
+    w: 960
+    h: 600
+  quote_card:
+    x: 60
+    y: 480
+    w: 960
+    h: 600
+  headline_split:
+    x: 60
+    y: 380
+    w: 960
+    h: 800
+  news_ticker:
+    x: 60
+    y: 1380
+    w: 960
+    h: 50
 
 transitions:
   scene_boundary:

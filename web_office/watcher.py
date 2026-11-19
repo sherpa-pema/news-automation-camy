@@ -1,12 +1,20 @@
 """Run state reader, log/event tailer, and historical replay synthesizer for 2D Office."""
 from __future__ import annotations
 
+import copy
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
 
-from src.utils.daily_ops import get_kathmandu_today, load_outputs_config
+from src.utils.daily_ops import (
+    compute_source_health,
+    get_kathmandu_today,
+    get_next_action_text,
+    load_outputs_config,
+    verify_editor_gate,
+)
 from src.utils.llm_writer import detect_configured_provider
 from src.utils.manifest import (
     compute_manifest_status,
@@ -28,6 +36,78 @@ HANDOFF_MAP: dict[str, tuple[str, str, str]] = {
     "motion": ("render", "motion/render_plan.json", "render_plan.json"),
     "render": ("qa", "render/final.mp4", "final.mp4"),
 }
+
+# --- Caches with mtime invalidation ---
+_PROVIDER_CACHE: dict[str, tuple[float, tuple[str | None, str | None]]] = {}
+_OUTPUTS_CONFIG_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_RUN_STATE_CACHE: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+
+
+def clear_run_state_cache(run_dir: Path | None = None) -> None:
+    """Clears the run state cache globally or for a specific run directory."""
+    if run_dir is not None:
+        _RUN_STATE_CACHE.pop(str(Path(run_dir).resolve()), None)
+    else:
+        _RUN_STATE_CACHE.clear()
+        _PROVIDER_CACHE.clear()
+        _OUTPUTS_CONFIG_CACHE.clear()
+
+
+def _get_cached_provider(repo_root: Path = Path(".")) -> tuple[str | None, str | None]:
+    env_path = repo_root / ".env"
+    mtime = env_path.stat().st_mtime if env_path.exists() else 0.0
+    key = str(repo_root.resolve())
+    cached = _PROVIDER_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    res = detect_configured_provider()
+    _PROVIDER_CACHE[key] = (mtime, res)
+    return res
+
+
+def _get_cached_outputs_config(config_dir: Path) -> dict[str, Any]:
+    cfg_file = config_dir / "outputs.yaml"
+    mtime = cfg_file.stat().st_mtime if cfg_file.exists() else 0.0
+    key = str(config_dir.resolve())
+    cached = _OUTPUTS_CONFIG_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    cfg = load_outputs_config(config_dir)
+    _OUTPUTS_CONFIG_CACHE[key] = (mtime, cfg)
+    return cfg
+
+
+def _read_recent_log_lines(path: Path, max_lines: int = 250, max_bytes: int = 40_000) -> list[str]:
+    """Reads the last lines from a log file efficiently from the end."""
+    if not path.exists():
+        return []
+    try:
+        size = path.stat().st_size
+        if size == 0:
+            return []
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+            data = f.read()
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        return lines[-max_lines:]
+    except Exception:
+        return []
+
+
+def _cap_event_payload(ev: dict[str, Any], max_str_len: int = 600) -> dict[str, Any]:
+    """Caps large fields in event payloads to prevent unbounded memory usage."""
+    capped = dict(ev)
+    if "extra" in capped and isinstance(capped["extra"], dict):
+        extra = dict(capped["extra"])
+        for k, v in extra.items():
+            if isinstance(v, str) and len(v) > max_str_len:
+                extra[k] = v[:max_str_len] + "... [truncated]"
+        capped["extra"] = extra
+    if "message" in capped and isinstance(capped["message"], str) and len(capped["message"]) > max_str_len:
+        capped["message"] = capped["message"][:max_str_len] + "... [truncated]"
+    return capped
 
 
 def _safe_read_json(path: Path) -> dict[str, Any] | None:
@@ -113,11 +193,12 @@ def build_replay_events(run_dir: Path, manifest: dict[str, Any]) -> list[dict[st
             if not line:
                 continue
             try:
-                events.append(json.loads(line))
+                ev_obj = json.loads(line)
+                events.append(_cap_event_payload(ev_obj))
             except Exception:
                 pass
         if events:
-            return events
+            return events[-300:]
 
     # Synthesize from manifest.json so historical runs replay smoothly
     stages = manifest.get("stages", {})
@@ -230,10 +311,45 @@ def build_replay_events(run_dir: Path, manifest: dict[str, Any]) -> list[dict[st
     return synth
 
 
-def read_run_state(run_dir: Path, config_dir: Path = Path("config")) -> dict[str, Any]:
-    """Builds the full snapshot JSON for a target date run."""
+def read_run_state(
+    run_dir: Path,
+    config_dir: Path = Path("config"),
+    include_events: bool = False,
+) -> dict[str, Any]:
+    """Builds the full snapshot JSON for a target date run with fingerprint-based state caching."""
     run_date = run_dir.name
     manifest_path = run_dir / "manifest.json"
+    pid_file = run_dir / ".pipeline.pid"
+    log_file = run_dir / "run.log"
+    status_file = run_dir / "STATUS.md"
+    cand_file = run_dir / "media" / "review" / "candidates.json"
+    qa_file = run_dir / "qa" / "qa_report.json"
+    script_file = run_dir / "script" / "script.json"
+    final_file = run_dir / "render" / "final.mp4"
+
+    # Compute fast filesystem mtime fingerprint
+    fp = (
+        manifest_path.stat().st_mtime_ns if manifest_path.exists() else 0,
+        manifest_path.stat().st_size if manifest_path.exists() else 0,
+        pid_file.stat().st_mtime_ns if pid_file.exists() else 0,
+        log_file.stat().st_mtime_ns if log_file.exists() else 0,
+        log_file.stat().st_size if log_file.exists() else 0,
+        status_file.stat().st_mtime_ns if status_file.exists() else 0,
+        cand_file.stat().st_mtime_ns if cand_file.exists() else 0,
+        qa_file.stat().st_mtime_ns if qa_file.exists() else 0,
+        script_file.stat().st_mtime_ns if script_file.exists() else 0,
+        final_file.exists(),
+        include_events,
+    )
+
+    cache_key = str(run_dir.resolve())
+    cached_entry = _RUN_STATE_CACHE.get(cache_key)
+    if cached_entry and cached_entry[0] == fp:
+        # Fast cache hit: update only live active process check and return copy
+        st = dict(cached_entry[1])
+        st["active_process"] = is_run_process_active(run_dir)
+        return copy.deepcopy(st)
+
     exists = manifest_path.exists()
     active = is_run_process_active(run_dir)
 
@@ -264,11 +380,11 @@ def read_run_state(run_dir: Path, config_dir: Path = Path("config")) -> dict[str
             },
         }
 
-    run_log_text = _safe_read_text(run_dir / "run.log", max_chars=80_000) or ""
-    log_lines = run_log_text.splitlines()[-250:]
+    log_lines = _read_recent_log_lines(log_file, max_lines=250, max_bytes=40_000)
 
-    provider, model = detect_configured_provider()
-    outputs_cfg = load_outputs_config(config_dir)
+    repo_root = config_dir.parent if config_dir.name == "config" else Path(".")
+    provider, model = _get_cached_provider(repo_root)
+    outputs_cfg = _get_cached_outputs_config(config_dir)
 
     artifacts = {
         "has_news_md": (run_dir / "raw" / "news.md").exists(),
@@ -279,17 +395,17 @@ def read_run_state(run_dir: Path, config_dir: Path = Path("config")) -> dict[str
         "has_approval": (run_dir / "script" / "approval.json").exists(),
         "has_narration_wav": (run_dir / "audio" / "narration.wav").exists(),
         "has_timeline_preview": (run_dir / "timeline" / "timeline_preview.mp4").exists(),
-        "has_candidates_json": (run_dir / "media" / "review" / "candidates.json").exists(),
+        "has_candidates_json": cand_file.exists(),
         "has_picker_html": (run_dir / "media" / "review" / "picker.html").exists(),
         "has_media_review": (run_dir / "media" / "review" / "index.html").exists(),
-        "has_final_mp4": (run_dir / "render" / "final.mp4").exists(),
+        "has_final_mp4": final_file.exists(),
         "has_description_md": (run_dir / "render" / "description.md").exists(),
         "has_storyboard": (run_dir / "qa" / "storyboard.html").exists(),
         "has_contact_sheet": (run_dir / "qa" / "contact_sheet.jpg").exists(),
     }
 
     media_summary: dict[str, Any] | None = None
-    cands_obj = _safe_read_json(run_dir / "media" / "review" / "candidates.json")
+    cands_obj = _safe_read_json(cand_file)
     if isinstance(cands_obj, dict) and isinstance(cands_obj.get("shots"), list):
         shots_list = cands_obj["shots"]
         clips_cnt = sum(1 for sh in shots_list if sh.get("auto_pick_type") == "clip")
@@ -300,13 +416,23 @@ def read_run_state(run_dir: Path, config_dir: Path = Path("config")) -> dict[str
             "min_relevance": cands_obj.get("min_relevance"),
         }
 
-    return {
+    gate_ok, gate_reason = verify_editor_gate(run_dir)
+    next_action = get_next_action_text(run_dir, manifest, active_process=active)
+    source_health = compute_source_health(run_dir, manifest=manifest, config_dir=config_dir)
+
+    # Full events dropped from default snapshot payload for performance
+    events_payload = build_replay_events(run_dir, manifest)[-200:] if include_events else []
+
+    state_obj = {
         "date": run_date,
         "exists": exists,
         "active_process": active,
         "manifest": manifest,
-        "status_md": _safe_read_text(run_dir / "STATUS.md") or "",
-        "qa_report": _safe_read_json(run_dir / "qa" / "qa_report.json"),
+        "gate": {"ok": gate_ok, "reason": gate_reason},
+        "next_action": next_action,
+        "source_health": source_health,
+        "status_md": _safe_read_text(status_file) or "",
+        "qa_report": _safe_read_json(qa_file),
         "script_preview_md": _safe_read_text(run_dir / "script" / "script_preview.md") or "",
         "validation_report": _safe_read_json(run_dir / "script" / "validation_report.json"),
         "budget": _safe_read_json(run_dir / "script" / "budget.json"),
@@ -315,7 +441,7 @@ def read_run_state(run_dir: Path, config_dir: Path = Path("config")) -> dict[str
         "artifacts": artifacts,
         "media_summary": media_summary,
         "recent_logs": log_lines,
-        "events": build_replay_events(run_dir, manifest)[-200:],
+        "events": events_payload,
         "llm_writer": {
             "configured": bool(provider),
             "provider": provider,
@@ -324,9 +450,15 @@ def read_run_state(run_dir: Path, config_dir: Path = Path("config")) -> dict[str
         "mirror_dir": outputs_cfg.get("mirror_dir"),
     }
 
+    _RUN_STATE_CACHE[cache_key] = (fp, state_obj)
+    return copy.deepcopy(state_obj)
+
 
 def tail_new_lines(path: Path, offset: int) -> tuple[list[str], int]:
-    """Reads newly appended lines from `path` starting at byte `offset`."""
+    """Reads newly appended lines from `path` starting at byte `offset`.
+
+    Buffers partial lines so that incomplete lines are not split across polls.
+    """
     if not path.exists():
         return [], 0
     try:
@@ -338,8 +470,17 @@ def tail_new_lines(path: Path, offset: int) -> tuple[list[str], int]:
         with open(path, "rb") as f:
             f.seek(offset)
             chunk = f.read()
-            new_offset = f.tell()
-        lines = chunk.decode("utf-8", errors="replace").splitlines()
+        if not chunk:
+            return [], offset
+
+        last_nl = chunk.rfind(b"\n")
+        if last_nl == -1:
+            # Chunk has no newline yet; wait until line completion
+            return [], offset
+
+        complete_chunk = chunk[: last_nl + 1]
+        new_offset = offset + len(complete_chunk)
+        lines = complete_chunk.decode("utf-8", errors="replace").splitlines()
         return lines, new_offset
     except Exception:
         return [], offset

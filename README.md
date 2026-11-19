@@ -11,7 +11,7 @@
 ```mermaid
 flowchart TD
     O[Orchestrator Agent<br/>data/runs/YYYY-MM-DD/manifest.json] --> S[1. Scraper Agent<br/>RSS-first ingestion]
-    S --> E[2. Editor Agent<br/>Top 5 stories rewrite]
+    S --> E[2. Editor Agent<br/>Top 6 stories rewrite]
     
     subgraph Parallel_Execution [Parallel Branch]
         E --> V[3. Voice Agent<br/>Open-source TTS]
@@ -38,7 +38,7 @@ flowchart TD
 | :--- | :--- | :--- | :--- | :--- |
 | **Orchestrator** | [`agents/orchestrator.md`](agents/orchestrator.md) | Coordinates DAG execution, retries, concurrency, and state tracking | `pipeline.yaml` | `manifest.schema.json` |
 | **1. Scraper** | [`agents/scraper.md`](agents/scraper.md) | Ingests RSS feeds from verified outlets with polite throttling | `sources.yaml` | `articles.schema.json` |
-| **2. Editor** | [`agents/editor.md`](agents/editor.md) | Deduplicates, selects top 5 stories, rewrites into broadcast narration | `articles.schema.json` | `script.schema.json` |
+| **2. Editor** | [`agents/editor.md`](agents/editor.md) | Deduplicates, selects top 6 stories, rewrites into broadcast narration | `articles.schema.json` | `script.schema.json` |
 | **3. Voice** | [`agents/voice.md`](agents/voice.md) | Synthesizes broadcast narration using open-source TTS | `script.schema.json` | `narration.wav` |
 | **4. Timeline** | [`agents/timeline.md`](agents/timeline.md) | Computes word-level and scene-level timestamps via forced alignment | `narration.wav`, `script.json` | `timeline.schema.json`, `captions.srt` |
 | **5. Media** | [`agents/media.md`](agents/media.md) | Collects licensed visual B-roll (Pexels, Pixabay, Wikimedia, CC) | `script.schema.json` | `media_manifest.schema.json` |

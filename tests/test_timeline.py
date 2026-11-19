@@ -51,7 +51,7 @@ def mock_timeline_run_dir(tmp_path: Path, sample_script_dict: dict[str, Any]) ->
 
     for idx, sc in enumerate(sample_script_dict["scenes"]):
         sc_id = sc["id"]
-        sc_dur = 10.0
+        sc_dur = float(sc.get("est_duration_sec", 15.0))
         wav_path = scenes_dir / f"{sc_id}.wav"
         create_silence_wav(wav_path, duration_sec=sc_dur, sample_rate=48000)
 
@@ -357,6 +357,9 @@ def test_timeline_schema_validation_negative_cases():
                 "id": "intro",
                 "start": 0.0,
                 "end": 10.0,
+                "speech_start": 0.5,
+                "speech_end": 9.5,
+                "sentences": [],
                 # missing 'words'
             }
         ]
@@ -555,5 +558,790 @@ def test_devanagari_compatibility_guard(mock_timeline_run_dir: Path):
     tl_out = json.loads((mock_timeline_run_dir / "timeline" / "timeline.json").read_text(encoding="utf-8"))
     assert any("uroman" in w for w in tl_out["warnings"])
     assert len(tl_out["scenes"][0]["words"]) == 5
+
+
+def test_real_run_caption_quality_regression_2026_11_15():
+    """Phase 0 Acceptance: On the 2026-11-15 run, 0 cues late by >50ms, 0 duration/line/CPS violations."""
+    run_file = Path("data/runs/2026-11-15/timeline/timeline.json")
+    if not run_file.exists():
+        pytest.skip("2026-11-15 real run fixture not found")
+
+    tl_data = json.loads(run_file.read_text(encoding="utf-8"))
+    all_captions: list[dict[str, Any]] = []
+    cap_id = 1
+
+    for sc in tl_data["scenes"]:
+        caps, cap_id = chunk_scene_words_into_captions(
+            scene_words=sc["words"],
+            scene_id=sc["id"],
+            scene_start=sc["start"],
+            scene_end=sc["end"],
+            start_caption_id=cap_id,
+            max_chars_per_line=42,
+            max_lines=2,
+            min_duration_sec=0.9,
+            max_duration_sec=5.0,
+            lead_in_sec=0.05,
+            hold_after_sec=0.15,
+            min_gap_sec=0.04,
+            target_cps=17.0,
+            max_cps=20.0,
+        )
+        all_captions.extend(caps)
+
+    # 1. 0 cues late by > 50 ms (and 0 cues late by > 0 ms)
+    late_cues = [c for c in all_captions if c["start"] > c["words"][0]["start"]]
+    assert len(late_cues) == 0, f"Found {len(late_cues)} late cues"
+
+    # 2. Invariants: start < end, end >= last_word.end, start <= first_word.start
+    for c in all_captions:
+        assert c["start"] < c["end"]
+        assert c["start"] <= c["words"][0]["start"]
+        assert c["end"] >= c["words"][-1]["end"]
+
+    # 3. Duration limits [0.9s, 5.0s]
+    dur_violations = [c for c in all_captions if c["duration"] > 5.05 or c["duration"] < 0.89]
+    assert len(dur_violations) == 0, f"Duration violations: {dur_violations}"
+
+    # 4. Line limits: <= 2 lines, each <= 42 chars
+    line_violations = []
+    for c in all_captions:
+        lines = c["text"].split("\n")
+        assert len(lines) <= 2, f"More than 2 lines: {c['text']}"
+        for line in lines:
+            if len(line) > 42:
+                line_violations.append((c["id"], line, len(line)))
+    assert len(line_violations) == 0, f"Line length violations: {line_violations}"
+
+    # 5. Reading speed (CPS <= 20.0)
+    cpss = [len(c["text"].replace("\n", " ")) / c["duration"] for c in all_captions]
+    cps_violations = [c for c in all_captions if (len(c["text"].replace("\n", " ")) / c["duration"]) > 20.05]
+    assert len(cps_violations) == 0, f"CPS violations: {cps_violations}"
+    median_cps = sorted(cpss)[len(cpss) // 2]
+    assert 15.0 <= median_cps <= 18.0, f"Median CPS out of expected range: {median_cps}"
+
+    # 6. SRT syntax validation
+    srt_text = build_srt_content(all_captions)
+    valid_srt, srt_err = validate_srt_syntax(srt_text)
+    assert valid_srt is True, f"SRT syntax error: {srt_err}"
+
+
+def test_caption_chunking_randomized_properties():
+    """Property test: randomized word sequences never produce invalid cues, late starts, or overlaps."""
+    import random
+
+    rng = random.Random(42)
+    sample_vocabulary = [
+        "The", "Supreme", "Court", "of", "Nepal", "issued", "a", "landmark",
+        "directive", "today,", "instructing", "the", "government", "to", "ensure",
+        "transparency", "in", "major", "infrastructure", "spending.", "Meanwhile,",
+        "economic", "indicators", "showed", "a", "moderate", "uptick", "in", "exports.",
+        "Farmers", "in", "the", "southern", "plains", "celebrated", "favorable", "weather."
+    ]
+
+    for iteration in range(30):
+        n_words = rng.randint(5, 40)
+        curr_t = rng.uniform(0.2, 1.0)
+        scene_words = []
+        for i in range(n_words):
+            w_text = rng.choice(sample_vocabulary)
+            dur = rng.uniform(0.1, 0.45)
+            scene_words.append({
+                "w": w_text,
+                "tts": w_text.lower(),
+                "start": round(curr_t, 3),
+                "end": round(curr_t + dur, 3),
+                "score": 0.95,
+            })
+            curr_t += dur + rng.uniform(0.01, 0.15)
+
+        sc_end = round(curr_t + rng.uniform(0.3, 1.0), 3)
+        captions, _ = chunk_scene_words_into_captions(
+            scene_words=scene_words,
+            scene_id=f"rand_{iteration}",
+            scene_start=0.0,
+            scene_end=sc_end,
+            max_chars_per_line=42,
+            max_lines=2,
+            min_duration_sec=0.9,
+            max_duration_sec=5.0,
+        )
+
+        assert len(captions) >= 1
+        for idx, c in enumerate(captions):
+            # Invariant: cue start never after first word
+            assert c["start"] <= c["words"][0]["start"]
+            # Invariant: cue end never before last word
+            assert c["end"] >= c["words"][-1]["end"]
+            # Invariant: cue start strictly < cue end
+            assert c["start"] < c["end"]
+            # Limits
+            lines = c["text"].split("\n")
+            assert len(lines) <= 2
+            for l in lines:
+                assert len(l) <= 42
+            # No overlaps with previous cue
+            if idx > 0:
+                assert captions[idx - 1]["end"] <= c["start"] + 0.001
+
+
+def test_partial_scene_run_does_not_overwrite_canonical(mock_timeline_run_dir: Path):
+    """0.4 Partial-run safety: --scene writes timeline/partial/<scene>.json without touching canonical timeline."""
+    agent = TimelineAgent(mock_timeline_run_dir)
+
+    # 1. Run full timeline first to generate canonical artifacts
+    full_outs = agent.run(aligner_override="fake", no_preview=True)
+    canonical_timeline_path = mock_timeline_run_dir / "timeline" / "timeline.json"
+    canonical_bytes = canonical_timeline_path.read_bytes()
+    canonical_srt_bytes = (mock_timeline_run_dir / "timeline" / "captions.srt").read_bytes()
+
+    # 2. Run with scene_filter="intro" without allow_partial_overwrite
+    partial_outs = agent.run(
+        aligner_override="fake",
+        scene_filter="intro",
+        no_preview=True,
+        allow_partial_overwrite=False,
+    )
+
+    # Canonical files must remain byte-identical!
+    assert canonical_timeline_path.read_bytes() == canonical_bytes
+    assert (mock_timeline_run_dir / "timeline" / "captions.srt").read_bytes() == canonical_srt_bytes
+
+    # Partial files must be generated
+    assert "timeline/partial/intro.json" in partial_outs
+    assert "timeline/partial/intro.srt" in partial_outs
+    assert (mock_timeline_run_dir / "timeline" / "partial" / "intro.json").exists()
+    assert (mock_timeline_run_dir / "timeline" / "partial" / "intro.srt").exists()
+
+    partial_data = json.loads((mock_timeline_run_dir / "timeline" / "partial" / "intro.json").read_text(encoding="utf-8"))
+    assert len(partial_data["scenes"]) == 1
+    assert partial_data["scenes"][0]["id"] == "intro"
+
+
+def test_save_manifest_atomic_and_concurrency(tmp_path: Path):
+    """0.5 Manifest concurrency: save_manifest uses atomic rename and prevents corrupt writes."""
+    import concurrent.futures
+    import threading
+    from src.utils.manifest import create_initial_manifest, load_manifest, save_manifest, update_stage_status
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest = create_initial_manifest(
+        "test_run",
+        "2026-11-06",
+        {"stages": [{"id": "voice"}, {"id": "timeline"}, {"id": "media"}]},
+    )
+    save_manifest(manifest, manifest_path)
+
+    lock = threading.Lock()
+
+    def update_timeline():
+        for i in range(10):
+            with lock:
+                curr = load_manifest(manifest_path)
+                update_stage_status(curr, "timeline", "running", metrics={"step": i})
+                save_manifest(curr, manifest_path)
+
+    def update_media():
+        for i in range(10):
+            with lock:
+                curr = load_manifest(manifest_path)
+                update_stage_status(curr, "media", "running", metrics={"candidates": i})
+                save_manifest(curr, manifest_path)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(update_timeline)
+        f2 = executor.submit(update_media)
+        f1.result()
+        f2.result()
+
+    final_m = load_manifest(manifest_path)
+    assert final_m["stages"]["timeline"]["metrics"]["step"] == 9
+    assert final_m["stages"]["media"]["metrics"]["candidates"] == 9
+
+
+def test_caption_audit_pure_function():
+    """1.1 Pure function test for audit_captions with valid and invalid cues."""
+    from src.utils.timeline import audit_captions
+
+    valid_captions = [
+        {
+            "id": 1,
+            "scene_id": "intro",
+            "start": 0.05,
+            "end": 2.5,
+            "duration": 2.45,
+            "text": "Welcome to today's news briefing.",
+            "words": [
+                {"w": "Welcome", "start": 0.1, "end": 0.5, "score": 0.95},
+                {"w": "to", "start": 0.6, "end": 0.8, "score": 0.98},
+                {"w": "today's", "start": 0.9, "end": 1.3, "score": 0.92},
+                {"w": "news", "start": 1.4, "end": 1.7, "score": 0.96},
+                {"w": "briefing.", "start": 1.8, "end": 2.3, "score": 0.94},
+            ],
+        }
+    ]
+    scenes = [
+        {
+            "id": "intro",
+            "words": [
+                {"w": "Welcome", "start": 0.1, "end": 0.5},
+                {"w": "to", "start": 0.6, "end": 0.8},
+                {"w": "today's", "start": 0.9, "end": 1.3},
+                {"w": "news", "start": 1.4, "end": 1.7},
+                {"w": "briefing.", "start": 1.8, "end": 2.3},
+            ],
+        }
+    ]
+
+    res = audit_captions(valid_captions, scenes=scenes)
+    assert res["summary"]["passed"] is True
+    assert res["summary"]["violations_count"] == 0
+    assert res["summary"]["late_captions_count"] == 0
+    assert res["summary"]["overlap_count"] == 0
+    assert "intro" in res["per_scene"]
+    assert res["per_scene"]["intro"]["caption_count"] == 1
+
+    # Deliberate violations test:
+    # 1. Late start > 50ms (caption starts at 0.3s, word starts at 0.1s -> 200ms late)
+    # 2. Line length exceeded (> 42 chars)
+    # 3. High CPS
+    bad_captions = [
+        {
+            "id": 1,
+            "scene_id": "intro",
+            "start": 0.3,  # 200ms after first word
+            "end": 0.6,    # duration 0.3s -> too short and high CPS
+            "duration": 0.3,
+            "text": "This line is intentionally constructed to exceed the forty-two characters threshold easily",
+            "words": [
+                {"w": "This", "start": 0.1, "end": 0.5, "score": 0.9},
+            ],
+        },
+        {
+            "id": 2,
+            "scene_id": "intro",
+            "start": 0.5,  # Overlaps with caption 1 (end 0.6s)
+            "end": 1.0,
+            "duration": 0.5,
+            "text": "Second line",
+            "words": [
+                {"w": "Second", "start": 0.55, "end": 0.9, "score": 0.9},
+            ],
+        },
+    ]
+
+    bad_res = audit_captions(bad_captions, scenes=scenes)
+    assert bad_res["summary"]["passed"] is False
+    assert bad_res["summary"]["violations_count"] > 0
+    assert bad_res["summary"]["late_50ms_count"] >= 1
+    assert bad_res["summary"]["overlap_count"] >= 1
+    assert bad_res["summary"]["line_length_violations"] >= 1
+    assert bad_res["summary"]["min_duration_violations"] >= 1
+    assert bad_res["summary"]["word_conservation_errors"] >= 1
+
+
+def test_timeline_agent_emits_caption_audit_and_quality(mock_timeline_run_dir: Path):
+    """1.2 & 1.4 Acceptance: TimelineAgent writes caption_audit.json, attaches quality metadata, and validates schema."""
+    from src.utils.schema_validate import validate_contract
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    outputs = agent.run(aligner_override="fake", no_preview=True)
+
+    assert "timeline/caption_audit.json" in outputs
+    audit_path = mock_timeline_run_dir / "timeline" / "caption_audit.json"
+    assert audit_path.exists()
+
+    audit_data = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert "summary" in audit_data
+    assert "per_scene" in audit_data
+    assert audit_data["summary"]["passed"] is True, f"Violations: {audit_data['violations']}"
+    assert audit_data["summary"]["violations_count"] == 0
+
+    tl_path = mock_timeline_run_dir / "timeline" / "timeline.json"
+    tl_data = json.loads(tl_path.read_text(encoding="utf-8"))
+
+    # Top-level degraded and low_confidence_scenes
+    assert "degraded" in tl_data
+    assert tl_data["degraded"] is False
+    assert "low_confidence_scenes" in tl_data
+    assert isinstance(tl_data["low_confidence_scenes"], list)
+
+    # Per-scene quality metadata
+    for sc in tl_data["scenes"]:
+        assert "quality" in sc
+        q = sc["quality"]
+        assert "words" in q
+        assert "low_confidence_words" in q
+        assert "min_score" in q
+        assert "unplaced" in q
+        assert "caption_count" in q
+        assert "max_late_ms" in q
+        assert "max_cps" in q
+        assert q["words"] == len(sc["words"])
+
+    # Schema validation
+    is_valid_tl, err_tl = validate_contract(tl_data, "contracts/timeline.schema.json")
+    assert is_valid_tl is True, f"timeline.json contract failed: {err_tl}"
+
+    caps_path = mock_timeline_run_dir / "timeline" / "captions.json"
+    caps_data = json.loads(caps_path.read_text(encoding="utf-8"))
+    is_valid_caps, err_caps = validate_contract(caps_data, "contracts/captions.schema.json")
+    assert is_valid_caps is True, f"captions.json contract failed: {err_caps}"
+
+    # Verify agent.last_metrics
+    m = agent.last_metrics
+    assert m["caption_audit_passed"] is True
+    assert m["caption_violations"] == 0
+    assert "max_late_ms" in m
+    assert "max_cps" in m
+    assert "median_cps" in m
+
+
+def test_low_confidence_scene_flagged(mock_timeline_run_dir: Path):
+    """1.2 & DoD: degraded = true when >= 5% words are low-confidence or unplaced."""
+    import src.agents.timeline as t_module
+    from src.utils.timeline import FakeAligner
+
+    class LowConfidenceFakeAligner(FakeAligner):
+        def align_scenes(self, scene_jobs, settings=None):
+            res = super().align_scenes(scene_jobs, settings=settings or {})
+            # Make words in first scene have low scores
+            first_sc = scene_jobs[0]["id"]
+            if first_sc in res["scenes"]:
+                for w in res["scenes"][first_sc]["words"]:
+                    w["score"] = 0.20  # < low_score_threshold (0.35)
+            return res
+
+    orig_get_aligner = t_module.get_timeline_aligner
+    t_module.get_timeline_aligner = lambda name, cfg: LowConfidenceFakeAligner()
+    try:
+        agent = TimelineAgent(mock_timeline_run_dir)
+        agent.run(aligner_override="fake", no_preview=True)
+    finally:
+        t_module.get_timeline_aligner = orig_get_aligner
+
+    tl_path = mock_timeline_run_dir / "timeline" / "timeline.json"
+    tl_data = json.loads(tl_path.read_text(encoding="utf-8"))
+
+    first_sc_id = tl_data["scenes"][0]["id"]
+    assert first_sc_id in tl_data["low_confidence_scenes"]
+    # Check words have low_confidence: True
+    low_conf_words = [w for w in tl_data["scenes"][0]["words"] if w.get("low_confidence")]
+    assert len(low_conf_words) > 0
+
+    # Scene quality reflects low_confidence_words
+    q0 = tl_data["scenes"][0]["quality"]
+    assert q0["low_confidence_words"] == len(low_conf_words)
+    assert q0["min_score"] <= 0.40
+
+    # Run-level degraded check
+    assert tl_data["degraded"] is True
+    assert agent.last_metrics["degraded"] is True
+    assert agent.last_metrics["low_score_words"] >= len(low_conf_words)
+
+
+def test_captions_schema_negative_cases():
+    """1.4 Negative contract tests for contracts/captions.schema.json."""
+    from src.utils.schema_validate import validate_contract
+
+    schema_path = "contracts/captions.schema.json"
+
+    # Missing required 'start'
+    bad_cues_1 = [{"id": 1, "scene_id": "intro", "end": 1.0, "duration": 1.0, "text": "Hi", "words": []}]
+    valid, _ = validate_contract(bad_cues_1, schema_path)
+    assert valid is False
+
+    # Negative duration
+    bad_cues_2 = [{"id": 1, "scene_id": "intro", "start": 1.0, "end": 0.5, "duration": -0.5, "text": "Hi", "words": []}]
+    valid, _ = validate_contract(bad_cues_2, schema_path)
+    assert valid is False
+
+    # Missing word 'end'
+    bad_cues_3 = [{
+        "id": 1,
+        "scene_id": "intro",
+        "start": 0.0,
+        "end": 1.0,
+        "duration": 1.0,
+        "text": "Hi",
+        "words": [{"w": "Hi", "start": 0.0}]
+    }]
+    valid, _ = validate_contract(bad_cues_3, schema_path)
+    assert valid is False
+
+
+def test_sentence_word_conservation(mock_timeline_run_dir: Path):
+    """2.1 Asserts Devanagari terminators, abbreviations, and token conservation mismatch handling."""
+    from src.utils.text_normalizer import split_into_sentences
+
+    # 1. Test Devanagari terminators
+    devanagari_text = "यो पहिलो वाक्य हो। यो दोस्रो वाक्य हो॥ यो तेस्रो हो।"
+    sents = split_into_sentences(devanagari_text)
+    assert len(sents) == 3
+    assert sents[0] == "यो पहिलो वाक्य हो।"
+    assert sents[1] == "यो दोस्रो वाक्य हो॥"
+    assert sents[2] == "यो तेस्रो हो।"
+
+    # 2. Test abbreviation / currency boundary
+    curr_text = "The budget allocated Rs. 5,000 for the project. Works start tomorrow."
+    sents_curr = split_into_sentences(curr_text)
+    assert len(sents_curr) == 2
+    assert "Rs. 5,000" in sents_curr[0]
+
+    # 3. Test token conservation mismatch warning and proportional fallback in TimelineAgent
+    agent = TimelineAgent(mock_timeline_run_dir)
+    # Modify script.json to have mismatched sentence structure
+    script_file = mock_timeline_run_dir / "script" / "script.json"
+    s_data = json.loads(script_file.read_text(encoding="utf-8"))
+    # Introduce extra sentence boundaries in narration
+    s_data["scenes"][0]["narration"] = "First sentence! Second sentence? Third sentence. Fourth sentence now."
+    script_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+
+    out_files = agent.run(aligner_override="fake", no_preview=True)
+    assert len(out_files) > 0
+
+    tl_path = mock_timeline_run_dir / "timeline" / "timeline.json"
+    tl_data = json.loads(tl_path.read_text(encoding="utf-8"))
+    first_sc = tl_data["scenes"][0]
+    assert len(first_sc["sentences"]) >= 3
+    # Check all sentences have valid timestamps and monotonicity
+    for s in first_sc["sentences"]:
+        assert s["start"] <= s["end"]
+        assert s["start"] >= first_sc["start"]
+        assert s["end"] <= first_sc["end"]
+
+
+def test_scene_set_mismatch_raises(mock_timeline_run_dir: Path):
+    """2.2 Input invariant: Scene set mismatch or duplicates raise ValueError."""
+    # 1. Duplicate scene ID in script.json
+    script_file = mock_timeline_run_dir / "script" / "script.json"
+    s_data = json.loads(script_file.read_text(encoding="utf-8"))
+    s_data["scenes"].append(dict(s_data["scenes"][0]))
+    script_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    with pytest.raises(ValueError, match="Duplicate scene IDs found in script.json"):
+        agent.run(aligner_override="fake", no_preview=True)
+
+    # 2. Missing scene in scene_durations
+    s_data["scenes"].pop()
+    script_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+
+    dur_file = mock_timeline_run_dir / "audio" / "scene_durations.json"
+    dur_data = json.loads(dur_file.read_text(encoding="utf-8"))
+    removed_sc = dur_data.pop(0)
+    dur_file.write_text(json.dumps(dur_data, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Scene set mismatch between script.json and scene_durations.json"):
+        agent.run(aligner_override="fake", no_preview=True)
+
+
+def test_scene_order_validated(mock_timeline_run_dir: Path):
+    """2.2 Input invariant: Out-of-order or non-monotonic scenes raise ValueError."""
+    dur_file = mock_timeline_run_dir / "audio" / "scene_durations.json"
+    dur_data = json.loads(dur_file.read_text(encoding="utf-8"))
+
+    # Swap first two scenes in scene_durations to cause order mismatch with script.json
+    dur_data[0], dur_data[1] = dur_data[1], dur_data[0]
+    dur_file.write_text(json.dumps(dur_data, indent=2), encoding="utf-8")
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    with pytest.raises(ValueError, match="Scene order mismatch between script.json"):
+        agent.run(aligner_override="fake", no_preview=True)
+
+    # Test non-monotonic start_sec
+    script_file = mock_timeline_run_dir / "script" / "script.json"
+    s_data = json.loads(script_file.read_text(encoding="utf-8"))
+    # Also swap script so order matches, but set start_sec non-monotonic
+    s_data["scenes"][0], s_data["scenes"][1] = s_data["scenes"][1], s_data["scenes"][0]
+    script_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+
+    dur_data[1]["start_sec"] = dur_data[0]["start_sec"] - 1.0  # Non-monotonic!
+    dur_file.write_text(json.dumps(dur_data, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Non-monotonic scene start_sec"):
+        agent.run(aligner_override="fake", no_preview=True)
+
+
+def test_final_scene_end_reconciled(mock_timeline_run_dir: Path):
+    """2.2 Input invariant: Reconciles scenes[-1].end to duration_sec exactly within 20ms residual."""
+    dur_file = mock_timeline_run_dir / "audio" / "scene_durations.json"
+    dur_data = json.loads(dur_file.read_text(encoding="utf-8"))
+
+    # Introduce a 10ms residual in the final scene
+    orig_end = dur_data[-1]["end_sec"]
+    dur_data[-1]["end_sec"] = orig_end - 0.010
+    dur_data[-1]["duration_sec"] = dur_data[-1]["duration_sec"] - 0.010
+    dur_file.write_text(json.dumps(dur_data, indent=2), encoding="utf-8")
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    agent.run(aligner_override="fake", no_preview=True)
+
+    tl_path = mock_timeline_run_dir / "timeline" / "timeline.json"
+    tl_data = json.loads(tl_path.read_text(encoding="utf-8"))
+
+    # Master duration equals final scene end exactly
+    assert tl_data["scenes"][-1]["end"] == tl_data["duration_sec"]
+    assert tl_data["scenes"][-1]["end"] == orig_end
+
+
+def test_worker_per_scene_error_handled_gracefully(mock_timeline_run_dir: Path):
+    """2.4 Worker hardening: Per-scene failure falls back to weighted interpolation without crashing."""
+    import src.agents.timeline as t_module
+    from src.utils.timeline import FakeAligner
+
+    class ErrorProneFakeAligner(FakeAligner):
+        def align_scenes(self, scene_jobs, settings=None):
+            res = super().align_scenes(scene_jobs, settings=settings or {})
+            # Simulate a worker error on the second scene
+            if len(scene_jobs) > 1:
+                failing_sc = scene_jobs[1]["id"]
+                res["scenes"][failing_sc] = {
+                    "duration_sec": 0.0,
+                    "error": "CUDA out of memory in worker align_scene",
+                    "words": [
+                        {
+                            "w": w.get("orig", ""),
+                            "tts": w.get("tts", ""),
+                            "start": None,
+                            "end": None,
+                            "score": 0.0,
+                            "unplaced": True,
+                        }
+                        for w in scene_jobs[1]["words"]
+                    ],
+                }
+            return res
+
+    orig_get_aligner = t_module.get_timeline_aligner
+    t_module.get_timeline_aligner = lambda name, cfg: ErrorProneFakeAligner()
+    try:
+        agent = TimelineAgent(mock_timeline_run_dir)
+        agent.run(aligner_override="fake", no_preview=True)
+    finally:
+        t_module.get_timeline_aligner = orig_get_aligner
+
+    tl_path = mock_timeline_run_dir / "timeline" / "timeline.json"
+    tl_data = json.loads(tl_path.read_text(encoding="utf-8"))
+
+    second_sc = tl_data["scenes"][1]
+    # All words in the failed scene should be gracefully interpolated
+    for w in second_sc["words"]:
+        assert w["start"] is not None
+        assert w["end"] is not None
+        assert w["unplaced"] is True
+
+    assert tl_data["degraded"] is True
+
+
+def test_alignment_cache_hit(mock_timeline_run_dir: Path):
+    """3.1 Two-level cache: Second run of identical inputs hits cache and skips model alignment."""
+    import src.agents.timeline as t_module
+    from src.utils.timeline import FakeAligner
+
+    call_count = 0
+
+    class CountingFakeAligner(FakeAligner):
+        def align_scenes(self, scene_jobs, settings=None):
+            nonlocal call_count
+            call_count += 1
+            return super().align_scenes(scene_jobs, settings=settings or {})
+
+    orig_get_aligner = t_module.get_timeline_aligner
+    t_module.get_timeline_aligner = lambda name, cfg: CountingFakeAligner()
+
+    try:
+        agent = TimelineAgent(mock_timeline_run_dir)
+
+        # Run 1: Cold run, cache is populated
+        agent.run(aligner_override="fake", no_preview=True)
+        assert call_count == 1
+        assert agent.last_metrics["cached"] is False
+        assert agent.last_metrics["cache_misses"] > 0
+
+        # Verify cache files were created
+        cache_dir = mock_timeline_run_dir / "timeline" / "cache" / "alignment"
+        assert cache_dir.exists()
+        cache_files = list(cache_dir.glob("*.json"))
+        assert len(cache_files) == agent.last_metrics["cache_misses"]
+
+        # Run 2: Warm run, should hit cache completely
+        agent.run(aligner_override="fake", no_preview=True)
+        # Aligner.align_scenes should NOT have been called again!
+        assert call_count == 1
+        assert agent.last_metrics["cached"] is True
+        assert agent.last_metrics["cache_hits"] == len(cache_files)
+        assert agent.last_metrics["cache_misses"] == 0
+
+        # Run 3: Forced no-cache run, should re-align
+        agent.run(aligner_override="fake", no_preview=True, no_cache=True)
+        assert call_count == 2
+        assert agent.last_metrics["cached"] is False
+
+    finally:
+        t_module.get_timeline_aligner = orig_get_aligner
+
+
+def test_audit_cli_mode(mock_timeline_run_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    """3.2 CLI mode: --audit prints quality summary of existing run without re-aligning."""
+    from src.agents.timeline import main
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    agent.run(aligner_override="fake", no_preview=True)
+
+    # Call audit_existing_run directly
+    audit_report = agent.audit_existing_run()
+    assert "summary" in audit_report
+    assert audit_report["summary"]["passed"] is True
+    assert audit_report["summary"]["total_captions"] > 0
+
+    # Test CLI invocation with --audit
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "timeline.py",
+            "--runs-dir", str(mock_timeline_run_dir.parent),
+            "--date", mock_timeline_run_dir.name,
+            "--audit",
+        ],
+    )
+    exit_code = main()
+    assert exit_code == 0
+
+    captured = capsys.readouterr()
+    assert "=== TIMELINE CAPTION AUDIT REPORT ===" in captured.out
+    assert "Audit Passed:" in captured.out
+    assert "Reading Speed (CPS):" in captured.out
+
+
+def test_preview_video_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """3.2 Preview: generate_timeline_preview_video uses fast preset and 10 fps."""
+    import subprocess
+    from src.utils.timeline import generate_timeline_preview_video
+
+    recorded_cmd = []
+
+    def mock_subprocess_run(cmd, *args, **kwargs):
+        nonlocal recorded_cmd
+        recorded_cmd = list(cmd)
+        # Create dummy file to simulate ffmpeg output
+        out_name = cmd[-1]
+        out_path = Path(kwargs.get("cwd", tmp_path)) / out_name
+        out_path.write_bytes(b"dummy_mp4_bytes")
+        class DummyProc:
+            returncode = 0
+            stderr = ""
+        return DummyProc()
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+
+    dummy_narration = tmp_path / "audio" / "narration.wav"
+    dummy_narration.parent.mkdir(parents=True, exist_ok=True)
+    dummy_narration.write_bytes(b"dummy")
+
+    dummy_srt = tmp_path / "timeline" / "captions.srt"
+    dummy_srt.parent.mkdir(parents=True, exist_ok=True)
+    dummy_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n\n", encoding="utf-8")
+
+    out_mp4 = tmp_path / "timeline" / "timeline_preview.mp4"
+
+    res = generate_timeline_preview_video(
+        narration_path=dummy_narration,
+        srt_path=dummy_srt,
+        output_mp4=out_mp4,
+        fps=10,
+        preset="veryfast",
+    )
+
+    assert res["file"] == str(out_mp4)
+    # Check ffmpeg command options
+    assert "-preset" in recorded_cmd
+    preset_idx = recorded_cmd.index("-preset")
+    assert recorded_cmd[preset_idx + 1] == "veryfast"
+
+    # Check fps in color lavfi input
+    color_in = [arg for arg in recorded_cmd if "color=" in arg]
+    assert len(color_in) > 0
+    assert "r=10" in color_in[0]
+
+
+def test_multilingual_devanagari_transliteration():
+    """4.1 Multilingual reality: Devanagari fallback transliterator generates Latin tokens for MMS."""
+    from src.utils.text_normalizer import devanagari_to_roman_fallback, tokenize_for_alignment
+
+    nepali_phrase = "काठमाडौं र पोखरामा भारी वर्षा भयो।"
+    romanized = devanagari_to_roman_fallback(nepali_phrase)
+    # Check that output is ASCII Latin characters
+    assert any(c in "abcdefghijklmnopqrstuvwxyz" for c in romanized.lower())
+
+    warnings: list[str] = []
+    tokens = tokenize_for_alignment(nepali_phrase, warnings_out=warnings)
+    assert len(tokens) >= 4
+    # All tokens should have non-empty MMS tokens
+    for tok in tokens:
+        assert len(tok["tokens"]) > 0
+
+
+def test_multilingual_audit_and_warnings(mock_timeline_run_dir: Path):
+    """4.1 Multilingual reality: Language-driven reporting in caption_audit."""
+    script_file = mock_timeline_run_dir / "script" / "script.json"
+    s_data = json.loads(script_file.read_text(encoding="utf-8"))
+    s_data["language"] = "Nepali"
+    s_data["scenes"][0]["narration"] = "काठमाडौंमा नयाँ योजना सुरु भयो।"
+    script_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+
+    agent = TimelineAgent(mock_timeline_run_dir)
+    agent.run(aligner_override="fake", no_preview=True)
+
+    audit_path = mock_timeline_run_dir / "timeline" / "caption_audit.json"
+    audit_data = json.loads(audit_path.read_text(encoding="utf-8"))
+
+    m_status = audit_data["summary"].get("multilingual_status", {})
+    assert m_status.get("language") == "Nepali"
+    assert m_status.get("devanagari_detected") is True
+
+
+def test_verbatim_caption_check():
+    """4.2 Optional: Verbatim word conservation check between scenes and captions."""
+    from src.utils.timeline import audit_captions
+
+    scenes = [{
+        "id": "intro",
+        "words": [
+            {"w": "Hello", "start": 0.0, "end": 0.5},
+            {"w": "world", "start": 0.5, "end": 1.0},
+        ],
+    }]
+
+    # Exact matching captions
+    good_captions = [{
+        "id": 1,
+        "scene_id": "intro",
+        "start": 0.0,
+        "end": 1.0,
+        "text": "Hello world",
+        "words": [{"w": "Hello", "start": 0.0, "end": 0.5}, {"w": "world", "start": 0.5, "end": 1.0}],
+    }]
+    audit_good = audit_captions(good_captions, scenes)
+    assert audit_good["summary"]["verbatim_conserved"] is True
+    assert audit_good["summary"]["word_conservation_errors"] == 0
+
+    # Caption missing a word
+    dropped_captions = [{
+        "id": 1,
+        "scene_id": "intro",
+        "start": 0.0,
+        "end": 1.0,
+        "text": "Hello",
+        "words": [{"w": "Hello", "start": 0.0, "end": 0.5}],
+    }]
+    audit_bad = audit_captions(dropped_captions, scenes)
+    assert audit_bad["summary"]["verbatim_conserved"] is False
+    assert audit_bad["summary"]["word_conservation_errors"] > 0
+
+
+
+
+
 
 

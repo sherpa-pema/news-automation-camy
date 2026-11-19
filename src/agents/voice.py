@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,84 +23,75 @@ import yaml
 from src.agents.base import BaseAgent
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest, save_manifest, update_stage_status
+from src.utils.office_events import emit_office_event
 from src.utils.text_normalizer import normalize_for_speech
 from src.utils.tts import (
     FakeTTS as FakeTTS,
     MingEngine as MingEngine,
     assemble_scene_audio,
+    compute_voice_quality_index,
     concatenate_scenes,
+    get_scene_padding,
     get_tts_engine,
     master_audio_loudnorm,
+    measure_wav_artifacts,
+    measure_wav_ebur128,
+    measure_wav_ebur128_segment,
     read_wav_info,
 )
 
 
-def load_pronunciations(pronunciations_file: Path | str = "config/pronunciations.yaml") -> dict[str, str]:
-    """Loads the phonetic respelling dictionary from config/pronunciations.yaml."""
-    path = Path(pronunciations_file)
-    if not path.exists():
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, dict):
-        return {}
-    if "pronunciations" in data and isinstance(data["pronunciations"], dict):
-        data = data["pronunciations"]
-    res = {}
-    for word, val in data.items():
-        if isinstance(val, dict):
-            res[word] = val.get("respelling", "")
-        else:
-            res[word] = str(val)
-    return res
+from src.utils.text_normalizer import (
+    get_unverified_pronunciations_applied as get_unverified_pronunciations_applied,
+    load_pronunciations as load_pronunciations,
+    load_pronunciations_with_metadata as load_pronunciations_with_metadata,
+    split_into_sentences as split_into_sentences,
+)
 
 
-def load_pronunciations_with_metadata(pronunciations_file: Path | str = "config/pronunciations.yaml") -> dict[str, dict[str, Any]]:
-    """Loads phonetic respellings with verification metadata from config/pronunciations.yaml."""
-    path = Path(pronunciations_file)
-    if not path.exists():
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, dict):
-        return {}
-    if "pronunciations" in data and isinstance(data["pronunciations"], dict):
-        data = data["pronunciations"]
-    res = {}
-    for word, val in data.items():
-        if isinstance(val, dict):
-            res[word] = {
-                "respelling": val.get("respelling", ""),
-                "verified": bool(val.get("verified", False)),
-            }
-        else:
-            res[word] = {
-                "respelling": str(val),
-                "verified": False,
-            }
-    return res
-
-
-def get_unverified_pronunciations_applied(
+def extract_pending_proper_nouns(
     scenes: list[dict[str, Any]],
     pronunciations_file: Path | str = "config/pronunciations.yaml",
-) -> list[dict[str, Any]]:
-    """Identifies which unverified pronunciation respellings were matched and applied across scenes."""
-    meta = load_pronunciations_with_metadata(pronunciations_file)
-    unverified_applied = []
-    for word, info in meta.items():
-        if not info.get("verified", False):
-            pattern = re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)
-            for sc in scenes:
-                raw_text = sc.get("narration", "")
-                if pattern.search(raw_text):
-                    unverified_applied.append({
-                        "word": word,
-                        "respelling": info["respelling"],
-                        "scene_id": sc.get("id"),
-                    })
-                    break
-    return unverified_applied
+    whitelist_file: Path | str = "config/editor_whitelist.yaml",
+) -> list[str]:
+    """Identifies unmapped proper nouns across scenes that are absent from pronunciations and whitelist."""
+    known_words: set[str] = set()
+    p_path = Path(pronunciations_file)
+    if p_path.exists():
+        try:
+            with open(p_path, "r", encoding="utf-8") as f:
+                p_data = yaml.safe_load(f) or {}
+            for w in p_data.get("pronunciations", {}).keys():
+                for tok in re.findall(r"\b[a-zA-Z]+\b", w):
+                    known_words.add(tok.lower())
+        except Exception:
+            pass
+
+    w_path = Path(whitelist_file)
+    if w_path.exists():
+        try:
+            with open(w_path, "r", encoding="utf-8") as f:
+                w_data = yaml.safe_load(f) or {}
+            for item in w_data.get("proper_nouns", []):
+                for tok in re.findall(r"\b[a-zA-Z]+\b", item):
+                    known_words.add(tok.lower())
+        except Exception:
+            pass
+
+    pending: set[str] = set()
+    for sc in scenes:
+        narration = sc.get("narration", "")
+        sentences = re.split(r"(?<=[.!?])\s+", narration)
+        for sent in sentences:
+            tokens = sent.strip().split()
+            for idx, tok in enumerate(tokens):
+                if idx == 0:
+                    continue
+                clean = re.sub(r"[^a-zA-Z]", "", tok)
+                if len(clean) >= 2 and clean[0].isupper() and clean.lower() not in known_words:
+                    pending.add(clean)
+
+    return sorted(pending)
 
 
 def clean_narration_text(text: str, pronunciations: dict[str, str] | None = None) -> str:
@@ -155,74 +147,101 @@ def _compute_scene_cache_key(
     return hashlib.sha256(raw).hexdigest()
 
 
-def split_into_sentences(text: str) -> list[str]:
-    """Splits text into clean sentences for prosody-controlled sentence-level synthesis."""
-    if not text:
-        return []
-
-    # Protect common abbreviations before splitting
-    protected = text
-    abbrevs = ["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "e.g.", "i.e.", "vs.", "No.", "Rs.", "NRs."]
-    for idx, abb in enumerate(abbrevs):
-        protected = protected.replace(abb, f"__ABB_{idx}__")
-
-    raw_sentences = re.split(r"(?<=[.!?])\s+", protected)
-    sentences = []
-    for s in raw_sentences:
-        s_clean = s.strip()
-        if not s_clean:
-            continue
-        # Restore abbreviations
-        for idx, abb in enumerate(abbrevs):
-            s_clean = s_clean.replace(f"__ABB_{idx}__", abb)
-        sentences.append(s_clean)
-
-    return sentences
-
-
 def check_audio_silence_gaps(wav_path: Path | str, threshold_db: float = -45.0) -> float:
-    """Measures the maximum internal silence gap in seconds inside a WAV file without third-party deps."""
-    import struct
+    """Measures maximum internal silence gap in seconds inside a WAV file (sample-width aware, vectorized)."""
     import wave
 
     with wave.open(str(wav_path), "rb") as wf:
         sr = wf.getframerate()
         n_frames = wf.getnframes()
+        channels = max(1, wf.getnchannels())
+        sampwidth = wf.getsampwidth()
         raw = wf.readframes(n_frames)
 
     if sr == 0 or len(raw) == 0:
         return 0.0
 
-    threshold_amp = (10.0 ** (threshold_db / 20.0)) * 32768.0
-    threshold_sq = threshold_amp * threshold_amp
-
+    thresh_lin = 10.0 ** (threshold_db / 20.0)
+    thresh_sq = thresh_lin * thresh_lin
     win_size = int(sr * 0.05)  # 50ms window
     if win_size == 0:
         return 0.0
 
-    bytes_per_sample = 2
-    win_bytes = win_size * bytes_per_sample
-    total_wins = len(raw) // win_bytes
+    try:
+        import numpy as np
 
-    max_streak = 0
-    curr_streak = 0
-
-    for i in range(total_wins):
-        chunk = raw[i * win_bytes : (i + 1) * win_bytes]
-        samples = struct.unpack(f"<{win_size}h", chunk)
-        sum_sq = sum(s * s for s in samples)
-        mean_sq = sum_sq / win_size
-        if mean_sq < threshold_sq:
-            curr_streak += 1
+        if sampwidth == 2:
+            arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sampwidth == 4:
+            try:
+                arr = np.frombuffer(raw, dtype=np.float32).copy()
+            except Exception:
+                arr = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+        elif sampwidth == 1:
+            arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
         else:
-            if curr_streak > max_streak:
-                max_streak = curr_streak
-            curr_streak = 0
+            # Fallback for 24-bit PCM
+            raw_bytes = np.frombuffer(raw, dtype=np.uint8)
+            samples_24 = raw_bytes[: len(raw_bytes) - (len(raw_bytes) % 3)].reshape(-1, 3)
+            padded_24 = np.pad(samples_24, ((0, 0), (1, 0)), mode="constant")
+            arr = padded_24.view(dtype="<i4").squeeze(-1).astype(np.float32) / 2147483648.0
 
-    if curr_streak > max_streak:
-        max_streak = curr_streak
+        if channels > 1:
+            arr = arr.reshape(-1, channels).mean(axis=1)
 
-    return round(max_streak * 0.05, 3)
+        total_wins = len(arr) // win_size
+        if total_wins == 0:
+            return 0.0
+
+        win_blocks = arr[: total_wins * win_size].reshape(total_wins, win_size)
+        mean_sq = np.mean(win_blocks ** 2, axis=1)
+        is_silent = mean_sq < thresh_sq
+
+        if not np.any(is_silent):
+            return 0.0
+
+        padded = np.pad(is_silent.astype(np.int8), (1, 1), mode="constant")
+        diffs = np.diff(padded)
+        starts = np.where(diffs == 1)[0]
+        ends = np.where(diffs == -1)[0]
+        max_streak = int(np.max(ends - starts)) if len(starts) > 0 else 0
+        return round(max_streak * 0.05, 3)
+
+    except Exception:
+        # Robust fallback
+        import struct
+
+        bytes_per_sample = max(1, sampwidth)
+        frame_bytes = bytes_per_sample * channels
+        win_bytes = win_size * frame_bytes
+        total_wins = len(raw) // win_bytes
+
+        max_val = float(1 << (8 * bytes_per_sample - 1)) if bytes_per_sample > 1 else 128.0
+        threshold_amp = thresh_lin * max_val
+        threshold_sq = threshold_amp * threshold_amp
+
+        max_streak = 0
+        curr_streak = 0
+
+        for i in range(total_wins):
+            chunk = raw[i * win_bytes : (i + 1) * win_bytes]
+            if bytes_per_sample == 2:
+                samples = struct.unpack(f"<{win_size * channels}h", chunk)
+            else:
+                samples = [0]
+            sum_sq = sum(float(s * s) for s in samples)
+            mean_sq = sum_sq / (win_size * channels)
+            if mean_sq < threshold_sq:
+                curr_streak += 1
+            else:
+                if curr_streak > max_streak:
+                    max_streak = curr_streak
+                curr_streak = 0
+
+        if curr_streak > max_streak:
+            max_streak = curr_streak
+
+        return round(max_streak * 0.05, 3)
 
 
 class VoiceAgent(BaseAgent):
@@ -277,19 +296,33 @@ class VoiceAgent(BaseAgent):
         max_length = int(voice_cfg.get("max_length", 24))
         crossfade_ms = float(voice_cfg.get("crossfade_ms", 12.0))
         daemon_url = voice_cfg.get("daemon_url")
+        raw_batching = voice_cfg.get("batching")
+        batching = int(raw_batching) if raw_batching is not None else 0
         text_normalization = voice_cfg.get("text_normalization", False)
         chunk_mode = voice_cfg.get("chunk_mode", "scene").lower().strip()
         reference_wav = voice_cfg.get("reference_wav", "config/voice/reference.wav")
         reference_txt = voice_cfg.get("reference_txt", "config/voice/reference.txt")
         similarity_threshold = float(voice_cfg.get("similarity_threshold", 0.72))
-        f0_tolerance_pct = float(voice_cfg.get("f0_tolerance_pct", 0.25))
+        f0_tolerance_pct = float(voice_cfg.get("f0_tolerance_pct", 0.10))
+        n_candidates = int(voice_cfg.get("n_candidates", 1))
+        f0_anchor = str(voice_cfg.get("f0_anchor", "running_median")).strip().lower()
+        ranker_weights = voice_cfg.get(
+            "ranker_weights",
+            {"cosine": 1.0, "f0": 0.6, "duration": 0.2, "artifacts": 0.2},
+        )
+        base_seed = int(voice_cfg.get("base_seed", 1895))
         max_retries = int(voice_cfg.get("max_retries", 2))
+        padding_policy = str(voice_cfg.get("padding_policy", "fixed")).strip().lower()
         pause_between_sentences = float(voice_cfg.get("pause_between_sentences", 0.25))
         pad_before = float(voice_cfg.get("pad_before", 0.4))
         pad_after = float(voice_cfg.get("pad_after", 0.6))
         target_lufs = float(voice_cfg.get("target_lufs", -16.0))
-        raw_scene_rms = voice_cfg.get("target_scene_rms_dbfs", -20.0)
+        raw_scene_rms = voice_cfg.get("target_scene_rms_dbfs", -23.0)
         target_scene_rms_dbfs = float(raw_scene_rms) if raw_scene_rms is not None else None
+        loudness_strategy = str(voice_cfg.get("loudness_strategy", "linear_strict")).strip().lower()
+        limiter_ceiling_dbfs = float(voice_cfg.get("limiter_ceiling_dbfs", -1.5))
+        compressor = bool(voice_cfg.get("compressor", True))
+        limiter = bool(voice_cfg.get("limiter", True))
         highpass_hz = float(voice_cfg.get("highpass_hz", 80.0))
         output_sample_rate = int(voice_cfg.get("output_sample_rate", 48000))
         disclose_synthetic_voice = bool(voice_cfg.get("disclose_synthetic_voice", True))
@@ -373,6 +406,10 @@ class VoiceAgent(BaseAgent):
             "reference_txt": reference_txt,
             "similarity_threshold": similarity_threshold,
             "f0_tolerance_pct": f0_tolerance_pct,
+            "n_candidates": n_candidates,
+            "f0_anchor": f0_anchor,
+            "ranker_weights": ranker_weights,
+            "seed": base_seed,
             "max_retries": max_retries,
         }
 
@@ -461,52 +498,102 @@ class VoiceAgent(BaseAgent):
 
         total_synthesis_time = 0.0
         total_model_load_time = 0.0
+        stage_breakdown = {
+            "model_load": 0.0,
+            "prefill": 0.0,
+            "ar_step": 0.0,
+            "cfm": 0.0,
+            "vae_decode": 0.0,
+            "qc": 0.0,
+            "write": 0.0,
+        }
 
         if items_to_synthesize:
+            step_size = batching if batching > 0 else len(items_to_synthesize)
             self.logger.info(
                 f"Synthesizing {len(items_to_synthesize)} {chunk_mode}(s) "
                 f"({len(cached_scenes)} scene(s) cached, {len(all_items) - len(items_to_synthesize)} chunk(s) cached) "
                 f"across {len(target_scenes)} scene(s)..."
             )
             t0 = time.time()
-            batch_result = tts_engine.synthesize_batch(items_to_synthesize, engine_settings)
-            total_synthesis_time = time.time() - t0
-            total_model_load_time = batch_result.get("model_load_time_sec", 0.0)
-            if batch_result.get("reference_f0_hz"):
-                reference_f0_hz = float(batch_result["reference_f0_hz"])
+            for b_idx in range(0, len(items_to_synthesize), step_size):
+                b_items = items_to_synthesize[b_idx : b_idx + step_size]
+                cur_done = min(b_idx + len(b_items), len(items_to_synthesize))
+                emit_office_event(
+                    self.run_dir,
+                    "substage_progress",
+                    stage="voice",
+                    current=cur_done,
+                    total=len(items_to_synthesize),
+                    message=f"Synthesizing voice chunk {cur_done}/{len(items_to_synthesize)}",
+                )
+                batch_result = tts_engine.synthesize_batch(b_items, engine_settings)
+                total_model_load_time += batch_result.get("model_load_time_sec", 0.0)
+                if "stage_breakdown_sec" in batch_result:
+                    for k, v in batch_result["stage_breakdown_sec"].items():
+                        stage_breakdown[k] = round(stage_breakdown.get(k, 0.0) + v, 3)
+                if batch_result.get("reference_f0_hz"):
+                    reference_f0_hz = float(batch_result["reference_f0_hz"])
 
-            # Inspect per-item result for failures and retries
-            for res_item in batch_result.get("results", []):
-                total_retries += res_item.get("retries", 0)
-                r_id = res_item.get("id", "")
-                scene_consistency_map[r_id] = {
-                    "cosine_sim": res_item.get("cosine_sim", 1.0),
-                    "f0_median_hz": res_item.get("f0_median_hz", 0.0),
-                    "retries": res_item.get("retries", 0),
-                    "passes_gate": res_item.get("passes_gate", True),
-                }
-                if res_item.get("status") == "failed":
-                    err_msg = res_item.get("error", "Unknown error")
-                    raise RuntimeError(f"Failed to synthesize {chunk_mode} {r_id}: {err_msg}")
+                # Inspect per-item result for failures and retries
+                for res_item in batch_result.get("results", []):
+                    total_retries += res_item.get("retries", 0)
+                    r_id = res_item.get("id", "")
+                    scene_consistency_map[r_id] = {
+                        "cosine_sim": res_item.get("cosine_sim", 1.0),
+                        "f0_median_hz": res_item.get("f0_median_hz", 0.0),
+                        "target_f0_hz": res_item.get("target_f0_hz", 0.0),
+                        "retries": res_item.get("retries", 0),
+                        "passes_gate": res_item.get("passes_gate", True),
+                        "selected_candidate_idx": res_item.get("selected_candidate_idx", 0),
+                        "seed_used": res_item.get("seed_used", base_seed),
+                        "ranker_score": res_item.get("ranker_score"),
+                        "ranker_breakdown": res_item.get("ranker_breakdown"),
+                        "candidates_evaluated": res_item.get("candidates_evaluated"),
+                    }
+                    if res_item.get("status") == "failed":
+                        err_msg = res_item.get("error", "Unknown error")
+                        raise RuntimeError(f"Failed to synthesize {chunk_mode} {r_id}: {err_msg}")
+
+            total_synthesis_time = time.time() - t0
+            stage_breakdown["model_load"] = round(total_model_load_time, 2)
         else:
             self.logger.info(
                 f"All {len(target_scenes)} scene(s) already synthesized and valid on disk."
             )
 
         # Assemble each newly synthesized scene with padding, pauses, and active RMS leveling
+        t_asm_start = time.time()
         pause_to_use = 0.0 if chunk_mode == "scene" else pause_between_sentences
-        for scene in target_scenes:
+        for idx, scene in enumerate(target_scenes):
             scene_id = scene["id"]
+            emit_office_event(
+                self.run_dir,
+                "substage_progress",
+                stage="voice",
+                current=idx + 1,
+                total=len(target_scenes),
+                message=f"Voice scene {idx + 1}/{len(target_scenes)} ({scene_id})",
+                extra={"scene_id": scene_id},
+            )
             if scene_id in cached_scenes:
                 continue
             wav_paths = scene_items_map[scene_id]
             scene_wav_path = scenes_dir / f"{scene_id}.wav"
+            s_pad_before, s_pad_after = get_scene_padding(
+                scene_id=scene_id,
+                scene_idx=idx,
+                total_scenes=len(target_scenes),
+                padding_policy=padding_policy,
+                pad_before_fallback=pad_before,
+                pad_after_fallback=pad_after,
+            )
             scene_dur = assemble_scene_audio(
                 wav_paths,
                 scene_wav_path,
                 pause_sec=pause_to_use,
-                pad_before=pad_before,
-                pad_after=pad_after,
+                pad_before=s_pad_before,
+                pad_after=s_pad_after,
                 target_sample_rate=44100,
                 target_rms_dbfs=target_scene_rms_dbfs,
             )
@@ -529,12 +616,26 @@ class VoiceAgent(BaseAgent):
                 encoding="utf-8",
             )
 
-            # Also create aliases audio/scene_<id>.wav and audio/<id>.wav for convenience
+            # Create aliases audio/scene_<id>.wav and audio/<id>.wav using hardlinks (fallback to copyfile)
             alias_path = audio_dir / f"scene_{scene_id}.wav"
-            shutil.copyfile(scene_wav_path, alias_path)
+            try:
+                if alias_path.exists():
+                    alias_path.unlink()
+                os.link(scene_wav_path, alias_path)
+            except Exception:
+                shutil.copyfile(scene_wav_path, alias_path)
+
             if scene_id.startswith("scene_"):
-                shutil.copyfile(scene_wav_path, audio_dir / f"{scene_id}.wav")
+                id_alias = audio_dir / f"{scene_id}.wav"
+                try:
+                    if id_alias.exists():
+                        id_alias.unlink()
+                    os.link(scene_wav_path, id_alias)
+                except Exception:
+                    shutil.copyfile(scene_wav_path, id_alias)
             self.logger.info(f"Scene '{scene_id}' assembled: duration = {scene_dur:.2f}s")
+
+        assembly_time_sec = time.time() - t_asm_start
 
         # Clean up temporary sentence wavs
         shutil.rmtree(temp_sentences_dir, ignore_errors=True)
@@ -544,7 +645,7 @@ class VoiceAgent(BaseAgent):
         scene_metrics = []
         current_time = 0.0
 
-        for scene in scenes:
+        for idx, scene in enumerate(scenes):
             s_id = scene["id"]
             s_file = scenes_dir / f"{s_id}.wav"
             if not s_file.exists():
@@ -556,6 +657,15 @@ class VoiceAgent(BaseAgent):
             end_t = round(start_t + dur, 3)
             current_time = end_t
 
+            s_pad_before, s_pad_after = get_scene_padding(
+                scene_id=s_id,
+                scene_idx=idx,
+                total_scenes=len(scenes),
+                padding_policy=padding_policy,
+                pad_before_fallback=pad_before,
+                pad_after_fallback=pad_after,
+            )
+
             scene_files_in_order.append(s_file)
             all_scene_durations.append({
                 "id": s_id,
@@ -563,11 +673,15 @@ class VoiceAgent(BaseAgent):
                 "start_sec": start_t,
                 "end_sec": end_t,
                 "duration_sec": dur,
+                "pad_before": s_pad_before,
+                "pad_after": s_pad_after,
             })
             scene_metrics.append({
                 "id": s_id,
                 "estimated_duration_sec": scene.get("estimated_duration_sec", 0.0),
                 "actual_duration_sec": dur,
+                "pad_before": s_pad_before,
+                "pad_after": s_pad_after,
                 "file": f"audio/scenes/{s_id}.wav",
             })
 
@@ -583,14 +697,20 @@ class VoiceAgent(BaseAgent):
         # Loudness normalization and mastering (high-pass + two-pass loudnorm to 48kHz)
         master_narration_path = audio_dir / "narration.wav"
         self.logger.info(f"Mastering narration with FFmpeg two-pass loudnorm (target={target_lufs} LUFS)...")
+        t_master_start = time.time()
         master_stats = master_audio_loudnorm(
             raw_concat_path,
             master_narration_path,
             target_lufs=target_lufs,
-            true_peak=-1.5,
+            true_peak=limiter_ceiling_dbfs,
             sample_rate=output_sample_rate,
             highpass_hz=highpass_hz,
+            compressor=compressor,
+            limiter=limiter,
+            limiter_ceiling_dbfs=limiter_ceiling_dbfs,
+            loudness_strategy=loudness_strategy,
         )
+        mastering_time_sec = time.time() - t_master_start
         # Clean up intermediate raw concat
         raw_concat_path.unlink(missing_ok=True)
 
@@ -598,12 +718,60 @@ class VoiceAgent(BaseAgent):
         final_duration_sec = final_master_info["duration_sec"]
         rtf = round(total_synthesis_time / final_duration_sec, 2) if final_duration_sec > 0 else 0.0
 
-        # Build voice_report.json
+        # Measure per-scene loudness and True Peak after mastering
+        words_map = {sc["id"]: len(sc.get("narration", "").split()) for sc in scenes}
+        for sm in scene_metrics:
+            s_file = audio_dir / f"scenes/{sm['id']}.wav"
+            ebur = measure_wav_ebur128(s_file)
+            dur_info = next((d for d in all_scene_durations if d["id"] == sm["id"]), None)
+            start_t = dur_info["start_sec"] if dur_info else 0.0
+            dur_t = dur_info["duration_sec"] if dur_info else sm["actual_duration_sec"]
+            narr_ebur = measure_wav_ebur128_segment(master_narration_path, start_t, dur_t)
+            sm["lufs"] = ebur.get("lufs")
+            sm["true_peak_db"] = ebur.get("true_peak_db")
+            sm["mastered_lufs"] = narr_ebur.get("lufs")
+            sm["mastered_true_peak_db"] = narr_ebur.get("true_peak_db")
+            sm["word_count"] = words_map.get(sm["id"], 0)
+
+        # Measure audio artifacts & build Voice Quality Index (VQI)
+        artifact_flags = measure_wav_artifacts(master_narration_path)
         unverified_applied = get_unverified_pronunciations_applied(scenes)
+        pending_proper_nouns = extract_pending_proper_nouns(scenes)
+        total_pad_sec = sum(
+            sm.get("pad_before", 0.0) + sm.get("pad_after", 0.0) for sm in scene_metrics
+        )
+        avg_pad_sec = total_pad_sec / max(1, len(scene_metrics))
+        quality_block = compute_voice_quality_index(
+            consistency_metrics=scene_consistency_map,
+            reference_f0_hz=reference_f0_hz,
+            scenes_info=scene_metrics,
+            total_duration_sec=final_duration_sec,
+            pad_per_scene_sec=round(avg_pad_sec, 2),
+            artifact_flags=artifact_flags,
+            unverified_pronunciations=unverified_applied,
+        )
+        perf_block = {
+            "model_load_time_sec": round(total_model_load_time, 2),
+            "synthesis_wall_time_sec": round(total_synthesis_time, 2),
+            "assembly_time_sec": round(assembly_time_sec, 2),
+            "mastering_time_sec": round(mastering_time_sec, 2),
+            "total_wall_time_sec": round(
+                total_model_load_time + total_synthesis_time + assembly_time_sec + mastering_time_sec, 2
+            ),
+            "real_time_factor": rtf,
+            "stage_breakdown_sec": stage_breakdown,
+        }
+
+        # Build voice_report.json
         speaker_consistency_payload: dict[str, Any] = {
             "reference_wav": str(reference_wav),
             "similarity_threshold": similarity_threshold,
             "f0_tolerance_pct": f0_tolerance_pct,
+            "n_candidates": n_candidates,
+            "f0_anchor": f0_anchor,
+            "padding_policy": padding_policy,
+            "ranker_weights": ranker_weights,
+            "base_seed": base_seed,
             "metrics": scene_consistency_map,
         }
         if reference_f0_hz > 0.0:
@@ -629,6 +797,9 @@ class VoiceAgent(BaseAgent):
             "loudnorm": master_stats,
             "scenes": scene_metrics,
             "unverified_pronunciations_applied": unverified_applied,
+            "pending_proper_nouns": pending_proper_nouns,
+            "quality": quality_block,
+            "perf": perf_block,
         }
         report_json_path = audio_dir / "voice_report.json"
         with open(report_json_path, "w", encoding="utf-8") as f:
@@ -655,6 +826,8 @@ class VoiceAgent(BaseAgent):
             "loudnorm_mode": master_stats.get("loudnorm_mode"),
             "loudness_after_lufs": master_stats.get("after_lufs"),
             "true_peak_after_db": master_stats.get("after_true_peak"),
+            "quality": quality_block,
+            "perf": perf_block,
             "warnings": [],
         }
         if master_stats.get("fallback_used"):
@@ -777,8 +950,20 @@ class VoiceAgent(BaseAgent):
                             False,
                             f"Speaker consistency gate failed for item '{item_id}': failed gate checks",
                         )
+                # Pronunciation verification gate check
+                voice_cfg = self._get_voice_stage_config()
+                allow_unverified = bool(voice_cfg.get("allow_unverified_pronunciations", False))
+                unverified_applied = rep_data.get("unverified_pronunciations_applied", [])
+                if unverified_applied and not allow_unverified:
+                    unverified_words = [item.get("word") for item in unverified_applied]
+                    return (
+                        False,
+                        f"Unverified pronunciation gate failed: unverified entries applied {unverified_words}. "
+                        f"All applied pronunciations must have verified: true in config/pronunciations.yaml "
+                        f"or allow_unverified_pronunciations enabled in pipeline config.",
+                    )
             except Exception as exc:
-                return False, f"Failed to validate speaker consistency: {exc}"
+                return False, f"Failed to validate speaker consistency or pronunciation gate: {exc}"
 
         return True, None
 

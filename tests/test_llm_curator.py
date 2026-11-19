@@ -238,3 +238,59 @@ def test_editor_brief_displays_multi_source_synthesis():
     assert "Numbers Resolution" in brief
     assert "Earlier update said 11 dead" in brief
     assert "9. **Multi-Source Synthesis**:" in brief
+
+
+def test_curator_stratified_slot_allocation(monkeypatch):
+    """Verify that shortlisted clusters are stratified across the 6 broadcast slots in exact sequence."""
+    articles = [
+        {"source": "Out 1", "title": "Parliament news", "url": "https://a.com/pol", "full_text": "Parliament meeting held today. " * 5},
+        {"source": "Out 2", "title": "Local community school", "url": "https://a.com/soc", "full_text": "School in Lalitpur opens today. " * 5},
+        {"source": "Out 3", "title": "Dashain cultural festival", "url": "https://a.com/cul", "full_text": "Dashain festival observed today. " * 5},
+        {"source": "Out 4", "title": "NEPSE stock market", "url": "https://a.com/biz", "full_text": "Stock market index gained points. " * 5},
+        {"source": "Out 5", "title": "Telecom AI tech", "url": "https://a.com/tech", "full_text": "New software and technology deployed. " * 5},
+        {"source": "Out 6", "title": "Cricket match championship", "url": "https://a.com/spt", "full_text": "Cricket team won the tournament. " * 5},
+    ]
+
+    fake_response = {
+        "clusters": [
+            {"article_ids": [5], "primary_title": "Cricket victory", "category": "sports", "editorial_priority": 9.0},
+            {"article_ids": [0], "primary_title": "Parliament meeting", "category": "national_politics", "editorial_priority": 9.5},
+            {"article_ids": [3], "primary_title": "NEPSE gains", "category": "business_economics", "editorial_priority": 7.0},
+            {"article_ids": [1], "primary_title": "School opened", "category": "society_local", "editorial_priority": 8.0},
+            {"article_ids": [4], "primary_title": "Tech deployed", "category": "science_technology", "editorial_priority": 6.5},
+            {"article_ids": [2], "primary_title": "Festival observed", "category": "culture_entertainment", "editorial_priority": 7.5},
+        ],
+        "filtered_out_ids": [],
+    }
+
+    monkeypatch.setattr(llm_curator_mod, "detect_configured_provider", lambda pref=None: ("gemini", "fake-model"))
+    monkeypatch.setattr(llm_curator_mod, "_call_llm", lambda p, m, msgs, timeout=60: json.dumps(fake_response))
+
+    cfg = {
+        "llm_curator": {"enabled": True, "enabled_in_tests": True, "timeout_sec": 30},
+        "clustering": {"min_full_text_words": 10, "top_clusters_limit": 6},
+    }
+
+    res = curate_and_cluster_with_llm(articles, cfg)
+    assert res is not None
+    shortlist, opinions, stale = res
+
+    assert len(shortlist) == 6
+    # Cluster 01 must be slot_01 (national_politics)
+    assert shortlist[0]["broadcast_slot_id"] == "slot_01"
+    assert shortlist[0]["broadcast_slot"] == "national_politics"
+    # Cluster 02 must be slot_02 (society_local)
+    assert shortlist[1]["broadcast_slot_id"] == "slot_02"
+    assert shortlist[1]["broadcast_slot"] == "society_local"
+    # Cluster 03 must be slot_03 (culture_entertainment)
+    assert shortlist[2]["broadcast_slot_id"] == "slot_03"
+    assert shortlist[2]["broadcast_slot"] == "culture_entertainment"
+    # Cluster 04 must be slot_04 (business_economics)
+    assert shortlist[3]["broadcast_slot_id"] == "slot_04"
+    assert shortlist[3]["broadcast_slot"] == "business_economics"
+    # Cluster 05 must be slot_05 (science_technology)
+    assert shortlist[4]["broadcast_slot_id"] == "slot_05"
+    assert shortlist[4]["broadcast_slot"] == "science_technology"
+    # Cluster 06 must be slot_06 (sports)
+    assert shortlist[5]["broadcast_slot_id"] == "slot_06"
+    assert shortlist[5]["broadcast_slot"] == "sports"

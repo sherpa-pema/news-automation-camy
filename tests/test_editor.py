@@ -2028,6 +2028,384 @@ def test_syllable_pause_duration_estimation_and_calibration(tmp_path):
     assert details["period_pause_sec"] == 0.55
 
 
+def test_eight_scene_broadcast_sequence_validation_pass(tmp_path):
+    """8-scene broadcast draft passes validation when following strict category sequence."""
+    from src.utils.editor_validator import validate_script_draft
+
+    run_dir = tmp_path / "2026-11-15"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True)
+
+    shortlist = [
+        {"cluster_id": "cluster_01", "primary_title": "Parliament passes bill", "urls": ["https://news.com/politics"], "articles": [{"url": "https://news.com/politics", "full_text": "Parliament passed the bill."}]},
+        {"cluster_id": "cluster_02", "primary_title": "New school opens in Lalitpur", "urls": ["https://news.com/society"], "articles": [{"url": "https://news.com/society", "full_text": "A new school opened in Lalitpur."}]},
+        {"cluster_id": "cluster_03", "primary_title": "Dashain celebrations begin", "urls": ["https://news.com/culture"], "articles": [{"url": "https://news.com/culture", "full_text": "Dashain festival celebrations have begun."}]},
+        {"cluster_id": "cluster_04", "primary_title": "NEPSE gains twenty points", "urls": ["https://news.com/economy"], "articles": [{"url": "https://news.com/economy", "full_text": "Nepal Stock Exchange gained twenty points today."}]},
+        {"cluster_id": "cluster_05", "primary_title": "Telecom expands five G trials", "urls": ["https://news.com/tech"], "articles": [{"url": "https://news.com/tech", "full_text": "Telecom expanded trials in Kathmandu valley."}]},
+        {"cluster_id": "cluster_06", "primary_title": "Nepal cricket team wins match", "urls": ["https://news.com/sports"], "articles": [{"url": "https://news.com/sports", "full_text": "Nepal won the international match today."}]},
+    ]
+    (script_dir / "shortlist.json").write_text(json.dumps(shortlist), encoding="utf-8")
+
+    draft = {
+        "language": "English",
+        "origin": "editor",
+        "run_kind": "test",
+        "date": "2026-11-15",
+        "scenes": [
+            {
+                "id": "intro",
+                "type": "intro",
+                "headline": "Nepal Daily Briefing for Sunday, November 15",
+                "narration": "Good evening and welcome to the Nepal Daily Briefing. Here are today's top stories from across the nation.",
+                "category": None,
+                "sensitive": False,
+                "source": "Nepal News Desk",
+                "source_urls": [],
+                "visual_keywords": ["Kathmandu valley", "news studio", "map of Nepal"],
+                "evidence": [],
+            },
+            {
+                "id": "scene_01",
+                "type": "story",
+                "headline": "Parliament passes major legislative bill in capital",
+                "narration": "In national politics, lawmakers in parliament approved the new legislative bill during an afternoon session in Kathmandu. Leaders across major parties supported the decision following extensive committee deliberations.",
+                "category": "national_politics",
+                "sensitive": False,
+                "source": "Nepal News",
+                "source_urls": ["https://news.com/politics"],
+                "visual_keywords": ["parliament building", "politicians meeting", "Kathmandu city"],
+                "evidence": [{"sentence_index": 0, "source_url": "https://news.com/politics"}, {"sentence_index": 1, "source_url": "https://news.com/politics"}],
+            },
+            {
+                "id": "scene_02",
+                "type": "story",
+                "headline": "New community school opens in Lalitpur district",
+                "narration": "In society and local developments, authorities inaugurated a newly upgraded secondary school in Lalitpur today. The facility features modern classrooms and expanded learning laboratories for area students.",
+                "category": "society_local",
+                "sensitive": False,
+                "source": "Nepal News",
+                "source_urls": ["https://news.com/society"],
+                "visual_keywords": ["school building", "students in classroom", "Lalitpur city"],
+                "evidence": [{"sentence_index": 0, "source_url": "https://news.com/society"}, {"sentence_index": 1, "source_url": "https://news.com/society"}],
+            },
+            {
+                "id": "scene_03",
+                "type": "story",
+                "headline": "Cultural festival celebrations begin across nation",
+                "narration": "In culture and entertainment, communities across Nepal commenced vibrant festive observances with traditional musical performances and culinary gatherings. Cultural heritage centres hosted ceremonial gatherings throughout the capital valley.",
+                "category": "culture_entertainment",
+                "sensitive": False,
+                "source": "Nepal News",
+                "source_urls": ["https://news.com/culture"],
+                "visual_keywords": ["temple square", "festival lights", "traditional dancers"],
+                "evidence": [{"sentence_index": 0, "source_url": "https://news.com/culture"}, {"sentence_index": 1, "source_url": "https://news.com/culture"}],
+            },
+            {
+                "id": "scene_04",
+                "type": "story",
+                "headline": "Stock exchange benchmark advances twenty points",
+                "narration": "In business and economics, trading on the Nepal Stock Exchange advanced twenty points as turnover expanded substantially across banking and hydropower counters. Market analysts attributed the rise to strong institutional liquidity.",
+                "category": "business_economics",
+                "sensitive": False,
+                "source": "Nepal News",
+                "source_urls": ["https://news.com/economy"],
+                "visual_keywords": ["stock market screen", "office district", "currency exchange"],
+                "evidence": [{"sentence_index": 0, "source_url": "https://news.com/economy"}, {"sentence_index": 1, "source_url": "https://news.com/economy"}],
+            },
+            {
+                "id": "scene_05",
+                "type": "story",
+                "headline": "Telecom expands high speed wireless infrastructure",
+                "narration": "In science and technology, telecom providers inaugurated expanded high speed wireless coverage networks across urban hubs in the central region. Engineers confirmed improved digital reliability for enterprise consumers.",
+                "category": "science_technology",
+                "sensitive": False,
+                "source": "Nepal News",
+                "source_urls": ["https://news.com/tech"],
+                "visual_keywords": ["telecom tower", "data centre servers", "digital network"],
+                "evidence": [{"sentence_index": 0, "source_url": "https://news.com/tech"}, {"sentence_index": 1, "source_url": "https://news.com/tech"}],
+            },
+            {
+                "id": "scene_06",
+                "type": "story",
+                "headline": "National cricket squad secures decisive victory",
+                "narration": "In sports, the national cricket lineup completed a memorable tournament victory before an enthusiastic home crowd at the central stadium. Star performers executed disciplined bowling to defend a challenging total.",
+                "category": "sports",
+                "sensitive": False,
+                "source": "Nepal News",
+                "source_urls": ["https://news.com/sports"],
+                "visual_keywords": ["cricket stadium", "crowd cheering", "trophy celebration"],
+                "evidence": [{"sentence_index": 0, "source_url": "https://news.com/sports"}, {"sentence_index": 1, "source_url": "https://news.com/sports"}],
+            },
+            {
+                "id": "outro",
+                "type": "outro",
+                "headline": "Thank You for Tuning In",
+                "narration": "That wraps up today's Nepal Daily Briefing. Follow us for updates throughout the day. Thank you for watching, and stay safe.",
+                "category": None,
+                "sensitive": False,
+                "source": "Nepal News Desk",
+                "source_urls": [],
+                "visual_keywords": ["Kathmandu night skyline", "sunset mountains", "news studio lights"],
+                "evidence": [],
+            },
+        ],
+    }
+    draft_file = script_dir / "draft_script.json"
+    draft_file.write_text(json.dumps(draft), encoding="utf-8")
+
+    budget = {
+        "words_per_second": 2.15,
+        "syllables_per_second": 3.3,
+        "min_total_words": 150,
+        "max_total_words": 500,
+    }
+
+    ok, errors, warnings, report = validate_script_draft(
+        draft_path=draft_file,
+        shortlist_path=script_dir / "shortlist.json",
+        budget=budget,
+    )
+    assert ok, f"Expected 8-scene draft to pass, got errors: {errors}"
+    assert report["is_valid"]
+    assert report["metrics"]["scene_count"] == 8
+
+
+def test_eight_scene_broadcast_sequence_validation_fail(tmp_path):
+    """8-scene broadcast draft fails validation when categories are out of sequence."""
+    from src.utils.editor_validator import validate_script_draft
+
+    run_dir = tmp_path / "2026-11-15"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True)
+
+    # Swap scene_03 (culture) with sports so scene_03 has category 'sports'
+    shortlist = [
+        {"cluster_id": "cluster_01", "primary_title": "Parliament passes bill", "urls": ["https://news.com/politics"], "articles": [{"url": "https://news.com/politics", "full_text": "Parliament passed the bill."}]},
+        {"cluster_id": "cluster_02", "primary_title": "New school opens in Lalitpur", "urls": ["https://news.com/society"], "articles": [{"url": "https://news.com/society", "full_text": "A new school opened in Lalitpur."}]},
+        {"cluster_id": "cluster_03", "primary_title": "Sports match", "urls": ["https://news.com/sports"], "articles": [{"url": "https://news.com/sports", "full_text": "Sports match played."}]},
+        {"cluster_id": "cluster_04", "primary_title": "Economy update", "urls": ["https://news.com/economy"], "articles": [{"url": "https://news.com/economy", "full_text": "Economy update."}]},
+        {"cluster_id": "cluster_05", "primary_title": "Tech update", "urls": ["https://news.com/tech"], "articles": [{"url": "https://news.com/tech", "full_text": "Tech update."}]},
+        {"cluster_id": "cluster_06", "primary_title": "Culture update", "urls": ["https://news.com/culture"], "articles": [{"url": "https://news.com/culture", "full_text": "Culture update."}]},
+    ]
+    (script_dir / "shortlist.json").write_text(json.dumps(shortlist), encoding="utf-8")
+
+    draft = {
+        "language": "English",
+        "origin": "editor",
+        "run_kind": "test",
+        "date": "2026-11-15",
+        "scenes": [
+            {"id": "intro", "type": "intro", "headline": "Intro", "narration": "Good evening and welcome to the briefing. Here are today's top stories.", "category": None, "sensitive": False, "source": "Desk", "source_urls": [], "visual_keywords": ["Kathmandu", "studio", "map"], "evidence": []},
+            {"id": "scene_01", "type": "story", "headline": "Politics", "narration": "Lawmakers approved the bill today during parliament session.", "category": "national_politics", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/politics"], "visual_keywords": ["parliament", "meeting", "Kathmandu"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/politics"}]},
+            {"id": "scene_02", "type": "story", "headline": "Society", "narration": "Authorities inaugurated a new school in Lalitpur today.", "category": "society_local", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/society"], "visual_keywords": ["school", "classroom", "Lalitpur"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/society"}]},
+            {"id": "scene_03", "type": "story", "headline": "Sports in Slot 3", "narration": "The national team won their tournament match today.", "category": "sports", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/sports"], "visual_keywords": ["stadium", "crowd", "celebration"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/sports"}]},
+            {"id": "scene_04", "type": "story", "headline": "Economy", "narration": "Stock market advanced twenty points in trading today.", "category": "business_economics", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/economy"], "visual_keywords": ["stock", "screen", "office"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/economy"}]},
+            {"id": "scene_05", "type": "story", "headline": "Tech", "narration": "Engineers expanded wireless network coverage today.", "category": "science_technology", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/tech"], "visual_keywords": ["tower", "servers", "network"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/tech"}]},
+            {"id": "scene_06", "type": "story", "headline": "Culture in Slot 6", "narration": "Communities commenced vibrant festive observances today.", "category": "culture_entertainment", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/culture"], "visual_keywords": ["temple", "festival", "lights"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/culture"}]},
+            {"id": "outro", "type": "outro", "headline": "Outro", "narration": "That wraps up today's briefing. Follow us for more updates. Thank you for watching.", "category": None, "sensitive": False, "source": "Desk", "source_urls": [], "visual_keywords": ["skyline", "sunset", "studio"], "evidence": []},
+        ],
+    }
+    draft_file = script_dir / "draft_script.json"
+    draft_file.write_text(json.dumps(draft), encoding="utf-8")
+
+    budget = {"words_per_second": 2.15, "syllables_per_second": 3.3, "min_total_words": 50, "max_total_words": 500}
+
+    ok, errors, warnings, report = validate_script_draft(draft_path=draft_file, shortlist_path=script_dir / "shortlist.json", budget=budget)
+    assert not ok
+    assert any("violates broadcast sequence" in e for e in errors)
+    assert any("expected 'culture_entertainment'" in e for e in errors)
+
+
+def test_compact_brief_for_llm_strips_excluded_and_redundant_details():
+    """Verify _compact_brief_for_llm strips sections 5/6 and collapses redundant <details>."""
+    from src.utils.llm_writer import _compact_brief_for_llm
+
+    raw_brief = (
+        "# Brief\n\n## 4. Today's Shortlist\n"
+        "### [cluster_01] Major policy update\n"
+        "  - **Outlet A**: [Title](https://a.com/1)\n"
+        "    *Published*: 2026-11-17\n"
+        "    *Summary*: Officials unveiled a comprehensive municipal infrastructure plan across Kathmandu wards today.\n"
+        "    <details><summary>Click to view extracted full text</summary>\n\n"
+        "    ```text\n"
+        "    Very long duplicate full text body that wastes tokens.\n"
+        "    ```\n"
+        "    </details>\n\n"
+        "  - **Outlet B**: [Short Summary Story](https://b.com/2)\n"
+        "    *Published*: 2026-11-17\n"
+        "    *Summary*: Brief.\n"
+        "    <details><summary>Click to view extracted full text</summary>\n\n"
+        "    ```text\n"
+        "    Essential fallback details needed when summary is too short.\n"
+        "    ```\n"
+        "    </details>\n\n"
+        "---\n"
+        "## 5. Excluded Opinion & Commentary Pieces\n"
+        "Lots of excluded opinion text that should never reach the writer LLM.\n"
+    )
+    compact = _compact_brief_for_llm(raw_brief)
+    assert "## 4. Today's Shortlist" in compact
+    assert "## 5. Excluded Opinion" not in compact
+    assert "<details>" not in compact
+    assert "Very long duplicate full text body" not in compact
+    assert "Essential fallback details needed" in compact
+
+
+def test_llm_writer_deterministic_sensitive_prepatch_avoids_extra_round(tmp_path, monkeypatch):
+    """Verify missing sensitive=true flag is patched deterministically in round 1 with zero extra LLM calls."""
+    import src.utils.llm_writer as llm_writer_mod
+
+    run_dir = tmp_path / "2026-11-18"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({
+            "run_id": "2026-11-18",
+            "date": "2026-11-18",
+            "status": "running",
+            "stages": {"editor": {"status": "prepared", "retry_count": 0, "max_retries": 2, "input_files": [], "output_files": []}},
+        }),
+        encoding="utf-8",
+    )
+
+    shortlist = [
+        {
+            "cluster_id": f"cluster_0{i}",
+            "primary_title": f"Cluster {i}",
+            "urls": [f"https://example.com/s{i}"],
+            "articles": [
+                {
+                    "source": "Outlet A",
+                    "title": f"Cluster {i}",
+                    "url": f"https://example.com/s{i}",
+                    "full_text": (
+                        "Fourteen passengers died in a fatal bus crash along the highway in Makwanpur today."
+                        if i == 1
+                        else f"Officials in Pokhara announced {10 + i} infrastructure projects today across municipal wards."
+                    ),
+                    "superseded": False,
+                }
+            ],
+        }
+        for i in range(1, 6)
+    ]
+    (script_dir / "shortlist.json").write_text(json.dumps(shortlist), encoding="utf-8")
+    budget = compute_word_budget(2.15)
+    (script_dir / "budget.json").write_text(json.dumps(budget), encoding="utf-8")
+    (script_dir / "editor_brief.md").write_text("# Brief\nWrite 7 scenes.", encoding="utf-8")
+
+    draft = _make_7_scene_draft(run_date="2026-11-18")
+    for i in range(1, 6):
+        u = f"https://example.com/s{i}"
+        draft["scenes"][i]["source_urls"] = [u]
+        draft["scenes"][i]["evidence"] = [
+            {"sentence_index": 0, "source_url": u},
+            {"sentence_index": 1, "source_url": u},
+        ]
+        draft["scenes"][i]["narration"] = (
+            "Officials in Pokhara inaugurated a new community water supply facility this afternoon after careful municipal planning and steady engineering work. "
+            "Municipal engineers confirmed that local households across multiple rural wards now receive clean drinking water daily from upgraded local treatment stations."
+        )
+    # Scene 1 matches fatal crash cluster, deliberately set sensitive=False
+    draft["scenes"][1]["sensitive"] = False
+
+    call_count = 0
+
+    def fake_call_llm(provider, model, messages, timeout=180):
+        nonlocal call_count
+        call_count += 1
+        return json.dumps({
+            "draft_script": draft,
+            "selection": {"selected_clusters": [{"cluster_id": "cluster_01", "reason": "Top"}], "skipped_clusters": []},
+        })
+
+    monkeypatch.setattr(llm_writer_mod, "detect_configured_provider", lambda preferred=None: ("gemini", "fake-model"))
+    monkeypatch.setattr(llm_writer_mod, "_call_llm", fake_call_llm)
+
+    res = llm_writer_mod.generate_and_validate_draft(run_dir, max_rounds=5)
+    assert res["ok"] is True
+    assert call_count == 1
+    final_draft = json.loads((script_dir / "draft_script.json").read_text(encoding="utf-8"))
+    assert final_draft["scenes"][1]["sensitive"] is True
+
+
+def test_editor_validate_auto_approve_option(tmp_path):
+    """Verify validate_draft(auto_approve=True) transitions stage to done and writes approval.json."""
+    run_dir = tmp_path / "2026-11-18"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True)
+    manifest_path = run_dir / "manifest.json"
+    manifest = {
+        "run_id": "2026-11-18",
+        "date": "2026-11-18",
+        "run_kind": "test",
+        "status": "running",
+        "stages": {"editor": {"status": "prepared", "retry_count": 0, "max_retries": 2, "input_files": [], "output_files": []}},
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    shortlist = [
+        {
+            "cluster_id": f"cluster_0{i}",
+            "primary_title": f"Cluster {i}",
+            "urls": [f"https://example.com/a{i}"],
+            "articles": [{"source": "Outlet A", "title": f"Cluster {i}", "url": f"https://example.com/a{i}", "full_text": "Officials opened a municipal center today in Pokhara.", "superseded": False}],
+        }
+        for i in range(1, 6)
+    ]
+    (script_dir / "shortlist.json").write_text(json.dumps(shortlist), encoding="utf-8")
+    (script_dir / "budget.json").write_text(json.dumps(compute_word_budget(2.15)), encoding="utf-8")
+
+    draft = _make_7_scene_draft(run_date="2026-11-18")
+    for i in range(1, 6):
+        u = f"https://example.com/a{i}"
+        draft["scenes"][i]["source_urls"] = [u]
+        draft["scenes"][i]["evidence"] = [
+            {"sentence_index": 0, "source_url": u},
+            {"sentence_index": 1, "source_url": u},
+        ]
+        draft["scenes"][i]["narration"] = (
+            "Officials in Pokhara inaugurated a new community water supply facility this afternoon after careful municipal planning and steady engineering work. "
+            "Municipal engineers confirmed that local households across multiple rural wards now receive clean drinking water daily from upgraded local treatment stations."
+        )
+    (script_dir / "draft_script.json").write_text(json.dumps(draft), encoding="utf-8")
+
+    agent = EditorAgent(run_dir)
+    outputs = agent.validate_draft(manifest, auto_approve=True)
+    assert (script_dir / "approval.json").exists()
+    assert any("approval.json" in o for o in outputs)
+    assert manifest["stages"]["editor"]["status"] == "done"
+
+
+def test_rank_clusters_with_diversity_matches_naive_greedy():
+    """Verify O(n log n) heap-based diversity ranking matches naive O(n^2) selection order exactly."""
+    from src.utils.editor_cluster import rank_clusters_with_diversity
+
+    items = [
+        {"id": "p1", "category_guess": "politics", "score": 200.0},
+        {"id": "p2", "category_guess": "politics", "score": 190.0},
+        {"id": "p3", "category_guess": "politics", "score": 180.0},
+        {"id": "e1", "category_guess": "economy", "score": 185.0},
+        {"id": "e2", "category_guess": "economy", "score": 120.0},
+        {"id": "s1", "category_guess": "sports", "score": 180.0},
+        {"id": "h1", "category_guess": "health", "score": 50.0},
+    ]
+
+    # Naive O(n^2) reference
+    pending = list(items)
+    cat_counts: dict[str, int] = {}
+    naive_order = []
+    while pending:
+        best_i = max(range(len(pending)), key=lambda i: (pending[i]["score"] - cat_counts.get(pending[i]["category_guess"], 0) * 15.0, -i))
+        chosen = pending.pop(best_i)
+        cat_counts[chosen["category_guess"]] = cat_counts.get(chosen["category_guess"], 0) + 1
+        naive_order.append(chosen["id"])
+
+    fast_ranked = rank_clusters_with_diversity(items, base_score_fn=lambda c: c["score"], category_penalty=15.0)
+    assert [c["id"] for c in fast_ranked] == naive_order
+
+
+
 
 
 

@@ -1,0 +1,2044 @@
+{
+  "resolution": "1920x1080",
+  "fps": 30,
+  "audio_file": "audio/narration.wav",
+  "duration_sec": 176.05,
+  "duration": 176.05,
+  "captions_ass": "motion/captions.ass",
+  "overlays": [
+    {
+      "id": "global_test_tag",
+      "scene_id": null,
+      "type": "test_tag",
+      "png": "motion/overlays/test_run_tag.png",
+      "start": 0.0,
+      "end": 176.05,
+      "x": 96,
+      "y": 54,
+      "w": 180,
+      "h": 44,
+      "animation": null,
+      "fade_in": 0.0,
+      "fade_out": 0.0
+    },
+    {
+      "id": "intro_title_card",
+      "scene_id": "intro",
+      "type": "title_card",
+      "png": "motion/overlays/intro_title.png",
+      "start": 0.0,
+      "end": 7.95,
+      "x": 260,
+      "y": 280,
+      "w": 1400,
+      "h": 460,
+      "animation": "fade",
+      "fade_in": 0.3,
+      "fade_out": 0.3
+    },
+    {
+      "id": "scene_01_lower_third",
+      "scene_id": "scene_01",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_01_lower_third.png",
+      "start": 8.37,
+      "end": 14.95,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_02_lower_third",
+      "scene_id": "scene_02",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_02_lower_third.png",
+      "start": 15.85,
+      "end": 22.85,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_03_lower_third",
+      "scene_id": "scene_03",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_03_lower_third.png",
+      "start": 24.93,
+      "end": 31.93,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_04_lower_third",
+      "scene_id": "scene_04",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_04_lower_third.png",
+      "start": 34.01,
+      "end": 41.01,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_05_lower_third",
+      "scene_id": "scene_05",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_05_lower_third.png",
+      "start": 43.61,
+      "end": 50.55,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_06_lower_third",
+      "scene_id": "scene_06",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_06_lower_third.png",
+      "start": 51.43,
+      "end": 58.43,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_07_lower_third",
+      "scene_id": "scene_07",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_07_lower_third.png",
+      "start": 59.55,
+      "end": 66.55,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_08_lower_third",
+      "scene_id": "scene_08",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_08_lower_third.png",
+      "start": 68.59,
+      "end": 75.45,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_09_lower_third",
+      "scene_id": "scene_09",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_09_lower_third.png",
+      "start": 76.35,
+      "end": 83.35,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_10_lower_third",
+      "scene_id": "scene_10",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_10_lower_third.png",
+      "start": 84.75,
+      "end": 91.75,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_11_lower_third",
+      "scene_id": "scene_11",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_11_lower_third.png",
+      "start": 93.33,
+      "end": 100.33,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_12_lower_third",
+      "scene_id": "scene_12",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_12_lower_third.png",
+      "start": 102.55,
+      "end": 109.55,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_13_lower_third",
+      "scene_id": "scene_13",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_13_lower_third.png",
+      "start": 111.73,
+      "end": 117.25,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_14_stat_callout",
+      "scene_id": "scene_14",
+      "type": "stat_callout",
+      "png": "motion/overlays/scene_14_stat_callout.png",
+      "start": 118.05,
+      "end": 124.55,
+      "x": 260,
+      "y": 180,
+      "w": 1400,
+      "h": 520,
+      "animation": "slide_up",
+      "fade_in": 0.25,
+      "fade_out": 0.25
+    },
+    {
+      "id": "scene_15_lower_third",
+      "scene_id": "scene_15",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_15_lower_third.png",
+      "start": 128.07,
+      "end": 135.07,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_16_stat_callout",
+      "scene_id": "scene_16",
+      "type": "stat_callout",
+      "png": "motion/overlays/scene_16_stat_callout.png",
+      "start": 136.45,
+      "end": 142.95,
+      "x": 260,
+      "y": 180,
+      "w": 1400,
+      "h": 520,
+      "animation": "slide_up",
+      "fade_in": 0.25,
+      "fade_out": 0.25
+    },
+    {
+      "id": "scene_17_lower_third",
+      "scene_id": "scene_17",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_17_lower_third.png",
+      "start": 145.65,
+      "end": 152.15,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_18_lower_third",
+      "scene_id": "scene_18",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_18_lower_third.png",
+      "start": 153.03,
+      "end": 160.03,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "scene_19_lower_third",
+      "scene_id": "scene_19",
+      "type": "lower_third",
+      "png": "motion/overlays/scene_19_lower_third.png",
+      "start": 161.891,
+      "end": 168.2,
+      "x": 96,
+      "y": 730,
+      "w": 1320,
+      "h": 155,
+      "animation": "slide_up",
+      "fade_in": 0.2,
+      "fade_out": 0.2
+    },
+    {
+      "id": "outro_outro_card",
+      "scene_id": "outro",
+      "type": "outro_card",
+      "png": "motion/overlays/outro_outro.png",
+      "start": 168.7,
+      "end": 176.05,
+      "x": 260,
+      "y": 280,
+      "w": 1400,
+      "h": 460,
+      "animation": "fade",
+      "fade_in": 0.3,
+      "fade_out": 0.3
+    }
+  ],
+  "audio_grid": {
+    "enabled": false,
+    "tempo_bpm": 120.0,
+    "beat_times": [],
+    "downbeat_times": [],
+    "snapped_scenes": [
+      {
+        "id": "intro",
+        "start": 0.0,
+        "end": 7.95
+      },
+      {
+        "id": "scene_01",
+        "start": 7.95,
+        "end": 15.45
+      },
+      {
+        "id": "scene_02",
+        "start": 15.45,
+        "end": 24.55
+      },
+      {
+        "id": "scene_03",
+        "start": 24.55,
+        "end": 33.65
+      },
+      {
+        "id": "scene_04",
+        "start": 33.65,
+        "end": 43.25
+      },
+      {
+        "id": "scene_05",
+        "start": 43.25,
+        "end": 51.05
+      },
+      {
+        "id": "scene_06",
+        "start": 51.05,
+        "end": 59.15
+      },
+      {
+        "id": "scene_07",
+        "start": 59.15,
+        "end": 68.15
+      },
+      {
+        "id": "scene_08",
+        "start": 68.15,
+        "end": 75.95
+      },
+      {
+        "id": "scene_09",
+        "start": 75.95,
+        "end": 84.35
+      },
+      {
+        "id": "scene_10",
+        "start": 84.35,
+        "end": 92.95
+      },
+      {
+        "id": "scene_11",
+        "start": 92.95,
+        "end": 102.15
+      },
+      {
+        "id": "scene_12",
+        "start": 102.15,
+        "end": 111.35
+      },
+      {
+        "id": "scene_13",
+        "start": 111.35,
+        "end": 117.75
+      },
+      {
+        "id": "scene_14",
+        "start": 117.75,
+        "end": 127.65
+      },
+      {
+        "id": "scene_15",
+        "start": 127.65,
+        "end": 136.15
+      },
+      {
+        "id": "scene_16",
+        "start": 136.15,
+        "end": 145.25
+      },
+      {
+        "id": "scene_17",
+        "start": 145.25,
+        "end": 152.65
+      },
+      {
+        "id": "scene_18",
+        "start": 152.65,
+        "end": 161.15
+      },
+      {
+        "id": "scene_19",
+        "start": 161.15,
+        "end": 168.7
+      },
+      {
+        "id": "outro",
+        "start": 168.7,
+        "end": 176.05
+      }
+    ],
+    "ducking": {
+      "voice_duck_db": -22.0,
+      "music_bed_db": -8.0,
+      "fade_duration_sec": 0.25,
+      "intervals": []
+    }
+  },
+  "transitions": {
+    "scene_boundary": {
+      "type": "dip_to_black",
+      "duration_sec": 0.2,
+      "fade_out_sec": 0.1,
+      "fade_in_sec": 0.1
+    },
+    "intra_scene": {
+      "type": "cut"
+    },
+    "still_zoom": {
+      "start_scale": 1.0,
+      "end_scale": 1.08,
+      "slow_zoom": true
+    }
+  },
+  "scenes": [
+    {
+      "id": "intro",
+      "start": 0.0,
+      "end": 7.95,
+      "media": "media/shots/intro/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/intro/card_00.png",
+          "start": 0.0,
+          "end": 8.9,
+          "duration": 8.9,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "intro_title_card",
+          "scene_id": "intro",
+          "type": "title_card",
+          "png": "motion/overlays/intro_title.png",
+          "start": 0.0,
+          "end": 7.95,
+          "x": 260,
+          "y": 280,
+          "w": 1400,
+          "h": 460,
+          "animation": "fade",
+          "fade_in": 0.3,
+          "fade_out": 0.3
+        }
+      ],
+      "shot_recipe": "title_card",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Nepal Daily Briefing for Sunday, November 15, 2026",
+        "source_credit": "Source: Nepal News Desk",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_01",
+      "start": 7.95,
+      "end": 15.45,
+      "media": "media/shots/scene_01/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_01/card_00.png",
+          "start": 8.9,
+          "end": 17.8,
+          "duration": 8.9,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_01_lower_third",
+          "scene_id": "scene_01",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_01_lower_third.png",
+          "start": 8.37,
+          "end": 14.95,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Four new Supreme Court justices take oath of office",
+        "source_credit": "Source: Setopati English",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "dip_to_black",
+        "duration_sec": 0.2,
+        "fade_out_sec": 0.1,
+        "fade_in_sec": 0.1
+      }
+    },
+    {
+      "id": "scene_02",
+      "start": 15.45,
+      "end": 24.55,
+      "media": "media/shots/scene_02/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_02/card_00.png",
+          "start": 17.8,
+          "end": 23.05,
+          "duration": 5.25,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_02/card_01.png",
+          "start": 23.05,
+          "end": 28.3,
+          "duration": 5.25,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_02_lower_third",
+          "scene_id": "scene_02",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_02_lower_third.png",
+          "start": 15.85,
+          "end": 22.85,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Janakpur-Ayodhya weekly train service approved",
+        "source_credit": "Source: The Kathmandu Post, Setopati English",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_03",
+      "start": 24.55,
+      "end": 33.65,
+      "media": "media/shots/scene_03/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_03/card_00.png",
+          "start": 28.3,
+          "end": 33.45,
+          "duration": 5.15,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_03/card_01.png",
+          "start": 33.45,
+          "end": 38.6,
+          "duration": 5.15,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_03_lower_third",
+          "scene_id": "scene_03",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_03_lower_third.png",
+          "start": 24.93,
+          "end": 31.93,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Twenty-member RSP delegation leaves for China visit",
+        "source_credit": "Source: Republica, Onlinekhabar English, Rajdha\u2026",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_04",
+      "start": 33.65,
+      "end": 43.25,
+      "media": "media/shots/scene_04/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_04/card_00.png",
+          "start": 38.6,
+          "end": 44.2,
+          "duration": 5.6,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_04/card_01.png",
+          "start": 44.2,
+          "end": 49.8,
+          "duration": 5.6,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_04_lower_third",
+          "scene_id": "scene_04",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_04_lower_third.png",
+          "start": 34.01,
+          "end": 41.01,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "PM Shah assigns roles to private secretariat members",
+        "source_credit": "Source: Onlinekhabar English",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_05",
+      "start": 43.25,
+      "end": 51.05,
+      "media": "media/shots/scene_05/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_05/card_00.png",
+          "start": 49.8,
+          "end": 58.6,
+          "duration": 8.8,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_05_lower_third",
+          "scene_id": "scene_05",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_05_lower_third.png",
+          "start": 43.61,
+          "end": 50.55,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Three dead, two injured in Mugu jeep plunge",
+        "source_credit": "Source: The Kathmandu Post, Onlinekhabar Englis\u2026",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_06",
+      "start": 51.05,
+      "end": 59.15,
+      "media": "media/shots/scene_06/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_06/card_00.png",
+          "start": 58.6,
+          "end": 68.1,
+          "duration": 9.5,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_06_lower_third",
+          "scene_id": "scene_06",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_06_lower_third.png",
+          "start": 51.43,
+          "end": 58.43,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Indian national held with 5.5kg heroin at TIA",
+        "source_credit": "Source: The Himalayan Times, Ratopati English",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_07",
+      "start": 59.15,
+      "end": 68.15,
+      "media": "media/shots/scene_07/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_07/card_00.png",
+          "start": 68.1,
+          "end": 73.5,
+          "duration": 5.4,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_07/card_01.png",
+          "start": 73.5,
+          "end": 78.9,
+          "duration": 5.4,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_07_lower_third",
+          "scene_id": "scene_07",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_07_lower_third.png",
+          "start": 59.55,
+          "end": 66.55,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Rain, snowfall forecast for Karnali and Sudurpashchim",
+        "source_credit": "Source: The Himalayan Times",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_08",
+      "start": 68.15,
+      "end": 75.95,
+      "media": "media/shots/scene_08/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_08/card_00.png",
+          "start": 78.9,
+          "end": 88.4,
+          "duration": 9.5,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_08_lower_third",
+          "scene_id": "scene_08",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_08_lower_third.png",
+          "start": 68.59,
+          "end": 75.45,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Udayapur prison holds nearly four times its capacity",
+        "source_credit": "Source: Rajdhani Daily",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_09",
+      "start": 75.95,
+      "end": 84.35,
+      "media": "media/shots/scene_09/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_09/card_00.png",
+          "start": 88.4,
+          "end": 97.5,
+          "duration": 9.1,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_09_lower_third",
+          "scene_id": "scene_09",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_09_lower_third.png",
+          "start": 76.35,
+          "end": 83.35,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Chhath festival celebrated nationwide with arghya offerings",
+        "source_credit": "Source: Ratopati English, Republica, The Himala\u2026",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_10",
+      "start": 84.35,
+      "end": 92.95,
+      "media": "media/shots/scene_10/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_10/card_00.png",
+          "start": 97.5,
+          "end": 102.85,
+          "duration": 5.35,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_10/card_01.png",
+          "start": 102.85,
+          "end": 108.2,
+          "duration": 5.35,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_10_lower_third",
+          "scene_id": "scene_10",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_10_lower_third.png",
+          "start": 84.75,
+          "end": 91.75,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Annapurna welcomes 41,758 foreign tourists in October",
+        "source_credit": "Source: Republica",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_11",
+      "start": 92.95,
+      "end": 102.15,
+      "media": "media/shots/scene_11/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_11/card_00.png",
+          "start": 108.2,
+          "end": 113.5,
+          "duration": 5.3,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_11/card_01.png",
+          "start": 113.5,
+          "end": 118.8,
+          "duration": 5.3,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_11_lower_third",
+          "scene_id": "scene_11",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_11_lower_third.png",
+          "start": 93.33,
+          "end": 100.33,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Elephant safari demand surges beyond capacity in Sauraha",
+        "source_credit": "Source: Ratopati English",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_12",
+      "start": 102.15,
+      "end": 111.35,
+      "media": "media/shots/scene_12/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_12/card_00.png",
+          "start": 118.8,
+          "end": 124.3,
+          "duration": 5.5,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_12/card_01.png",
+          "start": 124.3,
+          "end": 129.8,
+          "duration": 5.5,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_12_lower_third",
+          "scene_id": "scene_12",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_12_lower_third.png",
+          "start": 102.55,
+          "end": 109.55,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Badimalika tourism plan includes free jeep service",
+        "source_credit": "Source: The Himalayan Times",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_13",
+      "start": 111.35,
+      "end": 117.75,
+      "media": "media/shots/scene_13/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_13/card_00.png",
+          "start": 129.8,
+          "end": 137.6,
+          "duration": 7.8,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_13_lower_third",
+          "scene_id": "scene_13",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_13_lower_third.png",
+          "start": 111.73,
+          "end": 117.25,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Nepal retains BB- sovereign credit rating",
+        "source_credit": "Source: Republica",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_14",
+      "start": 117.75,
+      "end": 127.65,
+      "media": "media/shots/scene_14/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_14/card_00.png",
+          "start": 137.6,
+          "end": 143.1,
+          "duration": 5.5,
+          "type": "card",
+          "motion": "none",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_14/card_01.png",
+          "start": 143.1,
+          "end": 148.6,
+          "duration": 5.5,
+          "type": "card",
+          "motion": "none",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_14_stat_callout",
+          "scene_id": "scene_14",
+          "type": "stat_callout",
+          "png": "motion/overlays/scene_14_stat_callout.png",
+          "start": 118.05,
+          "end": 124.55,
+          "x": 260,
+          "y": 180,
+          "w": 1400,
+          "h": 520,
+          "animation": "slide_up",
+          "fade_in": 0.25,
+          "fade_out": 0.25
+        }
+      ],
+      "shot_recipe": "stat_callout",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Rasuwagadhi hydropower losses reach Rs 2.87 billion",
+        "source_credit": "Source: Republica",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      },
+      "stat_data": {
+        "value": "Rs 2.87 billion",
+        "label": "Rasuwagadhi hydropower losses reach Rs 2.87 billion",
+        "delta": null
+      }
+    },
+    {
+      "id": "scene_15",
+      "start": 127.65,
+      "end": 136.15,
+      "media": "media/shots/scene_15/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_15/card_00.png",
+          "start": 148.6,
+          "end": 158.3,
+          "duration": 9.7,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_15_lower_third",
+          "scene_id": "scene_15",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_15_lower_third.png",
+          "start": 128.07,
+          "end": 135.07,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Sugarcane farmers protest over missing support price",
+        "source_credit": "Source: Ratopati English",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_16",
+      "start": 136.15,
+      "end": 145.25,
+      "media": "media/shots/scene_16/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_16/card_00.png",
+          "start": 158.3,
+          "end": 163.75,
+          "duration": 5.45,
+          "type": "card",
+          "motion": "none",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        },
+        {
+          "shot_index": 1,
+          "file": "media/shots/scene_16/card_01.png",
+          "start": 163.75,
+          "end": 169.2,
+          "duration": 5.45,
+          "type": "card",
+          "motion": "none",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_16_stat_callout",
+          "scene_id": "scene_16",
+          "type": "stat_callout",
+          "png": "motion/overlays/scene_16_stat_callout.png",
+          "start": 136.45,
+          "end": 142.95,
+          "x": 260,
+          "y": 180,
+          "w": 1400,
+          "h": 520,
+          "animation": "slide_up",
+          "fade_in": 0.25,
+          "fade_out": 0.25
+        }
+      ],
+      "shot_recipe": "stat_callout",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Nepal sets up accreditation centre for testing",
+        "source_credit": "Source: The Kathmandu Post",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      },
+      "stat_data": {
+        "value": "rs,",
+        "label": "Nepal sets up accreditation centre for testing",
+        "delta": null
+      }
+    },
+    {
+      "id": "scene_17",
+      "start": 145.25,
+      "end": 152.65,
+      "media": "media/shots/scene_17/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_17/card_00.png",
+          "start": 169.2,
+          "end": 178.1,
+          "duration": 8.9,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_17_lower_third",
+          "scene_id": "scene_17",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_17_lower_third.png",
+          "start": 145.65,
+          "end": 152.15,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Nepal wins historic silver at astronomy olympiad",
+        "source_credit": "Source: The Himalayan Times",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_18",
+      "start": 152.65,
+      "end": 161.15,
+      "media": "media/shots/scene_18/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_18/card_00.png",
+          "start": 178.1,
+          "end": 188.1,
+          "duration": 10.0,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_18_lower_third",
+          "scene_id": "scene_18",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_18_lower_third.png",
+          "start": 153.03,
+          "end": 160.03,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Pokhara post record 224 as Bhurtel misses century",
+        "source_credit": "Source: The Kathmandu Post, Rajdhani Daily",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "scene_19",
+      "start": 161.15,
+      "end": 168.7,
+      "media": "media/shots/scene_19/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_19/card_00.png",
+          "start": 188.1,
+          "end": 196.9,
+          "duration": 8.8,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_19_lower_third",
+          "scene_id": "scene_19",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_19_lower_third.png",
+          "start": 161.891,
+          "end": 168.2,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Karnali Yaks beat Chitwan Rhinos by 24 runs",
+        "source_credit": "Source: Republica, Onlinekhabar English",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "cut",
+        "duration_sec": 0.0,
+        "fade_out_sec": 0.0,
+        "fade_in_sec": 0.0
+      }
+    },
+    {
+      "id": "outro",
+      "start": 168.7,
+      "end": 176.05,
+      "media": "media/shots/outro/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/outro/card_00.png",
+          "start": 196.9,
+          "end": 204.8,
+          "duration": 7.9,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System",
+          "sha256": "f56f1c07afe1f61be90d3f9b3ea1b071237ebbdbf04155c0b80119c31d5e5359"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "outro_outro_card",
+          "scene_id": "outro",
+          "type": "outro_card",
+          "png": "motion/overlays/outro_outro.png",
+          "start": 168.7,
+          "end": 176.05,
+          "x": 260,
+          "y": 280,
+          "w": 1400,
+          "h": 460,
+          "animation": "fade",
+          "fade_in": 0.3,
+          "fade_out": 0.3
+        }
+      ],
+      "shot_recipe": "outro_card",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Thank You for Tuning In",
+        "source_credit": "Source: Nepal News Desk",
+        "style": "navy_amber"
+      },
+      "caption_style": {
+        "font": "Segoe UI Semibold",
+        "font_size": 44,
+        "position": "bottom",
+        "highlight_color": "#F5A623",
+        "margin_v": 60,
+        "max_lines": 2,
+        "line_height_pct": 1.25,
+        "box_rgba": [
+          7,
+          20,
+          38,
+          224
+        ],
+        "gap_from_band_px": 24,
+        "caption_top": 910,
+        "caption_bottom": 1020,
+        "caption_height": 110
+      },
+      "transition": {
+        "type": "dip_to_black",
+        "duration_sec": 0.2,
+        "fade_out_sec": 0.1,
+        "fade_in_sec": 0.1
+      }
+    }
+  ]
+}

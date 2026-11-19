@@ -27,9 +27,12 @@ import torch
 import torchaudio
 
 # Ensure vendor directory is on sys.path
-VENDOR_DIR = Path(__file__).resolve().parent.parent / "vendor" / "Ming-3.0-tts"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+VENDOR_DIR = PROJECT_ROOT / "vendor" / "Ming-3.0-tts"
 if str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
     from ming_tts import MingTTS
@@ -37,6 +40,8 @@ try:
 except ImportError as err:
     print(f"FATAL: Failed to import MingTTS/SpkembExtractor from {VENDOR_DIR}: {err}", file=sys.stderr)
     sys.exit(2)
+
+from src.utils.tts import compute_candidate_score
 
 
 def compute_f0(audio_tensor: torch.Tensor, sample_rate: int) -> float:
@@ -106,7 +111,7 @@ def measure_audio_health(file_path: Path | str) -> dict[str, Any]:
     return measure_audio_health_array(np.asarray(data, dtype=np.float32), sr)
 
 
-def pre_normalize_audio(audio_data: np.ndarray, target_peak_db: float = -3.0) -> np.ndarray:
+def pre_normalize_audio(audio_data: np.ndarray, target_peak_db: float = -6.0) -> np.ndarray:
     """Scales audio cleanly so its maximum peak matches target_peak_db."""
     max_amp = float(np.max(np.abs(audio_data)))
     if max_amp <= 1e-9:
@@ -114,6 +119,99 @@ def pre_normalize_audio(audio_data: np.ndarray, target_peak_db: float = -3.0) ->
     target_amp = 10.0 ** (target_peak_db / 20.0)
     scaling_factor = target_amp / max_amp
     return (audio_data * scaling_factor).astype(np.float32)
+
+
+class ModelStageTimer:
+    """Accumulates fine-grained stage timings across prefill, AR decoding, CFM, VAE, QC, and write."""
+
+    def __init__(self) -> None:
+        self.prefill_sec = 0.0
+        self.ar_sec = 0.0
+        self.cfm_sec = 0.0
+        self.vae_sec = 0.0
+        self.qc_sec = 0.0
+        self.write_sec = 0.0
+
+    def reset(self) -> None:
+        self.prefill_sec = 0.0
+        self.ar_sec = 0.0
+        self.cfm_sec = 0.0
+        self.vae_sec = 0.0
+        self.qc_sec = 0.0
+        self.write_sec = 0.0
+
+    def get_breakdown(self) -> dict[str, float]:
+        return {
+            "prefill": round(self.prefill_sec, 3),
+            "ar_step": round(self.ar_sec, 3),
+            "cfm": round(self.cfm_sec, 3),
+            "vae_decode": round(self.vae_sec, 3),
+            "qc": round(self.qc_sec, 3),
+            "write": round(self.write_sec, 3),
+        }
+
+
+def instrument_ming_model(ming_tts_instance: Any, timer: ModelStageTimer) -> None:
+    """Hooks timing wrappers around prefill, CFM, AR forward, and VAE decode."""
+    inner = getattr(ming_tts_instance, "model", None)
+    if inner is None:
+        return
+
+    # 1. Prefill
+    if hasattr(inner, "prepare_input_embed"):
+        orig_prepare = inner.prepare_input_embed
+
+        def timed_prepare(*args: Any, **kwargs: Any) -> Any:
+            t0 = time.perf_counter()
+            res = orig_prepare(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            timer.prefill_sec += time.perf_counter() - t0
+            return res
+
+        inner.prepare_input_embed = timed_prepare
+
+    # 2. CFM
+    if hasattr(inner, "flowloss") and hasattr(inner.flowloss, "sample"):
+        orig_cfm = inner.flowloss.sample
+
+        def timed_cfm(*args: Any, **kwargs: Any) -> Any:
+            t0 = time.perf_counter()
+            res = orig_cfm(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            timer.cfm_sec += time.perf_counter() - t0
+            return res
+
+        inner.flowloss.sample = timed_cfm
+
+    # 3. AR Step
+    if hasattr(inner, "model") and hasattr(inner.model, "forward"):
+        orig_forward = inner.model.forward
+
+        def timed_forward(*args: Any, **kwargs: Any) -> Any:
+            t0 = time.perf_counter()
+            res = orig_forward(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            timer.ar_sec += time.perf_counter() - t0
+            return res
+
+        inner.model.forward = timed_forward
+
+    # 4. VAE decode
+    if hasattr(inner, "audio") and hasattr(inner.audio, "decode"):
+        orig_decode = inner.audio.decode
+
+        def timed_decode(*args: Any, **kwargs: Any) -> Any:
+            t0 = time.perf_counter()
+            res = orig_decode(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            timer.vae_sec += time.perf_counter() - t0
+            return res
+
+        inner.audio.decode = timed_decode
 
 
 class MingWorkerRuntime:
@@ -133,6 +231,7 @@ class MingWorkerRuntime:
         self.text_normalization = text_normalization
         self._lock = threading.Lock()
         self._ref_cache: dict[str, tuple[torch.Tensor | None, float, str | None]] = {}
+        self.timer = ModelStageTimer()
 
         t_load_start = time.time()
         print(f"[ming_worker] Initializing MingTTS on device={self.device} dtype={self.dtype}...")
@@ -142,6 +241,7 @@ class MingWorkerRuntime:
             text_normalization=text_normalization,
             torch_dtype=self.dtype,
         )
+        instrument_ming_model(self.model, self.timer)
         # Reuse MingTTS's already-initialized SpkembExtractor instead of loading ONNX twice
         self.extractor = getattr(self.model, "spkemb_extractor", None) or SpkembExtractor(campplus_path)
         self.sample_rate = int(getattr(self.model, "sample_rate", 44100))
@@ -208,29 +308,46 @@ class MingWorkerRuntime:
             reference_wav = job.get("reference_wav", "config/voice/reference.wav")
             reference_txt = job.get("reference_txt", "config/voice/reference.txt")
             similarity_threshold = float(job.get("similarity_threshold", 0.72))
-            f0_tolerance_pct = float(job.get("f0_tolerance_pct", 0.25))
+            f0_tolerance_pct = float(job.get("f0_tolerance_pct", 0.10))
+            n_candidates = int(job.get("n_candidates", 1))
+            f0_anchor = str(job.get("f0_anchor", "running_median")).strip().lower()
+            ranker_weights = job.get("ranker_weights", {"cosine": 1.0, "f0": 0.6, "duration": 0.2, "artifacts": 0.2})
             max_retries = int(job.get("max_retries", 2))
 
             ref_path = Path(reference_wav)
             ref_emb_norm, ref_f0, ref_prompt_text = self._get_reference(reference_wav, reference_txt)
 
+            self.timer.reset()
             results = []
-            for item in items:
+            accepted_f0s: list[float] = [ref_f0] if ref_f0 > 0 else []
+
+            for item_idx, item in enumerate(items):
                 item_id = item["id"]
                 text = item["text"]
                 out_path = Path(item["out_path"])
                 out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                words = len(text.split())
+                expected_dur = max(1.0, words / 2.4)
+
+                if f0_anchor == "running_median" and accepted_f0s:
+                    target_f0 = float(np.median(accepted_f0s))
+                else:
+                    target_f0 = ref_f0
 
                 controls = {"ip": voice}
                 if speed:
                     controls["speed"] = speed
 
                 t_synth_start = time.time()
+                candidates_evaluated = []
                 best_candidate: dict[str, Any] | None = None
-                best_score = -999.0
+                best_score = -999999.0
 
-                for attempt in range(max_retries + 1):
-                    seed = base_seed + attempt
+                num_attempts = n_candidates if n_candidates > 1 else (max_retries + 1)
+
+                for attempt in range(num_attempts):
+                    seed = base_seed + item_idx * 100 + attempt
                     torch.manual_seed(seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(seed)
@@ -276,13 +393,15 @@ class MingWorkerRuntime:
                             w_cpu = w_cpu.unsqueeze(0)
 
                         audio_np = w_cpu.squeeze(0).numpy()
-                        norm_data = pre_normalize_audio(audio_np, target_peak_db=-3.0)
+                        worker_peak_db = float(job.get("target_peak_db", -6.0))
+                        norm_data = pre_normalize_audio(audio_np, target_peak_db=worker_peak_db)
                         audio_sr = self.sample_rate
 
                         health = measure_audio_health_array(norm_data, audio_sr)
                         if not health["healthy"]:
                             raise ValueError(health.get("reason", "Unhealthy audio"))
 
+                        t_qc = time.perf_counter()
                         tensor_wave = torch.from_numpy(norm_data).unsqueeze(0)
                         cand_f0 = compute_f0(tensor_wave, audio_sr)
 
@@ -297,36 +416,63 @@ class MingWorkerRuntime:
                             sim = float(torch.matmul(ref_emb_norm, cand_emb_norm.T).item())
                         else:
                             sim = 1.0
+                        self.timer.qc_sec += time.perf_counter() - t_qc
 
+                        # Artifact score
+                        art_score = 1.0
+                        if health.get("has_excess_silence"):
+                            art_score -= 0.3
+                        if health.get("clipping_margin_db", 1.0) < 0.1:
+                            art_score -= 0.4
+                        art_score = max(0.0, art_score)
+
+                        # Continuous Ranker Score
+                        score, breakdown = compute_candidate_score(
+                            cosine_sim=sim,
+                            cand_f0=cand_f0,
+                            target_f0=target_f0,
+                            duration_sec=health["duration_sec"],
+                            expected_duration_sec=expected_dur,
+                            artifact_score=art_score,
+                            weights=ranker_weights,
+                        )
+
+                        sim_ok = sim >= similarity_threshold
                         f0_ok = True
                         if ref_f0 > 0 and cand_f0 > 0:
                             f0_diff = abs(cand_f0 - ref_f0) / ref_f0
                             if f0_diff > f0_tolerance_pct:
                                 f0_ok = False
 
-                        sim_ok = sim >= similarity_threshold
-                        score = sim - (0.5 if not f0_ok else 0.0)
+                        passes_gate = sim_ok and f0_ok
 
                         cand_info = {
-                            "attempt": attempt,
+                            "candidate_idx": attempt,
+                            "seed": seed,
                             "norm_data": norm_data,
                             "duration_sec": health["duration_sec"],
                             "sample_rate": health["sample_rate"],
                             "peak_db": health["peak_db"],
                             "rms_db": health["rms_db"],
                             "f0_median_hz": cand_f0,
+                            "target_f0_hz": target_f0,
                             "cosine_sim": round(sim, 4),
-                            "passes_gate": sim_ok and f0_ok,
-                            "score": score,
+                            "passes_gate": passes_gate,
+                            "ranker_score": round(score, 4),
+                            "ranker_breakdown": breakdown,
                         }
+                        candidates_evaluated.append(cand_info)
 
-                        if score > best_score:
+                        cand_passes = cand_info.get("passes_gate", False)
+                        best_passes = best_candidate.get("passes_gate", False) if best_candidate else False
+                        if best_candidate is None or (cand_passes and not best_passes) or (cand_passes == best_passes and score > best_score):
                             best_score = score
                             best_candidate = cand_info
 
-                        if sim_ok and f0_ok:
+                        # When n_candidates == 1, early break if passes gate
+                        if n_candidates == 1 and passes_gate:
                             break
-                        else:
+                        elif n_candidates == 1:
                             print(
                                 f"[ming_worker] {item_id} attempt {attempt + 1}: sim={sim:.4f} "
                                 f"(gate={similarity_threshold}), F0={cand_f0:.1f}Hz "
@@ -338,7 +484,17 @@ class MingWorkerRuntime:
                 seconds_taken = time.time() - t_synth_start
 
                 if best_candidate is not None:
+                    t_write = time.perf_counter()
                     sf.write(str(out_path), best_candidate["norm_data"], best_candidate["sample_rate"], subtype="PCM_16")
+                    self.timer.write_sec += time.perf_counter() - t_write
+
+                    if best_candidate["f0_median_hz"] > 0:
+                        accepted_f0s.append(best_candidate["f0_median_hz"])
+
+                    clean_cands = [
+                        {k: v for k, v in c.items() if k != "norm_data"}
+                        for c in candidates_evaluated
+                    ]
                     results.append({
                         "id": item_id,
                         "status": "success",
@@ -348,16 +504,22 @@ class MingWorkerRuntime:
                         "seconds_taken": round(seconds_taken, 3),
                         "peak_db": round(best_candidate["peak_db"], 2),
                         "rms_db": round(best_candidate["rms_db"], 2),
-                        "f0_median_hz": best_candidate["f0_median_hz"],
+                        "f0_median_hz": round(best_candidate["f0_median_hz"], 1),
+                        "target_f0_hz": round(best_candidate["target_f0_hz"], 1),
                         "cosine_sim": best_candidate["cosine_sim"],
                         "passes_gate": best_candidate["passes_gate"],
-                        "retries": best_candidate["attempt"],
+                        "retries": len(candidates_evaluated) - 1,
+                        "selected_candidate_idx": best_candidate["candidate_idx"],
+                        "seed_used": best_candidate["seed"],
+                        "ranker_score": best_candidate["ranker_score"],
+                        "ranker_breakdown": best_candidate["ranker_breakdown"],
+                        "candidates_evaluated": clean_cands,
                         "error": None,
                     })
                     print(
                         f"[ming_worker] [OK] {item_id}: dur={best_candidate['duration_sec']:.2f}s, "
-                        f"sim={best_candidate['cosine_sim']}, F0={best_candidate['f0_median_hz']}Hz "
-                        f"(retries={best_candidate['attempt']})"
+                        f"sim={best_candidate['cosine_sim']}, F0={best_candidate['f0_median_hz']:.1f}Hz "
+                        f"(cand={best_candidate['candidate_idx']}/{len(candidates_evaluated)}, score={best_candidate['ranker_score']})"
                     )
                 else:
                     results.append({
@@ -381,6 +543,10 @@ class MingWorkerRuntime:
             return {
                 "status": "error" if has_failures else "success",
                 "model_load_time_sec": round(self.model_load_time_sec, 2) if include_load_time else 0.0,
+                "stage_breakdown_sec": {
+                    "model_load": round(self.model_load_time_sec, 2) if include_load_time else 0.0,
+                    **self.timer.get_breakdown(),
+                },
                 "reference_wav": reference_wav,
                 "reference_f0_hz": ref_f0,
                 "similarity_threshold": similarity_threshold,
@@ -427,7 +593,10 @@ def serve_worker(
     device: str | None,
     dtype: str,
     text_normalization: bool,
+    idle_ttl_sec: int = 1800,
 ) -> int:
+    import os
+
     runtime = MingWorkerRuntime(
         model_path=model_path,
         campplus_path=campplus_path,
@@ -435,6 +604,10 @@ def serve_worker(
         dtype=dtype,
         text_normalization=text_normalization,
     )
+
+    last_active_time = time.time()
+    active_lock = threading.Lock()
+    shutdown_event = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, code: int, payload: dict[str, Any]) -> None:
@@ -446,27 +619,50 @@ def serve_worker(
             self.wfile.write(body)
 
         def do_GET(self) -> None:
+            nonlocal last_active_time
             if self.path == "/health":
+                with active_lock:
+                    idle_sec = round(time.time() - last_active_time, 1)
                 self._send_json(200, {
                     "status": "ok",
                     "model_path": runtime.model_path,
                     "device": runtime.device,
+                    "dtype": runtime.dtype,
+                    "text_normalization": runtime.text_normalization,
                     "sample_rate": runtime.sample_rate,
+                    "idle_seconds": idle_sec,
+                    "pid": os.getpid(),
                 })
             else:
                 self._send_json(404, {"error": "Not found"})
 
         def do_POST(self) -> None:
+            nonlocal last_active_time
+            if self.path == "/shutdown":
+                self._send_json(200, {"status": "shutting_down", "pid": os.getpid()})
+                print("[ming_worker] Received shutdown request via /shutdown")
+                shutdown_event.set()
+                threading.Thread(target=server.shutdown).start()
+                return
+
             if self.path != "/synthesize":
                 self._send_json(404, {"error": "Not found"})
                 return
+
+            with active_lock:
+                last_active_time = time.time()
+
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length)
                 job = json.loads(raw.decode("utf-8"))
                 report = runtime.process_job(job, include_load_time=False)
+                with active_lock:
+                    last_active_time = time.time()
                 self._send_json(200, report)
             except Exception as exc:
+                with active_lock:
+                    last_active_time = time.time()
                 self._send_json(500, {"status": "fatal_error", "error": str(exc), "results": []})
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -474,12 +670,32 @@ def serve_worker(
             return
 
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"[ming_worker] Persistent TTS daemon listening on http://{host}:{port}")
+    print(
+        f"[ming_worker] Persistent TTS daemon listening on http://{host}:{port} "
+        f"(PID={os.getpid()}, idle_ttl={idle_ttl_sec}s)"
+    )
+
+    def idle_checker() -> None:
+        while not shutdown_event.is_set():
+            time.sleep(5)
+            if idle_ttl_sec > 0:
+                with active_lock:
+                    idle = time.time() - last_active_time
+                if idle >= idle_ttl_sec:
+                    print(f"[ming_worker] Daemon idle for {idle:.0f}s >= {idle_ttl_sec}s. Exiting to release VRAM...")
+                    shutdown_event.set()
+                    server.shutdown()
+                    break
+
+    checker_thread = threading.Thread(target=idle_checker, daemon=True)
+    checker_thread.start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("[ming_worker] Shutting down TTS daemon.")
     finally:
+        shutdown_event.set()
         server.server_close()
     return 0
 
@@ -490,12 +706,13 @@ def main() -> int:
     parser.add_argument("--result-file", help="Path to result JSON output (one-shot mode)")
     parser.add_argument("--serve", action="store_true", help="Run as a persistent local HTTP daemon")
     parser.add_argument("--host", default="127.0.0.1", help="Daemon bind host")
-    parser.add_argument("--port", type=int, default=8765, help="Daemon bind port")
+    parser.add_argument("--port", type=int, default=8766, help="Daemon bind port")
     parser.add_argument("--model-path", default="models/Ming-3.0-tts-0.5b")
     parser.add_argument("--campplus-path", default="models/Ming-3.0-tts-0.5b/campplus.onnx")
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--text-normalization", action="store_true")
+    parser.add_argument("--idle-ttl-sec", type=int, default=1800, help="Idle timeout before auto-exit (sec)")
     args = parser.parse_args()
 
     if args.serve:
@@ -507,6 +724,7 @@ def main() -> int:
             device=args.device,
             dtype=args.dtype,
             text_normalization=args.text_normalization,
+            idle_ttl_sec=args.idle_ttl_sec,
         )
 
     if not args.job_file or not args.result_file:

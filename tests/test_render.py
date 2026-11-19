@@ -417,3 +417,78 @@ def test_render_agent_with_bgm_and_ducking(tmp_path: Path) -> None:
     vid_dur = float(probe.get("format", {}).get("duration", 0.0))
     assert abs(vid_dur - 4.0) < 0.1
 
+
+def test_render_agent_vertical_preview(tmp_path: Path) -> None:
+    """Verify RenderAgent parses 1080x1920 resolution from render_plan.json and outputs vertical preview."""
+    (tmp_path / "script").mkdir(parents=True)
+    (tmp_path / "script" / "script.json").write_text(
+        json.dumps({
+            "origin": "fixture",
+            "run_kind": "test",
+            "date": "2026-11-08",
+            "scenes": [
+                {"id": "intro", "type": "intro", "headline": "Vertical Intro"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "timeline").mkdir(parents=True)
+    (tmp_path / "timeline" / "timeline.json").write_text(
+        json.dumps({
+            "duration_sec": 2.0,
+            "scenes": [
+                {"id": "intro", "type": "intro", "start": 0.0, "end": 2.0},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "audio").mkdir(parents=True)
+    create_silence_wav(tmp_path / "audio" / "narration.wav", duration_sec=2.0, sample_rate=48000)
+
+    shots_dir = tmp_path / "media" / "shots"
+    shots_dir.mkdir(parents=True)
+    # Create 1080x1920 image
+    Image.new("RGB", (1080, 1920), color=(20, 50, 90)).save(str(shots_dir / "shot_00.jpg"))
+
+    media_data = {
+        "orientation": "vertical",
+        "aspect_ratio": "9:16",
+        "resolution": [1080, 1920],
+        "fps": 30,
+        "shots": [
+            {"scene_id": "intro", "shot_index": 0, "start": 0.0, "end": 2.0, "type": "image", "file": "media/shots/shot_00.jpg", "sha256": "h_vert"},
+        ],
+    }
+    (tmp_path / "media" / "media_manifest.json").write_text(json.dumps(media_data), encoding="utf-8")
+
+    motion_dir = tmp_path / "motion"
+    motion_dir.mkdir(parents=True)
+    plan_vertical = {
+        "resolution": "1080x1920",
+        "fps": 30,
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 2.0,
+        "captions_ass": "motion/captions.ass",
+        "scenes": [
+            {"id": "intro", "start": 0.0, "end": 2.0, "duration": 2.0, "shots": [{"shot_index": 0, "file": "media/shots/shot_00.jpg", "start": 0.0, "end": 2.0, "duration": 2.0, "type": "image"}], "overlays": []},
+        ],
+        "overlays": [],
+    }
+    (motion_dir / "render_plan.json").write_text(json.dumps(plan_vertical), encoding="utf-8")
+    (motion_dir / "captions.ass").write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n[V4+ Styles]\nFormat: Name\nStyle: Default\n[Events]\nFormat: Layer, Start, End, Style, Text\n",
+        encoding="utf-8",
+    )
+
+    agent = RenderAgent(run_dir=tmp_path)
+    outputs = agent.run(preview=True)
+
+    final_mp4 = tmp_path / "render" / "final_preview.mp4"
+    assert final_mp4.exists(), f"Render preview output missing: {outputs}"
+    probe = probe_file(final_mp4)
+    v_stream = next(s for s in probe.get("streams", []) if s.get("codec_type") == "video")
+    # Preview resolution for 1080x1920 is 540x960
+    assert v_stream.get("width") == 540
+    assert v_stream.get("height") == 960
+
+

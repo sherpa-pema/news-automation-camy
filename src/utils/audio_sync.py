@@ -207,13 +207,21 @@ def extract_audio_grid(
     snap_tolerance = float(music_cfg.get("snap_tolerance_sec", 0.35))
 
     if not enabled or not bgm_path or not Path(bgm_path).exists():
-        # Disabled or missing audio bed
+        # Disabled or missing audio bed: store slim scene records (id and times only, target < 2 KB)
+        slim_scenes = [
+            {
+                "id": s.get("id"),
+                "start": round(float(s.get("start", 0.0)), 3),
+                "end": round(float(s.get("end", 0.0)), 3),
+            }
+            for s in scene_boundaries
+        ]
         return {
             "enabled": False,
             "tempo_bpm": 120.0,
             "beat_times": [],
             "downbeat_times": [],
-            "snapped_scenes": scene_boundaries,
+            "snapped_scenes": slim_scenes,
             "ducking": {
                 "voice_duck_db": voice_duck_db,
                 "music_bed_db": music_bed_db,

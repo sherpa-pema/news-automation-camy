@@ -35,6 +35,16 @@ def generate_editor_brief(
     lines.append("")
     lines.append(f"- **Run Date**: `{run_date}` | **Run Kind**: `{run_kind}`")
     lines.append("")
+
+    is_degraded = any(
+        a.get("degraded_run")
+        for c in shortlist
+        for a in c.get("articles", [])
+    ) or bool(budget.get("degraded"))
+    if is_degraded:
+        lines.append("> **DEGRADED INGEST**: Bulletin ingested under degraded conditions. Proceeding with available stories.")
+        lines.append("")
+
     lines.append("> **Role**: You (the Antigravity agent) are acting as the Broadcast News Writer.")
     lines.append("> There are no external LLM calls or API keys. You will review the shortlist below,")
     lines.append("> select the top 5 news clusters, write `draft_script.json` and `selection.json`,")
@@ -46,10 +56,16 @@ def generate_editor_brief(
     lines.append(f"- **Speech Rate**: `{wps:.2f}` words per second (`{sps:.2f}` syllables per second)")
     lines.append(f"- **Target Video Duration**: 2:00 to 3:00 (120 to 180 seconds, target {budget['target_duration_sec']:.0f}s)")
     lines.append(f"- **Total Word Budget**: **{target_words} words** (allowed range: **{min_words} to {max_words} words**)")
-    lines.append("- **Scene Breakdown** (7 scenes total):")
-    lines.append("  - **1 Intro scene**: 15 to 40 words (target ~25 words)")
-    lines.append("  - **5 Story scenes**: 20 to 60 words each (target ~50 words each = ~250 words)")
-    lines.append("  - **1 Outro scene**: 15 to 40 words (target ~25 words)")
+    lines.append("- **Scene Breakdown** (Headlines Bulletin: 20 to 26 scenes total, 3 to 4 single-line summarized headlines per category in exact sequential order):")
+    lines.append("  - **1 Intro scene**: 12 to 25 words (target ~18 words)")
+    lines.append("  - **18 to 24 Story scenes** (strictly 1 single spoken sentence per scene, 10 to 22 words each, target ~15 words each):")
+    lines.append("    * Block 1: **National Politics** (`national_politics`) — 3 to 4 single-line headlines")
+    lines.append("    * Block 2: **Society and Local News** (`society_local`) — 3 to 4 single-line headlines")
+    lines.append("    * Block 3: **Culture and Entertainment** (`culture_entertainment`) — 3 to 4 single-line headlines")
+    lines.append("    * Block 4: **Business and Economics** (`business_economics`) — 3 to 4 single-line headlines")
+    lines.append("    * Block 5: **Science and Technology** (`science_technology`) — 3 to 4 single-line headlines")
+    lines.append("    * Block 6: **Sports** (`sports`) — 3 to 4 single-line headlines")
+    lines.append("  - **1 Outro scene**: 12 to 25 words (target ~18 words)")
     lines.append("")
     lines.append("---")
     lines.append("## 2. Mandatory Writing Rules")
@@ -63,6 +79,7 @@ def generate_editor_brief(
     lines.append("7. **Developing Stories (Superseded Updates)**: If a cluster contains articles marked `[OLDER UPDATE — DO NOT USE FOR NUMBERS]`, ground all casualty, vote, and financial counts strictly from the latest non-superseded article.")
     lines.append("8. **Cross-Day Repeats**: Clusters marked `[COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]` were already aired in the last 48 hours; skip them unless a fresh developing angle justifies inclusion.")
     lines.append("9. **Multi-Source Synthesis**: When a cluster contains multiple member outlets, synthesize complementary details across sentences (e.g. combine casualties from one outlet with vehicle/route context or quotes from another) while citing the exact source URL for each sentence in the `evidence` list.")
+    lines.append("10. **Headlines-Only Bulletin (Single-Sentence Summaries)**: This broadcast is strictly a headlines bulletin. Every story scene MUST contain exactly ONE single spoken sentence (10 to 22 words) summarizing the core event. DO NOT write descriptions, background paragraphs, historical context, or secondary sentences. Story scenes MUST transition monotonically through the 6 category blocks (3 to 4 single-line headlines per block).")
     lines.append("")
     lines.append("### Broadcast Style & TTS Optimization")
     lines.append("1. **TTS-Friendly**: Short, punchy broadcast sentences. Standard English spelling for Nepali names and places.")
@@ -170,8 +187,11 @@ def generate_editor_brief(
 
     for c in shortlist:
         repeat_tag = " [COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]" if c.get("covered_recently") else ""
-        lines.append(f"### [{c['cluster_id']}] {c['primary_title']}{repeat_tag}")
+        slot_label = f" [SLOT: {c['broadcast_slot_title']}]" if c.get("broadcast_slot_title") else ""
+        lines.append(f"### [{c['cluster_id']}] {c['primary_title']}{slot_label}{repeat_tag}")
         cluster_meta = f"- **Category Guess**: `{c['category_guess']}`"
+        if c.get("broadcast_slot_id"):
+            cluster_meta += f" | **Designated Slot**: `{c['broadcast_slot_id']}` ({c.get('broadcast_slot')})"
         if c.get("max_importance_hint") is not None:
             cluster_meta += f" | **Max Importance**: `{c['max_importance_hint']}`"
         if c.get("max_source_trust") is not None:
@@ -203,16 +223,28 @@ def generate_editor_brief(
                 meta_bits.append(f"Cat: {a['category_hint']}")
             if date_conf:
                 meta_bits.append(f"Date: {date_conf}")
-            if a.get("language") and a.get("language") != "en":
-                meta_bits.append(f"Lang: {a['language']}")
+            is_nepali = bool(
+                (a.get("language") and a.get("language") != "en")
+                or a.get("needs_translation")
+            )
+            if is_nepali:
+                meta_bits.append(f"Lang: {a.get('language', 'ne')}")
             warn_tag = " **[DATE UNVERIFIED]**" if date_conf == "missing" else ""
             meta_suffix = f" ({' | '.join(meta_bits)})" if meta_bits else ""
             lines.append(f"    *Published*: {pub_str}{meta_suffix}{warn_tag}{sup_tag}")
-            lines.append(f"    *Summary*: {a.get('text_summary', '').strip()}")
+            nepali_marker = " **[NEPALI — TRANSLATE TO ENGLISH]**" if is_nepali else ""
+            lines.append(f"    *Summary*:{nepali_marker} {a.get('text_summary', '').strip()}")
             lines.append("    <details><summary>Click to view extracted full text</summary>")
             lines.append("")
+            if is_nepali:
+                lines.append("    > **[NEPALI — TRANSLATE TO ENGLISH]**")
+                lines.append("")
             lines.append("    ```text")
             full_txt = a.get("full_text", "").strip()
+            # Truncate full text in brief to max 200 words to keep prompt concise
+            words = full_txt.split()
+            if len(words) > 200:
+                full_txt = " ".join(words[:200]) + " ... [TRUNCATED FOR BRIEF]"
             # Indent text slightly for markdown formatting
             for t_line in full_txt.splitlines():
                 lines.append(f"    {t_line}")

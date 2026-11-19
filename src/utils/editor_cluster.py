@@ -1,11 +1,95 @@
 """Clustering and shortlist generation for Editor Agent."""
 from datetime import datetime, timedelta, timezone
 import difflib
+from functools import lru_cache
+import heapq
 import re
-from typing import Any
+from typing import Any, Callable
 
 NPT_TZ = timezone(timedelta(hours=5, minutes=45))
 DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+_TOKENIZE_RE = re.compile(r"\b[a-zA-Z]{3,}\b|[\u0900-\u097F]{2,}")
+_OPINION_TITLE_RE = re.compile(
+    r"\b(opinion|editorial|commentary|op-ed|column|perspective)\b|(विचार|सम्पादकीय|दृष्टिकोण|ब्लग)",
+    re.IGNORECASE,
+)
+_OPINION_AUTHOR_RE = re.compile(r"\b(columnist|contributor|guest author)\b", re.IGNORECASE)
+_FIRST_PERSON_RE = re.compile(r"\b[A-Za-z]+\b|[\u0900-\u097F]+")
+_FIRST_PERSON_WORDS = frozenset({
+    "I", "my", "My", "mine", "Mine", "myself", "Myself",
+    "we", "We", "our", "Our", "ours", "Ours", "ourselves", "Ourselves", "us",
+    "म", "मेरो", "मेरा", "मेरी", "हामी", "हाम्रो", "हाम्रा", "हामीलाई",
+})
+_SPINE_NUM_RE = re.compile(r"(?<![\d.])\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])")
+
+
+@lru_cache(maxsize=512)
+def _compile_word_boundary_re(term: str) -> re.Pattern[str]:
+    return re.compile(rf"\b{re.escape(term)}\b")
+
+
+@lru_cache(maxsize=512)
+def _compile_ascii_entity_re(term: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])")
+
+BROADCAST_SLOTS: list[tuple[str, str, str]] = [
+    ("slot_01", "national_politics", "National Politics"),
+    ("slot_02", "society_local", "Society and Local News"),
+    ("slot_03", "culture_entertainment", "Culture and Entertainment"),
+    ("slot_04", "business_economics", "Business and Economics"),
+    ("slot_05", "science_technology", "Science and Technology"),
+    ("slot_06", "sports", "Sports"),
+]
+
+CATEGORY_TO_BROADCAST_SLOT: dict[str, str] = {
+    "national_politics": "national_politics",
+    "politics": "national_politics",
+    "political": "national_politics",
+    "government": "national_politics",
+    "parliament": "national_politics",
+    "society_local": "society_local",
+    "society": "society_local",
+    "social": "society_local",
+    "local": "society_local",
+    "transport": "society_local",
+    "disaster": "society_local",
+    "crime": "society_local",
+    "health": "society_local",
+    "weather": "society_local",
+    "climate": "society_local",
+    "environment": "society_local",
+    "culture_entertainment": "culture_entertainment",
+    "culture": "culture_entertainment",
+    "cultural": "culture_entertainment",
+    "entertainment": "culture_entertainment",
+    "heritage": "culture_entertainment",
+    "tourism": "culture_entertainment",
+    "business_economics": "business_economics",
+    "economy": "business_economics",
+    "economic": "business_economics",
+    "business": "business_economics",
+    "market": "business_economics",
+    "finance": "business_economics",
+    "science_technology": "science_technology",
+    "technology": "science_technology",
+    "tech": "science_technology",
+    "science": "science_technology",
+    "sports": "sports",
+    "sport": "sports",
+    "cricket": "sports",
+    "football": "sports",
+    "international": "society_local",
+    "world": "society_local",
+}
+
+
+def map_to_broadcast_slot(cat: str | None) -> str:
+    """Maps any canonical or legacy category string to one of the 6 broadcast slots."""
+    if not cat:
+        return "society_local"
+    return CATEGORY_TO_BROADCAST_SLOT.get(str(cat).strip().lower(), "society_local")
+
 
 DEFAULT_ENTITY_ALIASES: dict[str, list[str]] = {
     "uml": ["cpn-uml", "cpn (uml)", "uml", "एमाले", "नेकपा एमाले"],
@@ -58,8 +142,9 @@ OPINION_URL_PATTERNS = [
 
 def tokenize(text: str) -> set[str]:
     """Extracts normalized English and Devanagari word tokens excluding stopwords."""
-    words = re.findall(r"\b[a-zA-Z]{3,}\b|[\u0900-\u097F]{2,}", text.lower())
-    return {w for w in words if w not in STOPWORDS}
+    if not text:
+        return set()
+    return {w for w in _TOKENIZE_RE.findall(text.lower()) if w not in STOPWORDS}
 
 
 def is_advertisement(article: dict[str, Any]) -> bool:
@@ -85,29 +170,22 @@ def detect_opinion(article: dict[str, Any]) -> tuple[bool, str]:
             return True, f"URL pattern '{pattern}'"
 
     # 2. Title pattern
-    title_match = re.search(
-        r"\b(opinion|editorial|commentary|op-ed|column|perspective)\b|(विचार|सम्पादकीय|दृष्टिकोण|ब्लग)",
-        title,
-        re.IGNORECASE,
-    )
+    title_match = _OPINION_TITLE_RE.search(title)
     if title_match:
         matched_term = title_match.group(1) or title_match.group(2)
         return True, f"Title pattern '{matched_term}'"
 
     # 3. Author pattern
-    author_match = re.search(r"\b(columnist|contributor|guest author)\b", author, re.IGNORECASE)
+    author_match = _OPINION_AUTHOR_RE.search(author)
     if author_match:
         return True, f"Author designation '{author_match.group(1)}'"
 
     # 4. First-person pronoun heuristic
-    words = re.findall(r"\b[A-Za-z]+\b|[\u0900-\u097F]+", full_text)
+    words = _FIRST_PERSON_RE.findall(full_text)
     fp_count = 0
     fp_examples = []
     for w in words:
-        if w in (
-            "I", "my", "My", "mine", "Mine", "myself", "Myself", "we", "We", "our", "Our", "ours", "Ours", "ourselves", "Ourselves", "us",
-            "म", "मेरो", "मेरा", "मेरी", "हामी", "हाम्रो", "हाम्रा", "हामीलाई",
-        ):
+        if w in _FIRST_PERSON_WORDS:
             fp_count += 1
             if len(fp_examples) < 5:
                 fp_examples.append(w)
@@ -273,7 +351,7 @@ def guess_category(
             if not kw_l:
                 continue
             if kw_l.isascii():
-                if re.search(rf"\b{re.escape(kw_l)}\b", text_lower):
+                if _compile_word_boundary_re(kw_l).search(text_lower):
                     score += 1
             elif kw_l in text_lower:
                 score += 1
@@ -305,7 +383,7 @@ def extract_canonical_entities(text: str, entity_aliases: dict[str, list[str]] |
             if not v_l:
                 continue
             if v_l.isascii():
-                if re.search(rf"(?<![a-z0-9]){re.escape(v_l)}(?![a-z0-9])", text_lower):
+                if v_l in text_lower and _compile_ascii_entity_re(v_l).search(text_lower):
                     matched.add(canon)
                     break
             elif v_l in text_lower:
@@ -325,7 +403,7 @@ def extract_spine_numbers(text: str, exclude_years: set[int] | None = None) -> s
         excluded.update(float(y) for y in exclude_years)
 
     found: set[float] = set()
-    for m in re.finditer(r"(?<![\d.])\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])", norm):
+    for m in _SPINE_NUM_RE.finditer(norm):
         try:
             val = float(m.group(0).replace(",", ""))
         except ValueError:
@@ -333,6 +411,73 @@ def extract_spine_numbers(text: str, exclude_years: set[int] | None = None) -> s
         if val not in excluded:
             found.add(val)
     return found
+
+
+def _precompute_article_features(
+    article: dict[str, Any],
+    entity_aliases: dict[str, list[str]] | None = None,
+    ref_year: int | None = None,
+) -> dict[str, Any]:
+    """Precomputes tokenized, entity, numeric, and timestamp features once per article."""
+    title = article.get("title", "")
+    summary = article.get("text_summary", "")
+    full_text = article.get("full_text", "")
+    title_toks = tokenize(title)
+    summary_toks = tokenize(summary)
+    combined_txt = f"{title} {summary} {full_text}"
+    excl = {ref_year} if ref_year else None
+    return {
+        "title_lower": title.lower(),
+        "title_toks": title_toks,
+        "comb_toks": title_toks | summary_toks,
+        "ts": parse_timestamp(article.get("published_at")),
+        "entities": extract_canonical_entities(combined_txt, entity_aliases=entity_aliases),
+        "numbers": extract_spine_numbers(combined_txt, exclude_years=excl),
+    }
+
+
+def _features_are_similar(
+    f1: dict[str, Any],
+    f2: dict[str, Any],
+    title_ratio_thresh: float = 0.55,
+    token_overlap_thresh: float = 0.35,
+) -> bool:
+    """Compares two precomputed article feature dicts using identical similarity rules."""
+    # 1. SequenceMatcher ratio on titles (with O(n) quick_ratio upper-bound short-circuit)
+    sm = difflib.SequenceMatcher(None, f1["title_lower"], f2["title_lower"])
+    if sm.quick_ratio() >= title_ratio_thresh and sm.ratio() >= title_ratio_thresh:
+        return True
+
+    # 2. Token overlap on titles
+    toks1 = f1["title_toks"]
+    toks2 = f2["title_toks"]
+    if toks1 and toks2:
+        inter_len = len(toks1 & toks2)
+        if inter_len > 0:
+            union_len = len(toks1) + len(toks2) - inter_len
+            if (inter_len / union_len) >= token_overlap_thresh:
+                return True
+
+            # 3. Combined title + summary overlap (requires >= 2 shared title tokens)
+            if inter_len >= 2:
+                comb1 = f1["comb_toks"]
+                comb2 = f2["comb_toks"]
+                if comb1 and comb2:
+                    c_inter = len(comb1 & comb2)
+                    c_union = len(comb1) + len(comb2) - c_inter
+                    if (c_inter / c_union) >= 0.40:
+                        return True
+
+    # 4. Cross-script Entity & Numeric Spine Matching (>= 2 canonical entities + >= 1 non-trivial number within 12h)
+    ts1 = f1["ts"]
+    ts2 = f2["ts"]
+    within_window = True if (ts1 == 0.0 or ts2 == 0.0) else (abs(ts1 - ts2) <= 12 * 3600)
+    if within_window:
+        if len(f1["entities"] & f2["entities"]) >= 2:
+            if len(f1["numbers"] & f2["numbers"]) >= 1:
+                return True
+
+    return False
 
 
 def articles_are_similar(
@@ -348,27 +493,29 @@ def articles_are_similar(
     t2 = a2.get("title", "")
 
     # 1. SequenceMatcher ratio on titles
-    ratio = difflib.SequenceMatcher(None, t1.lower(), t2.lower()).ratio()
-    if ratio >= title_ratio_thresh:
+    sm = difflib.SequenceMatcher(None, t1.lower(), t2.lower())
+    if sm.quick_ratio() >= title_ratio_thresh and sm.ratio() >= title_ratio_thresh:
         return True
 
     # 2. Token overlap on titles
     toks1 = tokenize(t1)
     toks2 = tokenize(t2)
     if toks1 and toks2:
-        overlap = len(toks1 & toks2) / len(toks1 | toks2)
-        if overlap >= token_overlap_thresh:
-            return True
+        inter_len = len(toks1 & toks2)
+        if inter_len > 0:
+            union_len = len(toks1) + len(toks2) - inter_len
+            if (inter_len / union_len) >= token_overlap_thresh:
+                return True
 
-    # 3. Combined title + summary overlap
-    s1 = tokenize(a1.get("text_summary", ""))
-    s2 = tokenize(a2.get("text_summary", ""))
-    comb1 = toks1 | s1
-    comb2 = toks2 | s2
-    if comb1 and comb2:
-        comb_overlap = len(comb1 & comb2) / len(comb1 | comb2)
-        if comb_overlap >= 0.40 and len(toks1 & toks2) >= 2:
-            return True
+            # 3. Combined title + summary overlap
+            if inter_len >= 2:
+                comb1 = toks1 | tokenize(a1.get("text_summary", ""))
+                comb2 = toks2 | tokenize(a2.get("text_summary", ""))
+                if comb1 and comb2:
+                    c_inter = len(comb1 & comb2)
+                    c_union = len(comb1) + len(comb2) - c_inter
+                    if (c_inter / c_union) >= 0.40:
+                        return True
 
     # 4. Cross-script Entity & Numeric Spine Matching (>= 2 canonical entities + >= 1 non-trivial number within 12h)
     ts1 = parse_timestamp(a1.get("published_at"))
@@ -387,6 +534,110 @@ def articles_are_similar(
                 return True
 
     return False
+
+
+def apply_cross_day_deduplication(
+    formatted_clusters: list[dict[str, Any]],
+    prior_stories: list[dict[str, Any]] | None,
+    *,
+    title_ratio: float = 0.55,
+    token_overlap: float = 0.35,
+    entity_aliases: dict[str, list[str]] | None = None,
+    ref_year: int | None = None,
+) -> None:
+    """Flags candidate clusters covered in recent prior runs unless a post-approval numeric update exists."""
+    if not prior_stories or not formatted_clusters:
+        return
+
+    prior_prepared: list[tuple[dict[str, Any], set[str], dict[str, Any]]] = []
+    for prior in prior_stories:
+        prior_urls = set(prior.get("source_urls", []))
+        prior_art = prior.get("pseudo_article") or {
+            "title": prior.get("title", ""),
+            "text_summary": prior.get("narration", ""),
+            "full_text": prior.get("narration", ""),
+        }
+        prior_feats = _precompute_article_features(prior_art, entity_aliases=entity_aliases, ref_year=ref_year)
+        prior_prepared.append((prior, prior_urls, prior_feats))
+
+    for cand in formatted_clusters:
+        cand_urls = set(cand.get("urls", []))
+        cand_articles = cand.get("articles", [])
+        cand_feats: list[dict[str, Any]] | None = None
+
+        for prior, prior_urls, prior_feats in prior_prepared:
+            url_match = bool(cand_urls & prior_urls)
+            sim_match = False
+            if not url_match:
+                if cand_feats is None:
+                    cand_feats = [
+                        _precompute_article_features(art, entity_aliases=entity_aliases, ref_year=ref_year)
+                        for art in cand_articles
+                    ]
+                sim_match = any(
+                    _features_are_similar(af, prior_feats, title_ratio, token_overlap)
+                    for af in cand_feats
+                )
+            if url_match or sim_match:
+                approved_ts = float(prior.get("approved_ts", 0.0) or 0.0)
+                prior_nums = set(prior.get("numbers", []))
+                has_new_post_approval_update = False
+                if approved_ts > 0.0:
+                    for art in cand_articles:
+                        art_ts = parse_timestamp(art.get("published_at"))
+                        if art_ts > approved_ts:
+                            art_nums = extract_spine_numbers(
+                                f"{art.get('title', '')} {art.get('full_text', '')}",
+                                exclude_years={ref_year} if ref_year else None,
+                            )
+                            if art_nums - prior_nums:
+                                has_new_post_approval_update = True
+                                break
+                if not has_new_post_approval_update:
+                    cand["covered_recently"] = True
+                    cand["repeat_reason"] = (
+                        f"Covered on {prior.get('run_date', 'recent run')}: {prior.get('title', '')}"
+                    )
+                break
+
+
+def rank_clusters_with_diversity(
+    clusters: list[dict[str, Any]],
+    base_score_fn: Callable[[dict[str, Any]], float],
+    category_penalty: float,
+) -> list[dict[str, Any]]:
+    """O(n log n) greedy diversity ranking mathematically equivalent to iterative max-score selection."""
+    if not clusters:
+        return []
+
+    by_category: dict[str, list[tuple[float, int, dict[str, Any]]]] = {}
+    for orig_idx, cand in enumerate(clusters):
+        cat = str(cand.get("category_guess", "other"))
+        base = float(base_score_fn(cand))
+        by_category.setdefault(cat, []).append((base, orig_idx, cand))
+
+    # Sort each category queue by (-base_score, orig_idx) so highest score (then earliest index) comes first
+    for items in by_category.values():
+        items.sort(key=lambda item: (-item[0], item[1]))
+
+    # Heap entries: (-effective_score, orig_idx, cat, pos_in_cat)
+    heap: list[tuple[float, int, str, int]] = []
+    for cat, items in by_category.items():
+        base, orig_idx, _ = items[0]
+        heapq.heappush(heap, (-base, orig_idx, cat, 0))
+
+    ranked: list[dict[str, Any]] = []
+    while heap:
+        _, _, cat, pos = heapq.heappop(heap)
+        items = by_category[cat]
+        ranked.append(items[pos][2])
+        next_pos = pos + 1
+        if next_pos < len(items):
+            next_base, next_orig_idx, _ = items[next_pos]
+            next_eff = next_base - (next_pos * category_penalty)
+            heapq.heappush(heap, (-next_eff, next_orig_idx, cat, next_pos))
+
+    return ranked
 
 
 def parse_timestamp(ts_str: str | None) -> float:
@@ -469,29 +720,25 @@ def cluster_articles(
 
         filtered_articles.append(art)
 
-    # 2. Cluster articles
+    # 2. Cluster articles (precompute features once per article to avoid O(n^2) tokenization/regex)
     clusters: list[list[dict[str, Any]]] = []
+    cluster_features: list[list[dict[str, Any]]] = []
 
     for art in filtered_articles:
+        art_feat = _precompute_article_features(art, entity_aliases=entity_aliases, ref_year=ref_year)
         placed = False
-        for c in clusters:
-            # Check similarity against any existing article in cluster
+        for c, c_feats in zip(clusters, cluster_features):
             if any(
-                articles_are_similar(
-                    art,
-                    existing,
-                    title_ratio,
-                    token_overlap,
-                    entity_aliases=entity_aliases,
-                    ref_year=ref_year,
-                )
-                for existing in c
+                _features_are_similar(art_feat, existing_feat, title_ratio, token_overlap)
+                for existing_feat in c_feats
             ):
                 c.append(art)
+                c_feats.append(art_feat)
                 placed = True
                 break
         if not placed:
             clusters.append([art])
+            cluster_features.append([art_feat])
 
     # 3. Format clusters with chronological ordering and intra-cluster temporal supersession
     formatted_clusters = []
@@ -605,49 +852,14 @@ def cluster_articles(
         })
 
     # Apply 48-hour cross-day deduplication memory before ranking
-    if prior_stories:
-        for cand in formatted_clusters:
-            cand_urls = set(cand.get("urls", []))
-            for prior in prior_stories:
-                prior_urls = set(prior.get("source_urls", []))
-                prior_art = prior.get("pseudo_article") or {
-                    "title": prior.get("title", ""),
-                    "text_summary": prior.get("narration", ""),
-                    "full_text": prior.get("narration", ""),
-                }
-                url_match = bool(cand_urls & prior_urls)
-                sim_match = any(
-                    articles_are_similar(
-                        art,
-                        prior_art,
-                        title_ratio,
-                        token_overlap,
-                        entity_aliases=entity_aliases,
-                        ref_year=ref_year,
-                    )
-                    for art in cand.get("articles", [])
-                )
-                if url_match or sim_match:
-                    approved_ts = float(prior.get("approved_ts", 0.0) or 0.0)
-                    prior_nums = set(prior.get("numbers", []))
-                    has_new_post_approval_update = False
-                    if approved_ts > 0.0:
-                        for art in cand.get("articles", []):
-                            art_ts = parse_timestamp(art.get("published_at"))
-                            if art_ts > approved_ts:
-                                art_nums = extract_spine_numbers(
-                                    f"{art.get('title', '')} {art.get('full_text', '')}",
-                                    exclude_years={ref_year},
-                                )
-                                if art_nums - prior_nums:
-                                    has_new_post_approval_update = True
-                                    break
-                    if not has_new_post_approval_update:
-                        cand["covered_recently"] = True
-                        cand["repeat_reason"] = (
-                            f"Covered on {prior.get('run_date', 'recent run')}: {prior.get('title', '')}"
-                        )
-                    break
+    apply_cross_day_deduplication(
+        formatted_clusters,
+        prior_stories,
+        title_ratio=title_ratio,
+        token_overlap=token_overlap,
+        entity_aliases=entity_aliases,
+        ref_year=ref_year,
+    )
 
     # 4. Rank clusters: more outlets first, then importance/trust/recency, then topic-variety & repeat penalty
     def cluster_sort_key(c: dict[str, Any]) -> tuple[int, float, float, float]:
@@ -655,42 +867,27 @@ def cluster_articles(
 
     initial_sorted = sorted(formatted_clusters, key=cluster_sort_key, reverse=True)
 
-    ranked_clusters = []
-    category_counts: dict[str, int] = {}
+    def _heuristic_base_score(cand: dict[str, Any]) -> float:
+        recency_normalized = cand["newest_timestamp"] / 1e9 if cand["newest_timestamp"] else 0.0
+        missing_penalty = 50.0 if cand.get("all_dates_missing") else 0.0
+        cross_day_adj = -abs(repeat_penalty) if cand.get("covered_recently") else 0.0
+        return (
+            (cand["source_count"] * 1000.0)
+            + (cand.get("max_importance_hint", 0.0) * 80.0)
+            + (cand.get("max_source_trust", 0.70) * 40.0)
+            + recency_normalized
+            - missing_penalty
+            + cross_day_adj
+        )
 
-    while initial_sorted:
-        best_cand = None
-        best_score = -1e9
-        best_cand_idx = -1
-
-        for i, cand in enumerate(initial_sorted):
-            cat = cand["category_guess"]
-            cat_count = category_counts.get(cat, 0)
-            recency_normalized = cand["newest_timestamp"] / 1e9 if cand["newest_timestamp"] else 0.0
-            missing_penalty = 50.0 if cand.get("all_dates_missing") else 0.0
-            cross_day_adj = -abs(repeat_penalty) if cand.get("covered_recently") else 0.0
-            score = (
-                (cand["source_count"] * 1000.0)
-                + (cand.get("max_importance_hint", 0.0) * 80.0)
-                + (cand.get("max_source_trust", 0.70) * 40.0)
-                + recency_normalized
-                - missing_penalty
-                - (cat_count * 150.0)
-                + cross_day_adj
-            )
-            if score > best_score:
-                best_score = score
-                best_cand = cand
-                best_cand_idx = i
-
-        if best_cand:
-            initial_sorted.pop(best_cand_idx)
-            cat = best_cand["category_guess"]
-            category_counts[cat] = category_counts.get(cat, 0) + 1
-            ranked_clusters.append(best_cand)
+    ranked_clusters = rank_clusters_with_diversity(
+        initial_sorted,
+        base_score_fn=_heuristic_base_score,
+        category_penalty=150.0,
+    )
 
     # Separate news clusters from opinion and stale preview clusters
-    news_clusters = [
+    raw_news = [
         c for c in ranked_clusters
         if not c.get("is_opinion", False) and not c.get("is_stale_preview", False)
     ]
@@ -699,6 +896,48 @@ def cluster_articles(
         c for c in ranked_clusters
         if not c.get("is_opinion", False) and c.get("is_stale_preview", False)
     ]
+
+    # Stratified allocation across the 6 broadcast slots
+    for c in raw_news:
+        c["broadcast_slot"] = map_to_broadcast_slot(c.get("category_guess"))
+
+    slot_news: list[dict[str, Any]] = []
+    assigned_ids: set[int] = set()
+
+    clusters_per_slot = int(editor_cfg.get("clustering", {}).get("clusters_per_category", 4))
+
+    for slot_id, slot_cat, slot_title in BROADCAST_SLOTS:
+        matches = [
+            c for c in raw_news
+            if id(c) not in assigned_ids and c.get("broadcast_slot") == slot_cat
+        ][:clusters_per_slot]
+
+        if matches:
+            for item_idx, cand in enumerate(matches, 1):
+                cand["broadcast_slot_id"] = slot_id
+                cand["broadcast_slot_title"] = slot_title
+                cand["slot_item_index"] = item_idx
+                slot_news.append(cand)
+                assigned_ids.add(id(cand))
+        else:
+            fallback = next(
+                (c for c in raw_news if id(c) not in assigned_ids),
+                None,
+            )
+            if fallback:
+                fallback["broadcast_slot_id"] = slot_id
+                fallback["broadcast_slot_title"] = f"{slot_title} (Fallback)"
+                fallback["fallback_slot"] = True
+                fallback["slot_item_index"] = 1
+                slot_news.append(fallback)
+                assigned_ids.add(id(fallback))
+
+    for c in raw_news:
+        if id(c) not in assigned_ids:
+            slot_news.append(c)
+            assigned_ids.add(id(c))
+
+    news_clusters = slot_news if slot_news else raw_news
 
     # Re-index cluster_id cleanly
     for idx, c in enumerate(news_clusters, 1):
@@ -710,7 +949,7 @@ def cluster_articles(
     for idx, c in enumerate(stale_clusters, 1):
         c["cluster_id"] = f"stale_{idx:02d}"
 
-    top_limit = int(editor_cfg.get("clustering", {}).get("top_clusters_limit", 12))
+    top_limit = int(editor_cfg.get("clustering", {}).get("top_clusters_limit", 24))
 
     if allow_opinion and allow_stale_preview:
         shortlist = ranked_clusters[:top_limit]

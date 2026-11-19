@@ -33,6 +33,7 @@ from src.utils.media_selector import MediaSelector
 from src.utils.media_sources.local_library import add_to_library_cli
 from src.utils.schema_validate import validate_contract
 from src.utils.shot_planner import plan_shots_for_scenes
+from src.utils.office_events import emit_office_event
 
 load_dotenv()
 logger = logging.getLogger("media")
@@ -50,6 +51,7 @@ class MediaAgent(BaseAgent):
         dry_run: bool = False,
         allow_fixture: bool = False,
         auto: bool = False,
+        orientation: str | None = None,
     ) -> None:
         super().__init__(Path(run_dir), config=config)
         self.media_config_path = Path(media_config_path)
@@ -58,6 +60,22 @@ class MediaAgent(BaseAgent):
         self.dry_run = dry_run
         self.allow_fixture = allow_fixture
         self.auto = auto
+        self.orientation = orientation
+
+        # Resolve orientation and resolution overrides from parameter, config, or manifest
+        resolved_orient = orientation
+        if not resolved_orient and self.config:
+            for stg in self.config.get("stages", []):
+                if stg.get("id") == "media" and stg.get("orientation"):
+                    resolved_orient = stg.get("orientation")
+                    break
+        if resolved_orient:
+            self.media_config.setdefault("settings", {})["orientation"] = resolved_orient
+            if resolved_orient == "vertical":
+                self.media_config["settings"]["resolution"] = [1080, 1920]
+            else:
+                self.media_config["settings"]["resolution"] = [1920, 1080]
+
         self.cache_mgr = MediaCacheManager(
             cache_dir=self.media_config.get("settings", {}).get("cache_dir", "data/media_cache"),
             user_agent=self.media_config.get("settings", {}).get("user_agent", "NepalNewsBot/1.0"),
@@ -86,9 +104,9 @@ class MediaAgent(BaseAgent):
         if not script_path.exists():
             script_path = self.run_dir.parent.parent / "runs" / self.run_dir.name / "script" / "script.json"
 
-        timeline_path = self.run_dir / "timeline.json"
+        timeline_path = self.run_dir / "timeline" / "timeline.json"
         if not timeline_path.exists():
-            timeline_path = self.run_dir / "timeline" / "timeline.json"
+            timeline_path = self.run_dir / "timeline.json"
 
         if not script_path.exists():
             raise FileNotFoundError(f"Missing required script.json at {script_path}")
@@ -584,6 +602,8 @@ class MediaAgent(BaseAgent):
         # 2. Gather Candidates per Shot
         shots_output: list[dict[str, Any]] = []
         used_auto_pick_ids: set[str] = set()
+        total_shots = sum(len(ps.shots) for ps in planned_scenes)
+        shot_num = 0
 
         for ps in planned_scenes:
             sc_id = ps.scene_id
@@ -591,7 +611,18 @@ class MediaAgent(BaseAgent):
             sc_timeline = next((s for s in scenes if s.get("id") == sc_id), {})
 
             for shot in ps.shots:
+                shot_num += 1
                 shot_id = f"{sc_id}_{shot.shot_index:02d}"
+
+                emit_office_event(
+                    self.run_dir,
+                    "substage_progress",
+                    stage="media",
+                    current=shot_num,
+                    total=total_shots,
+                    message=f"Searching visual candidates {shot_num}/{total_shots} ({shot_id})",
+                    extra={"shot_id": shot_id},
+                )
 
                 # Find spoken narration sentences during this shot
                 overlapping_sentences = [

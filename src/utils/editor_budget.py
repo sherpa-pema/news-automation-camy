@@ -217,8 +217,8 @@ def compute_word_budget(
         "max_total_words": max_total_words,
         "tolerance_pct": tolerance_pct,
         "scene_targets": {
-            "intro": {"min_words": 15, "max_words": 40, "target_words": 25},
-            "story": {"min_words": 20, "max_words": 60, "target_words": 50, "count": 5},
-            "outro": {"min_words": 15, "max_words": 40, "target_words": 25},
+            "intro": {"min_words": 12, "max_words": 25, "target_words": 18},
+            "story": {"min_words": 10, "max_words": 25, "target_words": 16, "count": 20},
+            "outro": {"min_words": 12, "max_words": 25, "target_words": 18},
         },
     }

@@ -3,15 +3,33 @@
  */
 
 export class OfficeWsClient {
-  constructor({ onSnapshot, onOfficeEvent, onLogLines, onConnectionChange }) {
+  constructor({ onSnapshot, onOfficeEvent, onLogLines, onJobOutput, onConnectionChange, onReconnect }) {
     this.onSnapshot = onSnapshot;
     this.onOfficeEvent = onOfficeEvent;
     this.onLogLines = onLogLines;
+    this.onJobOutput = onJobOutput;
     this.onConnectionChange = onConnectionChange;
+    this.onReconnect = onReconnect;
     this.ws = null;
     this.currentDate = null;
     this.reconnectTimer = null;
     this.closedIntentionally = false;
+    this.retryDelay = 500;
+    this.heartbeatTimer = null;
+    this.hasConnectedOnce = false;
+  }
+
+  _resetHeartbeat() {
+    if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
+    // If no message or ping received within 15s, connection is presumed stale
+    this.heartbeatTimer = setTimeout(() => {
+      console.warn("WS heartbeat timed out after 15s. Reconnecting...");
+      if (this.ws) {
+        try {
+          this.ws.close();
+        } catch (_) {}
+      }
+    }, 15000);
   }
 
   connect(runDate) {
@@ -20,28 +38,54 @@ export class OfficeWsClient {
     this.closedIntentionally = false;
 
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${location.host}/ws/runs/${encodeURIComponent(runDate)}`;
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get("token") || sessionStorage.getItem("office_token");
+    if (urlParams.get("token")) {
+      sessionStorage.setItem("office_token", urlParams.get("token"));
+    }
+    const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+    const url = `${proto}//${location.host}/ws/runs/${encodeURIComponent(runDate)}${tokenQuery}`;
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
+      this.retryDelay = 500;
+      this._resetHeartbeat();
       this.onConnectionChange?.(true);
+      if (this.hasConnectedOnce) {
+        // Resync on reconnection
+        this.onReconnect?.();
+        this.send({ type: "request_sync" });
+      }
+      this.hasConnectedOnce = true;
     };
 
     this.ws.onmessage = (evt) => {
+      this._resetHeartbeat();
       try {
         const msg = JSON.parse(evt.data);
-        if (msg.type === "state_snapshot") this.onSnapshot?.(msg.data);
-        else if (msg.type === "office_event") this.onOfficeEvent?.(msg.data);
-        else if (msg.type === "log_lines") this.onLogLines?.(msg.data);
+        if (msg.type === "ping") {
+          this.send({ type: "pong" });
+        } else if (msg.type === "state_snapshot") {
+          this.onSnapshot?.(msg.data);
+        } else if (msg.type === "office_event") {
+          this.onOfficeEvent?.(msg.data);
+        } else if (msg.type === "log_lines") {
+          this.onLogLines?.(msg.data);
+        } else if (msg.type === "job_output") {
+          this.onJobOutput?.(msg.data);
+        }
       } catch (err) {
         console.error("WS parse error", err);
       }
     };
 
     this.ws.onclose = () => {
+      if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
       this.onConnectionChange?.(false);
       if (!this.closedIntentionally && this.currentDate === runDate) {
-        this.reconnectTimer = setTimeout(() => this.connect(runDate), 2000);
+        const nextDelay = this.retryDelay;
+        this.retryDelay = Math.min(Math.round(this.retryDelay * 1.6), 10000);
+        this.reconnectTimer = setTimeout(() => this.connect(runDate), nextDelay);
       }
     };
 
@@ -50,11 +94,23 @@ export class OfficeWsClient {
     };
   }
 
+  send(data) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(data));
+      } catch (_) {}
+    }
+  }
+
   disconnect() {
     this.closedIntentionally = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.heartbeatTimer) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
     if (this.ws) {
       this.ws.close();

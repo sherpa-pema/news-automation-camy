@@ -1,0 +1,38 @@
+[
+  {
+    "file": "cand_1_emma_broadcast.wav",
+    "sample_rate": 44100,
+    "duration_sec": 14.4,
+    "peak_db": -3.0,
+    "rms_db": -19.83,
+    "f0_median_hz": 199.5,
+    "f0_std_hz": 59.5,
+    "text": "Good evening and welcome to the news briefing. Today we bring you comprehensive coverage of economic developments, regional trade, and community initiatives across the country. Stay tuned as we present the top stories and essential updates for tonight.",
+    "task": "IP",
+    "name": "cand_1_emma_broadcast"
+  },
+  {
+    "file": "cand_2_emma_national.wav",
+    "sample_rate": 44100,
+    "duration_sec": 16.2,
+    "peak_db": -3.0,
+    "rms_db": -19.97,
+    "f0_median_hz": 190.9,
+    "f0_std_hz": 41.8,
+    "text": "Good evening, and welcome to tonight's national broadcast. In our lead reports, authorities in the capital confirmed updated infrastructure timelines and bilateral agreements. We bring you comprehensive reporting on economic policy, legal affairs, and regional transport developments.",
+    "task": "IP",
+    "name": "cand_2_emma_national"
+  },
+  {
+    "file": "cand_3_cloned_long.wav",
+    "sample_rate": 44100,
+    "duration_sec": 16.7,
+    "peak_db": -3.0,
+    "rms_db": -21.08,
+    "f0_median_hz": 232.1,
+    "f0_std_hz": 80.3,
+    "text": "Good evening from the news desk. Tonight we review key national developments, including high-level government appointments, cross-border transport projects, and major parliamentary proceedings. Stay with us for verified reporting and detailed analysis from across the nation.",
+    "task": "TTS",
+    "name": "cand_3_cloned_long"
+  }
+]

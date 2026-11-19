@@ -23,41 +23,51 @@ def get_font(font_path_candidates: list[str], size: int) -> ImageFont.FreeTypeFo
 
 
 def wrap_text(text: str, font: ImageFont.ImageFont, max_width: int, max_lines: int = 2) -> list[str]:
-    """Wraps text into up to max_lines lines respecting max_width in pixels."""
+    """Wraps text into up to max_lines lines respecting max_width in pixels.
+
+    Guarantees no word loss across allowed lines, cleanly truncates the final line
+    with a single ellipsis if it overflows, and handles long unbreakable tokens.
+    """
     words = text.strip().split()
-    if not words:
+    if not words or max_lines < 1:
         return []
 
     lines: list[str] = []
     current_line: list[str] = []
 
     for word in words:
-        test_line = " ".join(current_line + [word])
-        # Measure text width
+        test_line = " ".join(current_line + [word]) if current_line else word
         bbox = font.getbbox(test_line)
         w = bbox[2] - bbox[0]
+
         if w <= max_width:
             current_line.append(word)
         else:
+            if len(lines) == max_lines - 1:
+                # We are at the final allowed line, break to pack remaining words
+                break
             if current_line:
                 lines.append(" ".join(current_line))
                 current_line = [word]
-                if len(lines) == max_lines - 1:
-                    break
             else:
-                lines.append(word)
-                if len(lines) == max_lines - 1:
-                    break
+                trunc = word
+                while font.getbbox(trunc + "…")[2] - font.getbbox(trunc + "…")[0] > max_width and len(trunc) > 1:
+                    trunc = trunc[:-1]
+                lines.append(trunc + "…")
+                current_line = []
 
-    # Add remaining words to the final line
-    idx = len(" ".join(lines).split()) if lines else 0
-    remaining_words = words[idx:]
-    if remaining_words:
-        final_line = " ".join(remaining_words)
-        # If final line is still too long, truncate with ellipsis
-        while font.getbbox(final_line)[2] - font.getbbox(final_line)[0] > max_width and len(final_line) > 4:
-            final_line = final_line[:-4].rstrip() + "..."
-        lines.append(final_line)
+    if len(lines) < max_lines:
+        consumed_count = sum(len(ln.replace("…", "").split()) for ln in lines)
+        remaining_words = words[consumed_count:]
+        if remaining_words:
+            final_line = " ".join(remaining_words)
+            if font.getbbox(final_line)[2] - font.getbbox(final_line)[0] > max_width:
+                while font.getbbox(final_line + "…")[2] - font.getbbox(final_line + "…")[0] > max_width and len(final_line) > 1:
+                    final_line = final_line[:-1].rstrip()
+                final_line = final_line.rstrip(". ,;:") + "…"
+            lines.append(final_line)
+
+    return lines
 
     return lines[:max_lines]
 
@@ -297,10 +307,19 @@ def generate_ass_subtitles(
     resolution: tuple[int, int] = (1920, 1080),
     font_size: int = 54,
     margin_v: int = 70,
+    font_name: str = "Arial",
+    highlight_color: str = "#F5A623",
+    box_rgba: list[int] | None = None,
 ) -> None:
     """Generates an Advanced SubStation Alpha (.ass) subtitle file positioned in the caption band."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rx, ry = resolution
+
+    back_colour = "&H80000000"
+    if box_rgba and len(box_rgba) >= 4:
+        r, g, b, a = box_rgba[:4]
+        ass_a = max(0, min(255, 255 - int(a)))
+        back_colour = f"&H{ass_a:02X}{int(b):02X}{int(g):02X}{int(r):02X}"
 
     header = f"""[Script Info]
 Title: Nepal Daily Briefing Captions
@@ -313,7 +332,7 @@ PlayResY: {ry}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.0,2,40,40,{margin_v},1
+Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,{back_colour},-1,0,0,0,100,100,0,0,1,3.5,1.0,2,40,40,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -327,6 +346,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     full_ass = header + "\n".join(dialogues) + "\n"
     output_path.write_text(full_ass, encoding="utf-8")
+
+
+def clean_stat_label(label: str, value: str | None = None) -> str:
+    """Cleans stat card label to entity/topic, stripping duplicate numeric phrases."""
+    cleaned = label.strip()
+    if value:
+        val_clean = re.sub(r"[^\w\.\%\$]", "", value).strip()
+        if val_clean:
+            cleaned = re.sub(re.escape(val_clean), "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*[\$\€\£\¥]?\d+(?:\.\d+)?%?\s*[:\-\–]?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*[:\-\–]?\s*[\$\€\£\¥]?\d+(?:\.\d+)?%?\s*$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(". ,;:-– ")
+    return cleaned if cleaned else label.strip()
 
 
 def draw_stat_callout(
@@ -376,9 +408,10 @@ def draw_stat_callout(
     # Divider line
     draw.line((64, 175, width - 64, 175), fill=(255, 255, 255, 50), width=2)
 
-    # Label text (up to 2 lines)
-    label_lines = wrap_text(stat_label.upper(), font_label, max_width=width - 128, max_lines=2)
-    y_text = 205
+    # Clean label text (up to 2 lines, vertically balanced)
+    cleaned_label = clean_stat_label(stat_label, stat_value)
+    label_lines = wrap_text(cleaned_label.upper(), font_label, max_width=width - 128, max_lines=2)
+    y_text = 230 if len(label_lines) == 1 else 205
     for line in label_lines:
         draw.text((64, y_text), line, font=font_label, fill=(245, 166, 35, 255))
         y_text += 50

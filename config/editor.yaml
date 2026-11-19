@@ -2,12 +2,14 @@
 
 allow_opinion: false
 allow_stale_preview: false
+auto_approve_test_runs: false
 
 clustering:
   min_full_text_words: 60
   title_similarity_threshold: 0.55
   token_overlap_threshold: 0.35
-  top_clusters_limit: 12
+  top_clusters_limit: 24
+  clusters_per_category: 4
 
 budget:
   min_duration_sec: 120.0
@@ -16,12 +18,38 @@ budget:
   default_words_per_sec: 2.15
   tolerance_pct: 0.10
   scenes:
-    intro_min_words: 15
-    intro_max_words: 40
-    story_min_words: 20
-    story_max_words: 60
-    outro_min_words: 15
-    outro_max_words: 40
+    intro_min_words: 12
+    intro_max_words: 25
+    story_min_words: 10
+    story_max_words: 25
+    outro_min_words: 12
+    outro_max_words: 25
+
+broadcast_sequence:
+  - id: "scene_01"
+    category: "national_politics"
+    title: "National Politics"
+    aliases: ["national_politics", "politics", "political", "government", "parliament"]
+  - id: "scene_02"
+    category: "society_local"
+    title: "Society and Local News"
+    aliases: ["society_local", "society", "local", "education", "health", "transport", "disaster", "crime", "international", "world"]
+  - id: "scene_03"
+    category: "culture_entertainment"
+    title: "Culture and Entertainment"
+    aliases: ["culture_entertainment", "culture", "entertainment", "heritage", "festival", "arts"]
+  - id: "scene_04"
+    category: "business_economics"
+    title: "Business and Economics"
+    aliases: ["business_economics", "economy", "business", "market", "finance", "trade"]
+  - id: "scene_05"
+    category: "science_technology"
+    title: "Science and Technology"
+    aliases: ["science_technology", "technology", "science", "digital", "telecom", "cyber"]
+  - id: "scene_06"
+    category: "sports"
+    title: "Sports"
+    aliases: ["sports", "sport", "cricket", "football", "athletics"]
 
 sensitive_triggers:
   - "death"
@@ -179,6 +207,43 @@ categories:
     - "school"
     - "university"
     - "community"
+  sports:
+    - "sports"
+    - "cricket"
+    - "football"
+    - "match"
+    - "tournament"
+    - "league"
+    - "npl"
+    - "wicket"
+    - "goal"
+    - "medal"
+    - "athletics"
+  culture:
+    - "culture"
+    - "cultural"
+    - "festival"
+    - "heritage"
+    - "cinema"
+    - "film"
+    - "movie"
+    - "music"
+    - "song"
+    - "art"
+    - "artist"
+    - "theatre"
+    - "literature"
+  international:
+    - "international"
+    - "world"
+    - "foreign"
+    - "global"
+    - "diplomacy"
+    - "embassy"
+    - "ambassador"
+    - "united nations"
+    - "bilateral"
+    - "overseas"
 
 entity_aliases:
   uml:
@@ -265,6 +330,84 @@ entity_aliases:
   pokhara:
     - "pokhara"
     - "पोखरा"
+  nepal:
+    - "nepal"
+    - "नेपाल"
+  lalitpur:
+    - "lalitpur"
+    - "patan"
+    - "पाटन"
+    - "ललितपुर"
+  bhaktapur:
+    - "bhaktapur"
+    - "भक्तपुर"
+  birgunj:
+    - "birgunj"
+    - "वीरगन्ज"
+    - "वीरगञ्ज"
+  biratnagar:
+    - "biratnagar"
+    - "विराटनगर"
+  chitwan:
+    - "chitwan"
+    - "चितवन"
+  dhangadhi:
+    - "dhangadhi"
+    - "धनगढी"
+  nepalgunj:
+    - "nepalgunj"
+    - "नेपालगन्ज"
+    - "नेपालगञ्ज"
+  home_ministry:
+    - "home ministry"
+    - "ministry of home affairs"
+    - "गृह मन्त्रालय"
+    - "गृहमन्त्री"
+  finance_ministry:
+    - "finance ministry"
+    - "ministry of finance"
+    - "अर्थ मन्त्रालय"
+    - "अर्थमन्त्री"
+  foreign_ministry:
+    - "foreign ministry"
+    - "ministry of foreign affairs"
+    - "परराष्ट्र मन्त्रालय"
+    - "परराष्ट्रमन्त्री"
+  health_ministry:
+    - "health ministry"
+    - "ministry of health"
+    - "स्वास्थ्य मन्त्रालय"
+    - "स्वास्थ्यमन्त्री"
+  education_ministry:
+    - "education ministry"
+    - "ministry of education"
+    - "शिक्षा मन्त्रालय"
+    - "शिक्षामन्त्री"
+  supreme_court:
+    - "supreme court"
+    - "सर्वोच्च अदालत"
+    - "सर्वोच्च"
+  police:
+    - "nepal police"
+    - "नेपाल प्रहरी"
+    - "प्रहरी"
+  army:
+    - "nepal army"
+    - "नेपाली सेना"
+    - "सेना"
+  election_commission:
+    - "election commission"
+    - "निर्वाचन आयोग"
+  rpp:
+    - "rastriya prajatantra party"
+    - "rpp"
+    - "राप्रपा"
+    - "राष्ट्रिय प्रजातन्त्र पार्टी"
+  jsp:
+    - "janata samajbadi party"
+    - "jsp"
+    - "जसपा"
+    - "जनता समाजवादी पार्टी"
 
 acronym_blocklist:
   - "NEA"
@@ -301,5 +444,5 @@ deduplication:
 llm_curator:
   enabled: true
   timeout_sec: 60
-  max_candidates: 60
+  max_candidates: 40
 

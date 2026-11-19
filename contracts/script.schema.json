@@ -89,9 +89,12 @@
           "category": {
             "type": ["string", "null"],
             "enum": [
+              "national_politics", "society_local", "culture_entertainment",
+              "business_economics", "science_technology", "sports",
               "politics", "economy", "weather", "health", "transport",
               "crime", "disaster", "environment", "society",
-              "technology", "tourism", "other", null
+              "technology", "tourism", "culture", "entertainment",
+              "science", "business", "other", null
             ],
             "description": "Editorial category of the story scene"
           },

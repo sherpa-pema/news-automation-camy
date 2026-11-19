@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 import yaml
 
-from src.agents.motion import MotionAgent
+from src.agents.motion import MotionAgent, classify_shot_recipe
 from src.utils.motion_graphics import (
     draw_lower_third,
     draw_outro_card,
@@ -105,6 +105,61 @@ def test_overlay_safe_zone_and_non_overlap(style_config: dict[str, Any]) -> None
         assert (tag["y"] + tag["h"]) <= cb["y"], (
             f"Layout {tag_key} bottom ({tag['y'] + tag['h']}) collides with caption band top ({cb['y']})"
         )
+
+
+def test_vertical_overlay_safe_zone_and_non_overlap(style_config: dict[str, Any]) -> None:
+    layout = style_config.get("layout_rectangles_vertical", {})
+    assert layout, "layout_rectangles_vertical must be configured in style.yaml"
+    safe = style_config.get("safe_margin_pct", 0.05)
+    assert safe == 0.05
+
+    # Safe boundaries in 1080x1920:
+    min_x, max_x = 1080 * safe, 1080 * (1 - safe)
+    min_y, max_y = 1920 * safe, 1920 * (1 - safe)
+
+    # Lower third
+    lt = layout["lower_third"]
+    assert lt["x"] >= min_x
+    assert lt["x"] + lt["w"] <= max_x
+    assert lt["y"] >= min_y
+    assert lt["y"] + lt["h"] <= max_y
+
+    # Caption band
+    cb = layout["caption_band"]
+    assert cb["y"] >= min_y
+    assert cb["y"] + cb["h"] <= max_y
+
+    # Strict non-overlap: lower third must sit ABOVE the caption band
+    assert (lt["y"] + lt["h"]) <= cb["y"], (
+        f"Vertical lower third bottom ({lt['y'] + lt['h']}) collides with caption band top ({cb['y']})"
+    )
+
+    # Vertical caption_margin_v must be >= 300 to clear mobile UI (TikTok/Reels)
+    assert layout.get("caption_margin_v", 0) >= 300
+
+    # Tags and Shotcraft cards
+    for tag_key in ["illustrative_tag", "test_run_tag", "stat_callout", "quote_card", "headline_split"]:
+        tag = layout[tag_key]
+        assert tag["x"] >= min_x, f"{tag_key} x ({tag['x']}) violates min_x ({min_x})"
+        assert tag["x"] + tag["w"] <= max_x, f"{tag_key} right ({tag['x'] + tag['w']}) violates max_x ({max_x})"
+        assert tag["y"] >= min_y, f"{tag_key} y ({tag['y']}) violates min_y ({min_y})"
+        assert tag["y"] + tag["h"] <= max_y, f"{tag_key} bottom ({tag['y'] + tag['h']}) violates max_y ({max_y})"
+        assert (tag["y"] + tag["h"]) <= cb["y"], (
+            f"Layout {tag_key} bottom ({tag['y'] + tag['h']}) collides with caption band top ({cb['y']})"
+        )
+
+
+def test_ass_generation_vertical_resolution(tmp_path: Path, sample_captions: list[dict[str, Any]]) -> None:
+    ass_path = tmp_path / "vertical_test.ass"
+    generate_ass_subtitles(sample_captions, ass_path, resolution=(1080, 1920), font_size=44, margin_v=380)
+
+    assert ass_path.exists()
+    content = ass_path.read_text(encoding="utf-8")
+
+    assert "PlayResX: 1080" in content
+    assert "PlayResY: 1920" in content
+    assert "Style: Default,Arial,44" in content
+    assert ",40,40,380,1" in content
 
 
 def test_pillow_overlay_generation(tmp_path: Path, style_config: dict[str, Any]) -> None:
@@ -236,14 +291,14 @@ def test_motion_agent_plan_creation_and_watermark(tmp_path: Path) -> None:
             {
                 "id": "shot_0",
                 "scene_id": "intro",
-                "file_path": "media/shots/intro_0.jpg",
+                "file": "media/shots/intro_0.jpg",
                 "type": "image",
                 "source": "pixabay",
             },
             {
                 "id": "shot_1",
                 "scene_id": "scene_01",
-                "file_path": "media/shots/s1_0.jpg",
+                "file": "media/shots/s1_0.jpg",
                 "type": "image",
                 "source": "wikimedia_commons",
                 "attribution_required": True,
@@ -251,7 +306,7 @@ def test_motion_agent_plan_creation_and_watermark(tmp_path: Path) -> None:
             {
                 "id": "shot_2",
                 "scene_id": "outro",
-                "file_path": "media/shots/outro_0.jpg",
+                "file": "media/shots/outro_0.jpg",
                 "type": "image",
                 "source": "pixabay",
             },
@@ -284,3 +339,118 @@ def test_motion_agent_plan_creation_and_watermark(tmp_path: Path) -> None:
     assert len(scenes) == 3
     assert scenes[1].get("shot_recipe") is not None
     assert "beat_aligned" in scenes[1]
+
+    # Verify every shot has non-empty schema-valid 'file' field
+    for sc in scenes:
+        for sh in sc.get("shots", []):
+            assert sh.get("file"), f"Scene {sc.get('id')} shot has empty 'file' field"
+
+
+def test_quote_regex_ignores_apostrophes() -> None:
+    # Apostrophes in English text (e.g. possessives) must never be matched as quote boundaries
+    sc_script = {
+        "id": "scene_04",
+        "type": "story",
+        "headline": "Koshi left without province chief as Khapung's term ends",
+        "narration": "Koshi province has no province chief after Parshuram Khapung's five-year term ended on Sunday.",
+    }
+    recipe, data = classify_shot_recipe(sc_script)
+    assert recipe != "quote_card", f"Expected non-quote recipe, got {recipe} with data {data}"
+
+
+def test_quote_regex_matches_real_quotes() -> None:
+    # Real quotes enclosed in standard double quotes or directional quotes should match
+    sc_script = {
+        "id": "scene_04",
+        "type": "story",
+        "headline": "Historic agreement reached",
+        "narration": 'The prime minister said "This agreement secures our clean energy transition" at the summit.',
+    }
+    recipe, data = classify_shot_recipe(sc_script)
+    assert recipe == "quote_card"
+    assert "clean energy transition" in data.get("quote", "")
+
+
+def test_caption_margin_v_config(style_config: dict[str, Any]) -> None:
+    layout = style_config.get("layout_rectangles", {})
+    margin_v = layout.get("caption_margin_v")
+    assert margin_v is not None
+    assert margin_v >= 100, f"caption_margin_v must be >= 100 to clear player controls (got {margin_v})"
+
+
+def test_featured_card_excludes_lower_third(tmp_path: Path) -> None:
+    script_dir = tmp_path / "script"
+    script_dir.mkdir(parents=True)
+    script_data = {
+        "run_kind": "test",
+        "origin": "fixture",
+        "scenes": [
+            {"id": "intro", "type": "intro", "headline": "Daily Intro"},
+            {
+                "id": "scene_01",
+                "type": "story",
+                "headline": "Historic speech delivered",
+                "narration": 'President Paudel stated "We must preserve unity and uphold justice" before parliament.',
+                "source": "MyRepublica",
+                "sources": ["MyRepublica"],
+                "source_urls": ["https://example.com/1"],
+            },
+            {"id": "outro", "type": "outro", "headline": "Summary"},
+        ],
+    }
+    with open(script_dir / "script.json", "w", encoding="utf-8") as f:
+        json.dump(script_data, f)
+
+    tl_dir = tmp_path / "timeline"
+    tl_dir.mkdir(parents=True)
+    tl_data = {
+        "scenes": [
+            {"id": "intro", "type": "intro", "start": 0.0, "end": 4.0, "speech_start": 0.5, "speech_end": 3.5},
+            {"id": "scene_01", "type": "story", "start": 4.0, "end": 10.0, "speech_start": 4.5, "speech_end": 9.5},
+            {"id": "outro", "type": "outro", "start": 10.0, "end": 14.0, "speech_start": 10.5, "speech_end": 13.5},
+        ]
+    }
+    with open(tl_dir / "timeline.json", "w", encoding="utf-8") as f:
+        json.dump(tl_data, f)
+
+    with open(tl_dir / "captions.json", "w", encoding="utf-8") as f:
+        json.dump(
+            [
+                {"id": "c1", "scene_id": "intro", "start": 0.5, "end": 3.0, "text": "Welcome to news"},
+                {"id": "c2", "scene_id": "scene_01", "start": 4.5, "end": 9.0, "text": "Historic speech delivered"},
+            ],
+            f,
+        )
+
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir(parents=True)
+    create_silence_wav(audio_dir / "narration.wav", duration_sec=14.0)
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True)
+    media_data = {
+        "resolution": {"width": 1920, "height": 1080},
+        "fps": 30,
+        "shots": [
+            {"id": "shot_0", "scene_id": "intro", "file": "media/shots/intro_0.jpg", "type": "image", "source": "pixabay"},
+            {"id": "shot_1", "scene_id": "scene_01", "file": "media/shots/s1_0.jpg", "type": "image", "source": "wikimedia_commons"},
+            {"id": "shot_2", "scene_id": "outro", "file": "media/shots/outro_0.jpg", "type": "image", "source": "pixabay"},
+        ],
+    }
+    with open(media_dir / "media_manifest.json", "w", encoding="utf-8") as f:
+        json.dump(media_data, f)
+
+    agent = MotionAgent(run_dir=tmp_path)
+    agent.run()
+
+    with open(tmp_path / "motion" / "render_plan.json", "r", encoding="utf-8") as f:
+        plan = json.load(f)
+
+    story_scene = [s for s in plan["scenes"] if s["id"] == "scene_01"][0]
+    assert story_scene.get("shot_recipe") == "quote_card"
+
+    overlay_types = [o["type"] for o in story_scene.get("overlays", [])]
+    assert "quote_card" in overlay_types
+    # Lower third must NOT be scheduled when quote_card is present
+    assert "lower_third" not in overlay_types
+

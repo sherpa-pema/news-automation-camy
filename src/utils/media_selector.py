@@ -283,6 +283,7 @@ class MediaSelector:
         self.watermark_markers = set(w.lower() for w in config.get("watermark_markers", []))
 
         # Relevance scoring configuration
+        self.orientation = str(config.get("settings", {}).get("orientation", "landscape"))
         self.foreign_places = [fp.lower() for fp in config.get("foreign_places", DEFAULT_FOREIGN_PLACES)]
         self.min_relevance = float(config.get("settings", {}).get("min_relevance", 0.5))
 
@@ -534,7 +535,7 @@ class MediaSelector:
                     candidates = src.search(
                         query=query,
                         kind=prefer_kind,
-                        orientation="landscape",
+                        orientation=self.orientation,
                         offline=self.offline,
                         scene_category=category,
                         is_sensitive=is_sensitive,

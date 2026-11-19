@@ -20,6 +20,7 @@ from src.utils.editor_validator import (
 )
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest, save_manifest
+from src.utils.office_events import emit_office_event
 
 logger = logging.getLogger("render")
 
@@ -59,6 +60,11 @@ def compute_scene_cache_key(sc: dict[str, Any], style_hash: str) -> str:
                 "end": ov.get("end"),
                 "x": ov.get("x"),
                 "y": ov.get("y"),
+                "w": ov.get("w"),
+                "h": ov.get("h"),
+                "animation": ov.get("animation"),
+                "fade_in": ov.get("fade_in"),
+                "fade_out": ov.get("fade_out"),
             }
             for ov in sc.get("overlays", [])
         ],
@@ -142,12 +148,21 @@ class RenderAgent(BaseAgent):
         output_path: Path,
         crf: int = 20,
         preset: str = "veryfast",
+        global_overlays: list[dict[str, Any]] | None = None,
     ) -> None:
         """Builds a frame-exact silent MP4 segment for a single scene with shots, dips, and overlays."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
         tw, th = target_res
         shots = sc.get("shots", [])
-        overlays = sc.get("overlays", [])
+        overlays = list(sc.get("overlays", []))
+        if global_overlays:
+            sc_start_f = float(sc.get("start", 0.0))
+            sc_end_f = float(sc.get("end", 0.0))
+            for g_ov in global_overlays:
+                if any(ov.get("id") == g_ov.get("id") for ov in overlays):
+                    continue
+                if max(float(g_ov.get("start", 0.0)), sc_start_f) < min(float(g_ov.get("end", 0.0)), sc_end_f):
+                    overlays.append(g_ov)
         sc_dur = float(sc["end"]) - float(sc["start"])
         sc_frames = int(round(sc_dur * fps))
 
@@ -163,19 +178,22 @@ class RenderAgent(BaseAgent):
                 shot_rel = shot.get("file")
                 shot_path = (self.run_dir / shot_rel) if shot_rel else None
                 has_file = shot_path is not None and shot_path.exists()
+                is_image = has_file and (
+                    shot.get("type") in ("image", "card")
+                    or str(shot_path).lower().endswith((".jpg", ".jpeg", ".png"))
+                )
                 if not has_file:
                     # Generate solid color fallback for missing shot
                     shot_path_str = f"color=c=navy:s={tw}x{th}:d={shot.get('duration', 5.0):.3f}:r={fps}"
                     inputs.extend(["-f", "lavfi", "-i", shot_path_str])
                 else:
-                    inputs.extend(["-i", str(shot_path)])
+                    if is_image:
+                        inputs.extend(["-loop", "1", "-i", str(shot_path)])
+                    else:
+                        inputs.extend(["-i", str(shot_path)])
 
                 shot_dur = float(shot.get("duration", 5.0))
                 shot_frames = max(1, int(round(shot_dur * fps)))
-                is_image = has_file and (
-                    shot.get("type") in ("image", "card")
-                    or str(shot_path).lower().endswith((".jpg", ".jpeg", ".png"))
-                )
 
                 if is_image:
                     still_zoom_cfg = self.style_config.get("transitions", {}).get("still_zoom", {})
@@ -183,6 +201,10 @@ class RenderAgent(BaseAgent):
                     start_scale = float(still_zoom_cfg.get("start_scale", 1.00))
                     end_scale = float(still_zoom_cfg.get("end_scale", 1.08))
                     motion_name = shot.get("motion")
+
+                    # Supersampled canvas to eliminate sub-pixel jitter
+                    stw = tw * 2
+                    sth = th * 2
 
                     if slow_zoom_enabled and shot_frames > 1 and motion_name != "none":
                         scale_delta = end_scale - start_scale
@@ -194,9 +216,21 @@ class RenderAgent(BaseAgent):
                     else:
                         z_expr = f"{start_scale:.4f}"
 
+                    # Variety pan anchors
+                    if idx % 3 == 1:
+                        y_anchor = "ih/2.3-(ih/zoom/2)"
+                        x_anchor = "iw/2-(iw/zoom/2)"
+                    elif idx % 3 == 2:
+                        y_anchor = "ih/1.7-(ih/zoom/2)"
+                        x_anchor = "iw/2-(iw/zoom/2)"
+                    else:
+                        y_anchor = "ih/2-(ih/zoom/2)"
+                        x_anchor = "iw/2-(iw/zoom/2)"
+
                     filter_parts.append(
-                        f"[{idx}:v]scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
-                        f"zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={shot_frames}:s={tw}x{th}:fps={fps},"
+                        f"[{idx}:v]scale={stw}:{sth}:force_original_aspect_ratio=decrease,pad={stw}:{sth}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                        f"zoompan=z='{z_expr}':x='{x_anchor}':y='{y_anchor}':d={shot_frames}:s={stw}x{sth}:fps={fps},"
+                        f"scale={tw}:{th}:flags=lanczos,"
                         f"trim=duration={shot_dur:.3f},setpts=PTS-STARTPTS,format=yuv420p[shot_{idx}];"
                     )
                 else:
@@ -216,22 +250,67 @@ class RenderAgent(BaseAgent):
             ov_path = self.run_dir / ov["png"]
             if not ov_path.exists():
                 continue
-            inputs.extend(["-i", str(ov_path)])
+            inputs.extend(["-loop", "1", "-i", str(ov_path)])
             in_idx = shot_input_count + ov_idx
 
             rel_start = max(0.0, float(ov["start"]) - float(sc["start"]))
             rel_end = max(rel_start + 0.1, float(ov["end"]) - float(sc["start"]))
+            ov_dur = rel_end - rel_start
+
+            fade_in = max(0.05, float(ov.get("fade_in", 0.2)))
+            fade_out = max(0.05, float(ov.get("fade_out", 0.2)))
+            fade_in = min(fade_in, ov_dur / 2.0)
+            fade_out = min(fade_out, ov_dur / 2.0)
+            fade_out_st = max(0.0, ov_dur - fade_out)
+
+            animation = ov.get("animation", "fade")
             ox = int(ov.get("x", 0))
             oy = int(ov.get("y", 0))
 
+            # 1. Prepare RGBA stream with alpha fades and PTS shift
+            anim_stream = f"[anim_ov_{ov_idx}]"
+            filter_parts.append(
+                f"[{in_idx}:v]format=rgba,trim=duration={ov_dur:.3f},fps={fps},setpts=PTS-STARTPTS,"
+                f"fade=t=in:st=0:d={fade_in:.3f}:alpha=1,"
+                f"fade=t=out:st={fade_out_st:.3f}:d={fade_out:.3f}:alpha=1,"
+                f"setpts=PTS+{rel_start:.3f}/TB{anim_stream};"
+            )
+
+            # 2. Clamped cubic ease-out position interpolations
+            if animation == "slide_up":
+                slide_dist = 40
+                y_expr = f"{oy}+{slide_dist}*pow(1-min(max((t-{rel_start:.3f})/{fade_in:.3f},0),1),3)"
+                x_expr = str(ox)
+            elif animation == "slide_right":
+                slide_dist = 50
+                x_expr = f"{ox}-{slide_dist}*pow(1-min(max((t-{rel_start:.3f})/{fade_in:.3f},0),1),3)"
+                y_expr = str(oy)
+            else:
+                x_expr = str(ox)
+                y_expr = str(oy)
+
             next_stream = f"[ov_{ov_idx}]"
             filter_parts.append(
-                f"{current_stream}[{in_idx}:v]overlay=x={ox}:y={oy}:enable='between(t,{rel_start:.3f},{rel_end:.3f})'{next_stream};"
+                f"{current_stream}{anim_stream}overlay=x='{x_expr}':y='{y_expr}':eof_action=pass:"
+                f"enable='between(t,{rel_start:.3f},{rel_end:.3f})'{next_stream};"
             )
             current_stream = next_stream
 
-        # 3. Dip to black (0.1s in, 0.1s out)
-        filter_parts.append(f"{current_stream}fade=t=in:st=0:d=0.1,fade=t=out:st={max(0.1, sc_dur - 0.1):.3f}:d=0.1[outv]")
+        # 3. Transitions (reads resolved transition numbers from plan)
+        trans = sc.get("transition", {})
+        trans_type = trans.get("type", "cut")
+        trans_dur = float(trans.get("duration_sec", 0.0))
+        fade_out = float(trans.get("fade_out_sec", trans_dur / 2.0))
+        fade_in = float(trans.get("fade_in_sec", trans_dur / 2.0))
+
+        if trans_type == "dip_to_black" and trans_dur > 0:
+            st_out = max(fade_out, sc_dur - fade_out)
+            filter_parts.append(f"{current_stream}fade=t=in:st=0:d={fade_in:.3f},fade=t=out:st={st_out:.3f}:d={fade_out:.3f}[outv]")
+        elif trans_type == "fade_white" and trans_dur > 0:
+            st_out = max(fade_out, sc_dur - fade_out)
+            filter_parts.append(f"{current_stream}fade=t=in:st=0:d={fade_in:.3f}:color=white,fade=t=out:st={st_out:.3f}:d={fade_out:.3f}:color=white[outv]")
+        else:
+            filter_parts.append(f"{current_stream}null[outv]")
 
         filter_graph = "".join(filter_parts)
 
@@ -423,6 +502,8 @@ class RenderAgent(BaseAgent):
             script_data=script_data,
             style_config=self.style_config,
         )
+        with open(plan_file, "w", encoding="utf-8") as pf:
+            json.dump(plan_data, pf, indent=2)
 
         # Output folders
         render_dir = self.run_dir / "render"
@@ -432,25 +513,40 @@ class RenderAgent(BaseAgent):
 
         # Parameters
         fps = int(plan_data.get("fps", 30))
-        res_cfg = self.style_config.get("video", {}).get("resolution", [1920, 1080])
+        plan_res = plan_data.get("resolution")
+        if plan_res and isinstance(plan_res, str) and "x" in plan_res:
+            parts = [int(p) for p in plan_res.split("x")]
+            res_cfg = [parts[0], parts[1]]
+        elif isinstance(plan_res, (list, tuple)) and len(plan_res) >= 2:
+            res_cfg = [int(plan_res[0]), int(plan_res[1])]
+        else:
+            res_cfg = self.style_config.get("video", {}).get("resolution", [1920, 1080])
+
         crf = int(self.style_config.get("video", {}).get("crf", 20))
         preset = str(self.style_config.get("video", {}).get("preset", "veryfast"))
 
         if preview:
             prev_cfg = self.style_config.get("preview", {})
-            res_cfg = prev_cfg.get("resolution", [960, 540])
             crf = int(prev_cfg.get("crf", 30))
             preset = str(prev_cfg.get("preset", "ultrafast"))
-
-        target_res = (int(res_cfg[0]), int(res_cfg[1]))
+            target_res = (int(res_cfg[0]) // 2, int(res_cfg[1]) // 2)
+        else:
+            target_res = (int(res_cfg[0]), int(res_cfg[1]))
         style_hash = hashlib.sha256(json.dumps(self.style_config, sort_keys=True).encode("utf-8")).hexdigest()[:8]
+
+        final_mp4_name = "final_preview.mp4" if preview else "final.mp4"
+        final_mp4_path = render_dir / final_mp4_name
 
         # Step 1: Render or reuse cached scene segments
         scene_segment_paths: list[Path] = []
         scenes = plan_data.get("scenes", [])
+        global_overlays = [ov for ov in plan_data.get("overlays", []) if ov.get("scene_id") is None]
         cache_hits = 0
 
-        for sc in scenes:
+        total_scenes = len(scenes)
+        render_start_time = time.time()
+
+        for i, sc in enumerate(scenes, 1):
             sc_id = sc["id"]
             sc_key = compute_scene_cache_key(sc, style_hash)
             cached_segment = cache_dir / f"scene_{sc_id}_{sc_key}_{target_res[0]}x{target_res[1]}.mp4"
@@ -460,6 +556,22 @@ class RenderAgent(BaseAgent):
                 need_render = False
             elif not only_scene and cached_segment.exists() and cached_segment.stat().st_size > 1000:
                 need_render = False
+
+            elapsed = time.time() - render_start_time
+            avg_per_scene = elapsed / (i - 1) if i > 1 else None
+            remaining = total_scenes - i + 1
+            eta = round(avg_per_scene * remaining) if avg_per_scene else None
+
+            msg = f"Rendering scene {i}/{total_scenes} ({sc_id})" if need_render else f"Reusing cached scene {i}/{total_scenes} ({sc_id})"
+            emit_office_event(
+                self.run_dir,
+                "substage_progress",
+                stage="render",
+                current=i,
+                total=total_scenes,
+                message=msg,
+                extra={"scene_id": sc_id, "eta_seconds": eta},
+            )
 
             if not need_render:
                 self.logger.info(f"Reusing cached segment for scene '{sc_id}' ({cached_segment.name})")
@@ -473,11 +585,21 @@ class RenderAgent(BaseAgent):
                     output_path=cached_segment,
                     crf=crf,
                     preset=preset,
+                    global_overlays=global_overlays,
                 )
 
             scene_segment_paths.append(cached_segment)
 
         # Step 2: Concatenate segments into video_noaudio.mp4
+        emit_office_event(
+            self.run_dir,
+            "substage_progress",
+            stage="render",
+            current=total_scenes,
+            total=total_scenes,
+            message=f"Concatenating {total_scenes} scene segments and muxing audio...",
+            extra={"scene_id": "concat", "eta_seconds": 5},
+        )
         concat_list_file = render_dir / "concat_segments.txt"
         concat_lines = [f"file '{p.resolve().as_posix()}'" for p in scene_segment_paths]
         concat_list_file.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")

@@ -1,5 +1,6 @@
 """Editor Agent implementation for Nepal News Bot."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -209,15 +210,74 @@ class EditorAgent(BaseAgent):
 
         logger.info(f"Read {len(articles)} raw articles from {raw_articles_path}.")
 
-        # 1. Cluster and rank (including 48-hour cross-day deduplication memory)
+        # 1 & 2. Cluster/rank articles and compute speech-rate budget in parallel when budget isn't frozen
         prior_stories = self._load_prior_stories()
-        shortlist, opinion_clusters, stale_clusters = cluster_articles(
-            articles,
-            self.editor_cfg,
-            return_opinion=True,
-            return_stale=True,
-            prior_stories=prior_stories,
+        budget_path = self.script_dir / "budget.json"
+        budget_details: dict[str, Any] | None = None
+
+        if budget_path.exists():
+            shortlist, opinion_clusters, stale_clusters = cluster_articles(
+                articles,
+                self.editor_cfg,
+                return_opinion=True,
+                return_stale=True,
+                prior_stories=prior_stories,
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                cluster_fut = pool.submit(
+                    cluster_articles,
+                    articles,
+                    self.editor_cfg,
+                    True,
+                    True,
+                    None,
+                    prior_stories,
+                )
+                budget_fut = pool.submit(calculate_words_per_second_details, self.run_dir.parent)
+                shortlist, opinion_clusters, stale_clusters = cluster_fut.result()
+                budget_details = budget_fut.result()
+
+        # Defense-in-depth: drop off-topic clusters when the run targets specific topic categories
+        raw_selected_cats = (
+            manifest.get("selected_categories")
+            or manifest.get("stages", {}).get("scraper", {}).get("metrics", {}).get("selected_categories")
+            or []
         )
+        selected_cats_norm = [str(c).strip().lower() for c in raw_selected_cats if str(c).strip()]
+        if selected_cats_norm and "all" not in selected_cats_norm and "headlines" not in selected_cats_norm:
+            from src.agents.scraper import CATEGORY_ALIAS_MAP
+
+            allowed_aliases: set[str] = set()
+            for sel in selected_cats_norm:
+                allowed_aliases.update(CATEGORY_ALIAS_MAP.get(sel, {sel}))
+
+            filtered_shortlist = []
+            dropped_off_topic = 0
+            for cl in shortlist:
+                c_cat = str(cl.get("category_guess") or "other").strip().lower()
+                if c_cat in allowed_aliases:
+                    filtered_shortlist.append(cl)
+                elif c_cat == "other":
+                    # Keep uncategorized clusters if any member article matched the requested category
+                    member_cats = {
+                        str(a.get("category_hint") or "").strip().lower()
+                        for a in cl.get("articles", [])
+                    }
+                    if member_cats & allowed_aliases:
+                        filtered_shortlist.append(cl)
+                    else:
+                        dropped_off_topic += 1
+                else:
+                    dropped_off_topic += 1
+
+            if dropped_off_topic > 0 and filtered_shortlist:
+                logger.info(
+                    f"Filtered out {dropped_off_topic} off-topic cluster(s) outside requested categories "
+                    f"({', '.join(selected_cats_norm)})."
+                )
+                shortlist = filtered_shortlist
+
         logger.info(
             f"Clustering complete. Formed {len(shortlist)} shortlisted news clusters, "
             f"{len(opinion_clusters)} excluded opinion clusters, and "
@@ -228,8 +288,7 @@ class EditorAgent(BaseAgent):
         with open(shortlist_path, "w", encoding="utf-8") as f:
             json.dump(shortlist, f, indent=2)
 
-        # 2. Compute and freeze speech-rate budget (write script/budget.json once)
-        budget_path = self.script_dir / "budget.json"
+        # Freeze speech-rate budget (write script/budget.json once)
         if budget_path.exists():
             with open(budget_path, "r", encoding="utf-8") as bf:
                 frozen = json.load(bf)
@@ -252,7 +311,7 @@ class EditorAgent(BaseAgent):
                 if k in frozen:
                     budget[k] = frozen[k]
         else:
-            details = calculate_words_per_second_details(self.run_dir.parent)
+            details = budget_details if budget_details is not None else calculate_words_per_second_details(self.run_dir.parent)
             wps = float(details["words_per_second"])
             sps = float(details.get("syllables_per_second", 3.3))
             comma_pause = float(details.get("comma_pause_sec", 0.25))
@@ -351,7 +410,7 @@ class EditorAgent(BaseAgent):
         print(f"\n[OK] Prepared shortlist and editor brief.\n{next_action}\n")
         return [str(shortlist_path), str(brief_path), str(budget_path)]
 
-    def validate_draft(self, manifest: dict[str, Any]) -> list[str]:
+    def validate_draft(self, manifest: dict[str, Any], auto_approve: bool | None = None) -> list[str]:
         """Step 2 (validate): Validates draft_script.json. On pass, writes script.json and script_preview.md."""
         if manifest.get("status") == "abandoned":
             raise RuntimeError(f"Run '{self.run_dir.name}' is abandoned. No stage may run on it.")
@@ -544,6 +603,20 @@ class EditorAgent(BaseAgent):
         )
 
         logger.info(f"Validation PASSED. Wrote {script_path} and {preview_path}.")
+
+        should_auto_approve = (
+            auto_approve is True
+            or (
+                auto_approve is None
+                and effective_run_kind == "test"
+                and bool(self.editor_cfg.get("auto_approve_test_runs", False))
+            )
+        )
+        if should_auto_approve:
+            logger.info("Auto-approving validated draft (auto_approve enabled).")
+            self.approve(manifest)
+            return [str(script_path), str(preview_path), str(report_path), str(self.script_dir / "approval.json")]
+
         next_action = (
             f"Next action: Review {preview_path} and run:\n"
             f"  python -m src.agents.editor approve --date {self.run_dir.name}"
@@ -638,6 +711,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("action", choices=["prepare", "validate", "approve", "write"], help="Action to execute")
     parser.add_argument("--date", default=date.today().isoformat(), help="Run date (YYYY-MM-DD)")
     parser.add_argument("--provider", default=None, help="Optional LLM provider (gemini, anthropic, openai, ollama)")
+    parser.add_argument("--auto-approve", action="store_true", help="Automatically approve validated draft if validation passes cleanly")
     return parser.parse_args()
 
 
@@ -659,12 +733,16 @@ def main() -> int:
         from src.utils.llm_writer import generate_and_validate_draft
 
         res = generate_and_validate_draft(run_dir, provider=args.provider)
+        if res.get("ok") and args.auto_approve:
+            manifest = load_manifest(manifest_path) if manifest_path.exists() else {"stages": {}}
+            agent.approve(manifest)
+            res["auto_approved"] = True
         print(json.dumps(res, indent=2))
         return 0 if res.get("ok") else 1
     elif args.action == "validate":
-        agent.validate_draft(manifest)
+        agent.validate_draft(manifest, auto_approve=True if args.auto_approve else None)
         stage_status = manifest.get("stages", {}).get("editor", {}).get("status")
-        return 0 if stage_status == "awaiting_approval" else 1
+        return 0 if stage_status in ("awaiting_approval", "done") else 1
     elif args.action == "approve":
         agent.approve(manifest)
         return 0

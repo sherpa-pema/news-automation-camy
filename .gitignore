@@ -16,6 +16,8 @@ ENV/
 vendor/
 models/
 data/tts_tests/
+data/benchmarks/
+data/pronunciation_audit/
 
 # Environment Variables
 .env
@@ -41,3 +43,5 @@ logs/
 Thumbs.db
 
 data/cache/
+data/state/
+

@@ -86,6 +86,11 @@ class Orchestrator:
         backfill: bool = False,
         media_auto: bool = False,
         run_kind: str | None = None,
+        orientation: str | None = None,
+        allow_robots_fallback: bool = False,
+        force_source: str | None = None,
+        categories: list[str] | str | None = None,
+        automated: bool = False,
     ) -> None:
         self.run_date = run_date or get_kathmandu_today()
         self.config_dir = Path(config_dir)
@@ -96,6 +101,11 @@ class Orchestrator:
         self.backfill = backfill
         self.media_auto = media_auto
         self.run_kind = run_kind
+        self.orientation = orientation
+        self.allow_robots_fallback = allow_robots_fallback
+        self.force_source = force_source
+        self.categories = categories
+        self.automated = automated
         self._manifest_lock = threading.Lock()
 
         # Setup logger
@@ -104,6 +114,20 @@ class Orchestrator:
         # Load configs
         self.pipeline_config = self._load_yaml(self.config_dir / "pipeline.yaml")
         self.sources_config = self._load_yaml(self.config_dir / "sources.yaml")
+
+        if self.manifest_path.exists():
+            try:
+                m = load_manifest(self.manifest_path)
+                if not self.orientation and m.get("orientation"):
+                    self.orientation = m.get("orientation")
+            except Exception:
+                pass
+
+        if self.orientation:
+            for stg in self.pipeline_config.get("stages", []):
+                if stg.get("id") == "media":
+                    stg["orientation"] = self.orientation
+                    stg["resolution"] = [1080, 1920] if self.orientation == "vertical" else [1920, 1080]
 
     def _save_manifest_locked(self, manifest: dict[str, Any], active_process: bool = True) -> None:
         """Saves manifest and status.md under the thread lock."""
@@ -130,13 +154,23 @@ class Orchestrator:
         if self.manifest_path.exists():
             self.logger.info(f"Resuming existing run from {self.manifest_path}")
             manifest = load_manifest(self.manifest_path)
+            changed = False
             if self.run_kind and not manifest.get("run_kind"):
                 manifest["run_kind"] = self.run_kind
+                changed = True
+            if self.orientation and manifest.get("orientation") != self.orientation:
+                manifest["orientation"] = self.orientation
+                manifest["resolution"] = [1080, 1920] if self.orientation == "vertical" else [1920, 1080]
+                changed = True
+            if changed:
                 save_manifest(manifest, self.manifest_path)
         else:
             self.logger.info(f"Initializing new run at {self.run_dir}")
             manifest = create_initial_manifest(self.run_date, self.run_date, self.pipeline_config)
             manifest["run_kind"] = self.run_kind or self._default_run_kind()
+            if self.orientation:
+                manifest["orientation"] = self.orientation
+                manifest["resolution"] = [1080, 1920] if self.orientation == "vertical" else [1920, 1080]
             save_manifest(manifest, self.manifest_path)
 
         return manifest
@@ -281,13 +315,33 @@ class Orchestrator:
                         raise ValueError("validator or editor config changed since validation, re-run validate and approve")
 
         if stage_id == "scraper":
-            agent = agent_cls(self.run_dir, config=self.pipeline_config, backfill=self.backfill)
+            scraper_kwargs: dict[str, Any] = {
+                "config": self.pipeline_config,
+                "backfill": self.backfill,
+            }
+            try:
+                import inspect
+                sig = inspect.signature(agent_cls.__init__)
+                params = sig.parameters
+                has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                if has_var_kw or "allow_robots_fallback" in params:
+                    scraper_kwargs["allow_robots_fallback"] = self.allow_robots_fallback
+                if has_var_kw or "force_source" in params:
+                    scraper_kwargs["force_source"] = self.force_source
+                if has_var_kw or "categories" in params:
+                    scraper_kwargs["categories"] = self.categories
+                if has_var_kw or "interactive" in params:
+                    scraper_kwargs["interactive"] = False if self.automated else None
+            except Exception:
+                pass
+            agent = agent_cls(self.run_dir, **scraper_kwargs)
         elif stage_id == "media":
             agent = agent_cls(
                 self.run_dir,
                 config=self.pipeline_config,
                 allow_fixture=self.allow_fixture,
                 auto=self.media_auto,
+                orientation=self.orientation,
             )
         else:
             agent = agent_cls(self.run_dir, config=self.pipeline_config)
@@ -310,7 +364,10 @@ class Orchestrator:
 
             try:
                 # Execute agent
-                output_files = agent.run(manifest)
+                try:
+                    output_files = agent.run(manifest, save_manifest_to_disk=False)
+                except TypeError:
+                    output_files = agent.run(manifest)
 
                 # Check if agent entered a pause state (prepared, needs_revision, awaiting_approval)
                 current_stage_status = manifest.get("stages", {}).get(stage_id, {}).get("status")
@@ -352,8 +409,15 @@ class Orchestrator:
                     raise ValueError(f"Contract validation failed: {validation_err}")
 
                 # Mark stage done
+                agent_metrics = getattr(agent, "last_metrics", None)
                 with self._manifest_lock:
-                    update_stage_status(manifest, stage_id, "done", output_files=output_files)
+                    update_stage_status(
+                        manifest,
+                        stage_id,
+                        "done",
+                        output_files=output_files,
+                        metrics=agent_metrics,
+                    )
                     save_manifest(manifest, self.manifest_path)
                     write_status_md(self.run_dir, manifest)
                 emit_office_event(
@@ -898,6 +962,7 @@ class Orchestrator:
                         config=self.pipeline_config,
                         allow_fixture=self.allow_fixture,
                         auto=False,
+                        orientation=self.orientation,
                     )
                     c_data = agent.run_candidates(candidates_k=candidates_k)
                     candidates_holder["data"] = c_data
@@ -1065,6 +1130,7 @@ class Orchestrator:
                     config=self.pipeline_config,
                     allow_fixture=self.allow_fixture,
                     auto=False,
+                    orientation=self.orientation,
                 )
                 applied_outputs = agent.apply_picks(picks_file)
                 is_valid, val_err = agent.validate(applied_outputs)
@@ -1191,5 +1257,6 @@ class Orchestrator:
     def _mark_run_failed(self, manifest: dict[str, Any], reason: str) -> None:
         self.logger.error(f"Run failed: {reason}")
         manifest["status"] = "failed"
+        reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
         save_manifest(manifest, self.manifest_path)
         write_status_md(self.run_dir, manifest, active_process=False)

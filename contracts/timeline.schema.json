@@ -35,6 +35,15 @@
       "items": { "type": "string" },
       "description": "Warnings generated during alignment"
     },
+    "degraded": {
+      "type": "boolean",
+      "description": "Whether the run alignment degraded to weighted interpolation or low confidence"
+    },
+    "low_confidence_scenes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Scene IDs that have low-confidence word alignments"
+    },
     "scenes": {
       "type": "array",
       "minItems": 1,
@@ -81,6 +90,18 @@
               "required": ["text", "start", "end"]
             }
           },
+          "quality": {
+            "type": "object",
+            "properties": {
+              "words": { "type": "integer" },
+              "low_confidence_words": { "type": "integer" },
+              "min_score": { "type": "number" },
+              "unplaced": { "type": "integer" },
+              "caption_count": { "type": "integer" },
+              "max_late_ms": { "type": "number" },
+              "max_cps": { "type": "number" }
+            }
+          },
           "words": {
             "type": "array",
             "items": {
@@ -108,16 +129,20 @@
                   "type": "number",
                   "description": "Alignment confidence score"
                 },
-                "confidence": {
-                  "type": "number",
-                  "description": "Alignment confidence score (alias)"
+                "unplaced": {
+                  "type": "boolean",
+                  "description": "Whether the word was unplaced by the aligner"
+                },
+                "low_confidence": {
+                  "type": "boolean",
+                  "description": "Whether the word score fell below confidence threshold"
                 }
               },
-              "required": ["w", "start", "end"]
+              "required": ["w", "start", "end", "score"]
             }
           }
         },
-        "required": ["id", "start", "end", "words"]
+        "required": ["id", "start", "end", "speech_start", "speech_end", "sentences", "words"]
       }
     }
   },

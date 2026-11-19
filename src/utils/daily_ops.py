@@ -449,6 +449,8 @@ def _classify_source_health_status(
     error: str | None,
     stale_threshold_hours: float = 48.0,
 ) -> str:
+    if error and "ROBOTS_UNKNOWN" in str(error):
+        return "ROBOTS_UNKNOWN"
     if error:
         return "ERROR"
     if newest_age_hours is not None and newest_age_hours > stale_threshold_hours:

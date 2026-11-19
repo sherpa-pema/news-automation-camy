@@ -29,7 +29,7 @@ The Scraper Agent ingests today's news from verified Nepali news publishers. It 
 ## 6. Failure Modes
 - **Feed Offline or 500 Error**: Log warning, skip failing source, continue with other enabled sources.
 - **Anti-Scraping / Captcha**: Log error, flag source in run logs, do not crash pipeline if minimum articles threshold is met.
-- **Insufficient Articles (< 5 articles total)**: Fail stage with error code `INSUFFICIENT_SOURCES` to trigger retry.
+- **Insufficient Articles (< 6 eligible articles total)**: Fail stage with error code `INSUFFICIENT_SOURCES` to trigger retry or degraded ladder.
 
 ## 7. Definition of Done Checklist
 - [ ] Ingested articles from all active sources in `sources.yaml`.

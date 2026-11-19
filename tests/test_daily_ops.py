@@ -1600,3 +1600,27 @@ def test_prepare_media_and_apply_picks_pre_render_workflow(tmp_path: Path, monke
     assert final_manifest["stages"]["media"]["status"] == "done"
     assert final_manifest["stages"]["media"]["metrics"]["picked_by_user"] is True
 
+
+def test_cli_orientation_flags_and_orchestrator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from run_daily import build_parser
+
+    parser = build_parser()
+    args1 = parser.parse_args(["--orientation", "vertical"])
+    assert args1.orientation == "vertical"
+
+    args2 = parser.parse_args(["--aspect-ratio", "9:16"])
+    assert args2.aspect_ratio == "9:16"
+
+    # Test Orchestrator initialization with orientation
+    monkeypatch.chdir(tmp_path)
+    _copy_configs(tmp_path / "config")
+    (tmp_path / "data" / "runs").mkdir(parents=True)
+
+    orch_vert = Orchestrator(run_date="2026-11-15", orientation="vertical")
+    orch_vert.initialize_run()
+    manifest = json.loads((orch_vert.run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest.get("orientation") == "vertical"
+    assert manifest.get("resolution") == [1080, 1920]
+    assert orch_vert.orientation == "vertical"
+
+

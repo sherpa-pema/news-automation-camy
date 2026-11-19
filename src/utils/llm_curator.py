@@ -14,19 +14,93 @@ from typing import Any
 
 from src.utils.editor_cluster import (
     DEFAULT_ENTITY_ALIASES,
-    articles_are_similar,
+    apply_cross_day_deduplication,
     detect_opinion,
     detect_stale_preview,
     extract_spine_numbers,
     is_advertisement,
     is_thin_story,
     parse_timestamp,
+    rank_clusters_with_diversity,
 )
 from src.utils.llm_writer import _call_llm, _extract_json_object, detect_configured_provider
 
 logger = logging.getLogger("editor")
 
+CANONICAL_BROADCAST_CATEGORIES = [
+    "national_politics",
+    "society_local",
+    "culture_entertainment",
+    "business_economics",
+    "science_technology",
+    "sports",
+]
+
+BROADCAST_SLOTS: list[tuple[str, str, str]] = [
+    ("slot_01", "national_politics", "National Politics"),
+    ("slot_02", "society_local", "Society and Local News"),
+    ("slot_03", "culture_entertainment", "Culture and Entertainment"),
+    ("slot_04", "business_economics", "Business and Economics"),
+    ("slot_05", "science_technology", "Science and Technology"),
+    ("slot_06", "sports", "Sports"),
+]
+
+CATEGORY_TO_BROADCAST_SLOT: dict[str, str] = {
+    "national_politics": "national_politics",
+    "politics": "national_politics",
+    "political": "national_politics",
+    "government": "national_politics",
+    "parliament": "national_politics",
+    "society_local": "society_local",
+    "society": "society_local",
+    "social": "society_local",
+    "local": "society_local",
+    "transport": "society_local",
+    "disaster": "society_local",
+    "crime": "society_local",
+    "health": "society_local",
+    "weather": "society_local",
+    "climate": "society_local",
+    "environment": "society_local",
+    "culture_entertainment": "culture_entertainment",
+    "culture": "culture_entertainment",
+    "cultural": "culture_entertainment",
+    "entertainment": "culture_entertainment",
+    "heritage": "culture_entertainment",
+    "tourism": "culture_entertainment",
+    "business_economics": "business_economics",
+    "economy": "business_economics",
+    "economic": "business_economics",
+    "business": "business_economics",
+    "market": "business_economics",
+    "finance": "business_economics",
+    "science_technology": "science_technology",
+    "technology": "science_technology",
+    "tech": "science_technology",
+    "science": "science_technology",
+    "sports": "sports",
+    "sport": "sports",
+    "cricket": "sports",
+    "football": "sports",
+    "international": "society_local",
+    "world": "society_local",
+}
+
+
+def map_to_broadcast_slot(cat: str | None) -> str:
+    """Maps any canonical or legacy category string to one of the 6 broadcast slots."""
+    if not cat:
+        return "society_local"
+    return CATEGORY_TO_BROADCAST_SLOT.get(str(cat).strip().lower(), "society_local")
+
+
 ALLOWED_CATEGORIES = [
+    "national_politics",
+    "society_local",
+    "culture_entertainment",
+    "business_economics",
+    "science_technology",
+    "sports",
     "politics",
     "economy",
     "disaster",
@@ -37,7 +111,12 @@ ALLOWED_CATEGORIES = [
     "climate",
     "health",
     "tourism",
+    "culture",
+    "entertainment",
+    "science",
     "technology",
+    "international",
+    "world",
     "other",
 ]
 
@@ -110,7 +189,7 @@ def build_candidate_digest(
 
 def build_curator_prompt(digest: list[dict[str, Any]]) -> str:
     """Builds the editorial curation prompt."""
-    digest_json = json.dumps(digest, indent=2, ensure_ascii=False)
+    digest_json = json.dumps(digest, separators=(",", ":"), ensure_ascii=False)
     cat_list = ", ".join(f'"{c}"' for c in ALLOWED_CATEGORIES)
 
     return (
@@ -131,8 +210,15 @@ def build_curator_prompt(digest: list[dict[str, Any]]) -> str:
         "     * 8.0 - 10.0: High national impact (Supreme Court rulings, cabinet decisions, major fatal accidents/disasters, nationwide economic or transport disruptions).\n"
         "     * 5.0 - 7.9: Significant provincial politics, parliamentary committee updates, national sports, weather warnings, major cultural events.\n"
         "     * 1.0 - 4.9: Hyper-local municipal routine notices, minor local disputes, foreign wire stories (e.g. protests in Europe, foreign elections) UNLESS directly impacting Nepal or Nepali migrant workers.\n\n"
-        "4. TRUE CATEGORIZATION:\n"
-        f"   - Assign 'category' strictly to one of: [{cat_list}].\n\n"
+        "4. BROADCAST CATEGORIES & MULTI-HEADLINE COVERAGE:\n"
+        "   The national broadcast covers 2 to 3 summarized headlines across each of the 6 sequential news domains:\n"
+        "     1. Slot 1: National Politics ('national_politics') - 2-3 top national political stories\n"
+        "     2. Slot 2: Society and Local News ('society_local') - 2-3 top civic, health, transport, disaster stories\n"
+        "     3. Slot 3: Culture and Entertainment ('culture_entertainment') - 2-3 top cultural, festival, heritage, cinema stories\n"
+        "     4. Slot 4: Business and Economics ('business_economics') - 2-3 top market, inflation, trade, finance stories\n"
+        "     5. Slot 5: Science and Technology ('science_technology') - 2-3 top telecom, digital, AI, tech, science stories\n"
+        "     6. Slot 6: Sports ('sports') - 2-3 top sports and tournament stories\n"
+        f"   - Assign 'category' to one of the 6 canonical broadcast domains, or from: [{cat_list}].\n\n"
         "5. PRIMARY HEADLINE:\n"
         "   - Provide a clean, objective 'primary_title' in English (sentence case, max 10 words, no ending period).\n\n"
         "OUTPUT SCHEMA (Return a SINGLE valid JSON object, no markdown fences):\n"
@@ -180,7 +266,7 @@ def curate_and_cluster_with_llm(
         return None
 
     ref_year = ref_time.year if ref_time else datetime.now().year
-    max_cand = int(curator_cfg.get("max_candidates", 60))
+    max_cand = int(curator_cfg.get("max_candidates", 40))
     min_words = int(editor_cfg.get("clustering", {}).get("min_full_text_words", 60))
     timeout = int(curator_cfg.get("timeout_sec", 60))
     top_limit = int(editor_cfg.get("clustering", {}).get("top_clusters_limit", 12))
@@ -329,88 +415,73 @@ def curate_and_cluster_with_llm(
         })
 
     # Apply 48-hour cross-day deduplication memory
-    if prior_stories:
-        for cand in formatted_clusters:
-            cand_urls = set(cand.get("urls", []))
-            for prior in prior_stories:
-                prior_urls = set(prior.get("source_urls", []))
-                prior_art = prior.get("pseudo_article") or {
-                    "title": prior.get("title", ""),
-                    "text_summary": prior.get("narration", ""),
-                    "full_text": prior.get("narration", ""),
-                }
-                url_match = bool(cand_urls & prior_urls)
-                sim_match = any(
-                    articles_are_similar(
-                        art,
-                        prior_art,
-                        title_ratio,
-                        token_overlap,
-                        entity_aliases=entity_aliases,
-                        ref_year=ref_year,
-                    )
-                    for art in cand.get("articles", [])
-                )
-                if url_match or sim_match:
-                    approved_ts = float(prior.get("approved_ts", 0.0) or 0.0)
-                    prior_nums = set(prior.get("numbers", []))
-                    has_new_post_approval_update = False
-                    if approved_ts > 0.0:
-                        for art in cand.get("articles", []):
-                            art_ts = parse_timestamp(art.get("published_at"))
-                            if art_ts > approved_ts:
-                                art_nums = extract_spine_numbers(
-                                    f"{art.get('title', '')} {art.get('full_text', '')}",
-                                    exclude_years={ref_year},
-                                )
-                                if art_nums - prior_nums:
-                                    has_new_post_approval_update = True
-                                    break
-                    if not has_new_post_approval_update:
-                        cand["covered_recently"] = True
-                        cand["repeat_reason"] = (
-                            f"Covered on {prior.get('run_date', 'recent run')}: {prior.get('title', '')}"
-                        )
-                    break
+    apply_cross_day_deduplication(
+        formatted_clusters,
+        prior_stories,
+        title_ratio=title_ratio,
+        token_overlap=token_overlap,
+        entity_aliases=entity_aliases,
+        ref_year=ref_year,
+    )
 
     # Rank clusters: balance editorial priority, source count, topic diversity, and cross-day penalty
-    ranked_clusters: list[dict[str, Any]] = []
-    category_counts: dict[str, int] = {}
-    pending = list(formatted_clusters)
+    def _curator_base_score(cand: dict[str, Any]) -> float:
+        repeat_adj = -5.0 if cand.get("covered_recently") else 0.0
+        missing_adj = -0.5 if cand.get("all_dates_missing") else 0.0
+        return (
+            (cand.get("editorial_priority", 5.0) * 20.0)
+            + (min(cand.get("source_count", 1), 4) * 5.0)
+            + (cand.get("max_source_trust", 0.70) * 3.0)
+            + repeat_adj
+            + missing_adj
+        )
 
-    while pending:
-        best_cand = None
-        best_score = -1e9
-        best_idx = -1
+    ranked_clusters = rank_clusters_with_diversity(
+        formatted_clusters,
+        base_score_fn=_curator_base_score,
+        category_penalty=12.0,
+    )
 
-        for i, cand in enumerate(pending):
-            cat = cand["category_guess"]
-            cat_count = category_counts.get(cat, 0)
-            repeat_adj = -5.0 if cand.get("covered_recently") else 0.0
-            missing_adj = -0.5 if cand.get("all_dates_missing") else 0.0
+    # Stratified Multi-Cluster Allocation: 2 to 3 clusters per broadcast category in exact sequence
+    for c in ranked_clusters:
+        c["broadcast_slot"] = map_to_broadcast_slot(c.get("category_guess"))
 
-            # Score formula: priority (1..10) is primary, boosted by multi-source verification
-            score = (
-                (cand.get("editorial_priority", 5.0) * 20.0)
-                + (min(cand.get("source_count", 1), 4) * 5.0)
-                + (cand.get("max_source_trust", 0.70) * 3.0)
-                - (cat_count * 12.0)
-                + repeat_adj
-                + missing_adj
+    clusters_per_slot = int(editor_cfg.get("clustering", {}).get("clusters_per_category", 4))
+    slot_clusters: list[dict[str, Any]] = []
+    assigned_ids: set[int] = set()
+
+    for slot_id, slot_cat, slot_title in BROADCAST_SLOTS:
+        matches = [
+            c for c in ranked_clusters
+            if id(c) not in assigned_ids and c.get("broadcast_slot") == slot_cat
+        ][:clusters_per_slot]
+
+        if matches:
+            for item_idx, cand in enumerate(matches, 1):
+                cand["broadcast_slot_id"] = slot_id
+                cand["broadcast_slot_title"] = slot_title
+                cand["slot_item_index"] = item_idx
+                slot_clusters.append(cand)
+                assigned_ids.add(id(cand))
+        else:
+            fallback_cand = next(
+                (c for c in ranked_clusters if id(c) not in assigned_ids),
+                None,
             )
-            if score > best_score:
-                best_score = score
-                best_cand = cand
-                best_idx = i
+            if fallback_cand:
+                fallback_cand["broadcast_slot_id"] = slot_id
+                fallback_cand["broadcast_slot_title"] = f"{slot_title} (Fallback)"
+                fallback_cand["fallback_slot"] = True
+                fallback_cand["slot_item_index"] = 1
+                slot_clusters.append(fallback_cand)
+                assigned_ids.add(id(fallback_cand))
 
-        if best_cand:
-            pending.pop(best_idx)
-            cat = best_cand["category_guess"]
-            category_counts[cat] = category_counts.get(cat, 0) + 1
-            ranked_clusters.append(best_cand)
+    for cand in ranked_clusters:
+        if id(cand) not in assigned_ids and len(slot_clusters) < top_limit:
+            slot_clusters.append(cand)
+            assigned_ids.add(id(cand))
 
-    # Re-index cluster IDs cleanly
-    shortlist = ranked_clusters[:top_limit]
+    shortlist = slot_clusters if slot_clusters else ranked_clusters[:top_limit]
     for idx, c in enumerate(shortlist, 1):
         c["cluster_id"] = f"cluster_{idx:02d}"
 

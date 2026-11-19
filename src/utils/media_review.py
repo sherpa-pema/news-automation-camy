@@ -246,8 +246,13 @@ def draw_card_image(
     width: int = 1920,
     height: int = 1080,
     category: str = "NEWS BRIEFING",
+    quiet: bool = False,
 ) -> None:
-    """Renders a 1920x1080 gradient card with large centered wrapped text and accents."""
+    """Renders a 1920x1080 gradient card with large centered wrapped text and accents.
+
+    If quiet is True, suppresses top-left category badge and bottom-right watermark
+    so background cards do not visually collide with featured foreground cards.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img = Image.new("RGBA", (width, height), (11, 31, 58, 255))
     draw = ImageDraw.Draw(img)
@@ -276,12 +281,13 @@ def draw_card_image(
         width=2,
     )
 
-    # Accent top strip
-    draw.rounded_rectangle(
-        [margin + 40, margin + 40, width - margin - 40, margin + 50],
-        radius=4,
-        fill=(245, 166, 35, 255),
-    )
+    if not quiet:
+        # Accent top strip
+        draw.rounded_rectangle(
+            [margin + 40, margin + 40, width - margin - 40, margin + 50],
+            radius=4,
+            fill=(245, 166, 35, 255),
+        )
 
     # Fonts
     font_paths = ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
@@ -307,40 +313,31 @@ def draw_card_image(
     if font_tag is None:
         font_tag = ImageFont.load_default()
 
-    # Small category tag
-    draw.text((margin + 50, margin + 75), category.upper(), font=font_tag, fill=(245, 166, 35, 255))
+    if not quiet:
+        # Small category tag
+        draw.text((margin + 50, margin + 75), category.upper(), font=font_tag, fill=(245, 166, 35, 255))
 
-    # Large wrapped centered text
-    max_w = width - (margin * 2) - 160
-    words = card_text.split()
-    lines: list[str] = []
-    cur_line: list[str] = []
-    for w in words:
-        test_line = " ".join(cur_line + [w])
-        bbox = draw.textbbox((0, 0), test_line, font=font)
-        if (bbox[2] - bbox[0]) <= max_w:
-            cur_line.append(w)
-        else:
-            if cur_line:
-                lines.append(" ".join(cur_line))
-                cur_line = [w]
-            else:
-                lines.append(w)
-                cur_line = []
-    if cur_line:
-        lines.append(" ".join(cur_line))
+        # Subtle category watermark in lower right corner (does not compete with motion overlays)
+        font_watermark = None
+        for fp in font_paths:
+            if Path(fp).exists():
+                try:
+                    font_watermark = ImageFont.truetype(fp, 24)
+                    break
+                except Exception:
+                    pass
+        if font_watermark is None:
+            font_watermark = ImageFont.load_default()
 
-    # Center lines vertically
-    line_h = 75
-    total_text_h = len(lines) * line_h
-    start_y = (height - total_text_h) // 2 + 30
-
-    for idx, l in enumerate(lines):
-        bbox = draw.textbbox((0, 0), l, font=font)
-        lw = bbox[2] - bbox[0]
-        lx = (width - lw) // 2
-        ly = start_y + (idx * line_h)
-        draw.text((lx, ly), l, font=font, fill=(255, 255, 255, 255))
+        wm_text = category.upper()
+        wm_bbox = draw.textbbox((0, 0), wm_text, font=font_watermark)
+        wm_w = wm_bbox[2] - wm_bbox[0]
+        draw.text(
+            (width - margin - 60 - wm_w, height - margin - 50),
+            wm_text,
+            font=font_watermark,
+            fill=(255, 255, 255, 50),
+        )
 
     img.convert("RGB").save(output_path, "PNG")
 

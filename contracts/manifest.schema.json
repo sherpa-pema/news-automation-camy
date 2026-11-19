@@ -17,6 +17,23 @@
       "type": "string",
       "description": "Kind of run (e.g. test, production, fixture)"
     },
+    "selected_categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional list of selected news categories for the run"
+    },
+    "orientation": {
+      "type": "string",
+      "enum": ["landscape", "vertical"],
+      "description": "Video frame orientation"
+    },
+    "resolution": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "Video resolution [width, height]"
+    },
     "manual_edits": {
       "type": "array",
       "description": "Log of manual edits made to run files",

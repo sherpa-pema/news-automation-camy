@@ -12,9 +12,11 @@ use the exact same spoken-form expansion for:
 """
 from __future__ import annotations
 
+from pathlib import Path
 import re
 from collections.abc import Callable
 from typing import Any
+import yaml
 
 WEAK_WORDS = {
     "a", "an", "the", "of", "to", "in", "and", "but", "for",
@@ -94,6 +96,63 @@ def get_optional_uroman() -> Callable[[str], str] | None:
     except (ImportError, AttributeError, OSError, RuntimeError):
         return None
     return None
+
+
+def devanagari_to_roman_fallback(text: str) -> str:
+    """Deterministic fallback transliterator for Devanagari text to Latin phonemes."""
+    vowels = {
+        "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo", "ऋ": "ri",
+        "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au",
+    }
+    matras = {
+        "ा": "aa", "ि": "i", "ी": "ee", "ु": "u", "ू": "oo", "ृ": "ri",
+        "े": "e", "ै": "ai", "ो": "o", "ौ": "au", "ं": "n", "ँ": "n", "ः": "h",
+    }
+    consonants = {
+        "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
+        "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "ny",
+        "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n",
+        "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
+        "प": "p", "फ": "ph", "ब": "b", "भ": "bh", "म": "m",
+        "य": "y", "र": "r", "ल": "l", "व": "w",
+        "श": "sh", "ष": "sh", "स": "s", "ह": "h",
+        "क्ष": "ksh", "त्र": "tr", "ज्ञ": "gy",
+    }
+    virama = "्"
+
+    chars = list(text)
+    out: list[str] = []
+    i = 0
+    n = len(chars)
+    while i < n:
+        c = chars[i]
+        if c in vowels:
+            out.append(vowels[c])
+        elif c in consonants:
+            base = consonants[c]
+            if i + 1 < n:
+                nxt = chars[i + 1]
+                if nxt == virama:
+                    out.append(base)
+                    i += 1
+                elif nxt in matras:
+                    out.append(base + matras[nxt])
+                    i += 1
+                else:
+                    out.append(base + "a")
+            else:
+                out.append(base)
+        elif c in matras:
+            out.append(matras[c])
+        elif c in "०१२३४५६७८९":
+            digit_map = {"०": "0", "१": "1", "२": "2", "३": "3", "४": "4", "५": "5", "६": "6", "७": "7", "८": "8", "९": "9"}
+            out.append(digit_map.get(c, c))
+        elif c in ("।", "॥"):
+            out.append(". ")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _number_under_thousand(num: int) -> str:
@@ -343,14 +402,16 @@ def _spoken_to_aligner_tokens(
 
     Returns (effective_spoken_text, tokens, missing_romanizer_for_devanagari).
     """
+    missing_uroman = False
     if contains_devanagari(spoken_text):
         if romanizer is None:
-            return spoken_text, [], True
+            romanizer = devanagari_to_roman_fallback
+            missing_uroman = True
         spoken_text = romanizer(spoken_text)
 
     sub_tokens = [re.sub(r"[^a-z']", "", p.lower()) for p in re.split(r"[\s\-]+", spoken_text)]
     sub_tokens = [p for p in sub_tokens if p]
-    return spoken_text, sub_tokens, False
+    return spoken_text, sub_tokens, missing_uroman
 
 
 def tokenize_for_alignment(
@@ -373,11 +434,13 @@ def tokenize_for_alignment(
     effective_romanizer = romanizer
     if has_dev and effective_romanizer is None:
         effective_romanizer = get_optional_uroman()
-        if effective_romanizer is None and warnings_out is not None:
-            warnings_out.append(
-                "Devanagari characters detected in narration, but 'uroman' is not installed; "
-                "Devanagari words will degrade to weighted interpolation."
-            )
+        if effective_romanizer is None:
+            effective_romanizer = devanagari_to_roman_fallback
+            if warnings_out is not None:
+                warnings_out.append(
+                    "Devanagari characters detected in narration without 'uroman'; "
+                    "used fallback phonetic transliteration for MMS alignment."
+                )
 
     spans = _collect_normalization_spans(cleaned, pronunciations)
 
@@ -447,3 +510,100 @@ def tokenize_for_alignment(
         })
 
     return words_data
+
+
+def load_pronunciations(pronunciations_file: Path | str = "config/pronunciations.yaml") -> dict[str, str]:
+    """Loads the phonetic respelling dictionary from config/pronunciations.yaml."""
+    path = Path(pronunciations_file)
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        return {}
+    if "pronunciations" in data and isinstance(data["pronunciations"], dict):
+        data = data["pronunciations"]
+    res = {}
+    for word, val in data.items():
+        if isinstance(val, dict):
+            res[word] = val.get("respelling", "")
+        else:
+            res[word] = str(val)
+    return res
+
+
+def load_pronunciations_with_metadata(pronunciations_file: Path | str = "config/pronunciations.yaml") -> dict[str, dict[str, Any]]:
+    """Loads phonetic respellings with verification metadata from config/pronunciations.yaml."""
+    path = Path(pronunciations_file)
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        return {}
+    if "pronunciations" in data and isinstance(data["pronunciations"], dict):
+        data = data["pronunciations"]
+    res = {}
+    for word, val in data.items():
+        if isinstance(val, dict):
+            res[word] = {
+                "respelling": val.get("respelling", ""),
+                "verified": bool(val.get("verified", False)),
+            }
+        else:
+            res[word] = {
+                "respelling": str(val),
+                "verified": False,
+            }
+    return res
+
+
+def get_unverified_pronunciations_applied(
+    scenes: list[dict[str, Any]],
+    pronunciations_file: Path | str = "config/pronunciations.yaml",
+) -> list[dict[str, Any]]:
+    """Identifies which unverified pronunciation respellings were matched and applied across scenes."""
+    meta = load_pronunciations_with_metadata(pronunciations_file)
+    unverified_applied = []
+    for word, info in meta.items():
+        if not info.get("verified", False):
+            pattern = re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)
+            for sc in scenes:
+                raw_text = sc.get("narration", "")
+                if pattern.search(raw_text):
+                    unverified_applied.append({
+                        "word": word,
+                        "respelling": info.get("respelling", ""),
+                        "scene_id": sc.get("id"),
+                    })
+    return unverified_applied
+
+
+def split_into_sentences(text: str) -> list[str]:
+    """Splits text into clean sentences for prosody-controlled sentence-level synthesis.
+
+    Supports Latin sentence terminators (. ! ?) as well as Devanagari danda (।) and double danda (॥).
+    Protects common abbreviations to prevent spurious splits.
+    """
+    if not text:
+        return []
+
+    # Protect common abbreviations before splitting
+    protected = text
+    abbrevs = ["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "e.g.", "i.e.", "vs.", "No.", "Rs.", "NRs."]
+    for idx, abb in enumerate(abbrevs):
+        protected = protected.replace(abb, f"__ABB_{idx}__")
+
+    raw_sentences = re.split(r"(?<=[.!?।॥])\s+", protected)
+    sentences = []
+    for s in raw_sentences:
+        s_clean = s.strip()
+        if not s_clean:
+            continue
+        # Restore abbreviations
+        for idx, abb in enumerate(abbrevs):
+            s_clean = s_clean.replace(f"__ABB_{idx}__", abb)
+        sentences.append(s_clean)
+
+    return sentences
+

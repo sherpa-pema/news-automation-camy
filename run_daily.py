@@ -65,6 +65,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Run kind written to manifest/script/description (config default: {default_rk}).",
     )
     parser.add_argument(
+        "--orientation",
+        dest="orientation",
+        choices=["landscape", "vertical"],
+        default=None,
+        help="Export video orientation: 'landscape' (16:9, 1920x1080) or 'vertical' (9:16, 1080x1920 for TikTok/Reels).",
+    )
+    parser.add_argument(
+        "--aspect-ratio",
+        "--aspect",
+        dest="aspect_ratio",
+        choices=["16:9", "9:16"],
+        default=None,
+        help="Export video aspect ratio alias: '16:9' (landscape) or '9:16' (vertical).",
+    )
+    parser.add_argument(
         "--status",
         action="store_true",
         help="Print current status summary and write data/runs/<D>/STATUS.md.",
@@ -116,6 +131,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force re-running --morning or --finish even if already prepared or finished.",
     )
+    parser.add_argument(
+        "--allow-robots-fallback",
+        action="store_true",
+        help="Explicitly allow scraper to crawl sources whose robots.txt failed to fetch/parse.",
+    )
+    parser.add_argument(
+        "--force-source",
+        dest="force_source",
+        default=None,
+        help="Bypass circuit breaker and force scraping a specific source by name.",
+    )
+    parser.add_argument(
+        "--categories",
+        dest="categories",
+        default=None,
+        help="Comma-separated categories to scrape (e.g. 'headlines,politics,health').",
+    )
+    parser.add_argument(
+        "--automated",
+        action="store_true",
+        help="Run in automated mode without interactive category prompt; fallback to headlines & breaking news.",
+    )
     return parser
 
 
@@ -149,11 +186,20 @@ def main(argv: list[str] | None = None) -> int:
     exec_cfg = load_execution_config()
     effective_run_kind = args.run_kind or exec_cfg.get("default_run_kind", "test")
 
+    effective_orientation = args.orientation
+    if not effective_orientation and args.aspect_ratio:
+        effective_orientation = "vertical" if args.aspect_ratio == "9:16" else "landscape"
+
     orchestrator = Orchestrator(
         run_date=args.run_date,
         allow_fixture=args.allow_fixture,
         backfill=args.backfill,
         run_kind=args.run_kind,
+        orientation=effective_orientation,
+        allow_robots_fallback=args.allow_robots_fallback,
+        force_source=args.force_source,
+        categories=args.categories,
+        automated=args.automated,
     )
 
     # 3. --status
@@ -183,12 +229,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f" Mode:            --apply-picks ({args.apply_picks_file})")
     elif args.finish:
         print(" Mode:            --finish (media=auto + publish latest)")
+    if effective_orientation:
+        res_label = "1080x1920 (9:16 Vertical)" if effective_orientation == "vertical" else "1920x1080 (16:9 Landscape)"
+        print(f" Orientation:     {effective_orientation} [{res_label}]")
     if args.only_stage:
         print(f" Stage Filter:    {args.only_stage}")
     if args.allow_fixture:
         print(" Provenance:      --allow-fixture (ALLOWING FIXTURE DATA)")
     if args.backfill:
         print(" Window Anchor:   --backfill (END-OF-DATE)")
+    if args.categories:
+        print(f" Categories:      {args.categories}")
+    elif args.automated:
+        print(" Categories:      headlines (Automated Fallback)")
     print("==================================================")
 
     if args.init_only:

@@ -1,13 +1,21 @@
 settings:
   language: "en"
   target_video_minutes: "2-3"
-  headlines_per_video: 5
+  headlines_per_video: 6
   user_agent: "NepalNewsBot/0.1 (personal project)"
   request_delay_seconds: 2
   timezone: "Asia/Kathmandu"
   lookback_hours: 30
   max_undated_feed_position: 5
   default_trust_weight: 0.70
+  robots_policy: "fail_closed"
+  language_policy_default: "translate"
+  dedupe_mode: "url+title+token"
+  budget_seconds: 150
+  jitter_seconds: 0.5
+  circuit_breaker:
+    failures: 3
+    cooldown_runs: 3
   priority_tags:
     - "cover"
     - "breaking news"
@@ -30,6 +38,25 @@ sources:
     robots_ok: true
     enabled: true
     trust_weight: 0.82
+    category_feeds:
+      health:
+        url: "https://english.onlinekhabar.com/tag/health/feed"
+        method: "rss"
+      politics:
+        url: "https://english.onlinekhabar.com/category/political/feed"
+        method: "rss"
+      business_economics:
+        url: "https://english.onlinekhabar.com/category/economy/feed"
+        method: "rss"
+      sports:
+        url: "https://english.onlinekhabar.com/category/sports/feed"
+        method: "rss"
+      science_technology:
+        url: "https://english.onlinekhabar.com/category/technology/feed"
+        method: "rss"
+      culture_entertainment:
+        url: "https://english.onlinekhabar.com/category/lifestyle/feed"
+        method: "rss"
     notes: "Verified working. RSS 2.0 with 20 entries containing title, link, and publication timestamp. robots.txt only disallows /wp-admin/."
 
   - name: "The Kathmandu Post"
@@ -41,6 +68,17 @@ sources:
     robots_ok: true
     enabled: true
     trust_weight: 0.95
+    category_feeds:
+      health:
+        url: "https://kathmandupost.com/health"
+        method: "html_only"
+        include_url_patterns:
+          - "^/health/\\d{4}/\\d{2}/\\d{2}/"
+      international:
+        url: "https://kathmandupost.com/world"
+        method: "html_only"
+        include_url_patterns:
+          - "^/world/\\d{4}/\\d{2}/\\d{2}/"
     notes: "Verified working. RSS feed returns 40 entries with title, link, and summary. robots.txt allows all crawling. Publication date embedded in article URL structure."
 
   - name: "Republica"
@@ -52,6 +90,12 @@ sources:
     robots_ok: true
     enabled: true
     trust_weight: 0.88
+    category_feeds:
+      health:
+        url: "https://myrepublica.nagariknetwork.com/category/health"
+        method: "html_only"
+        include_url_patterns:
+          - "^/news/[a-zA-Z0-9_-]+"
     notes: "Verified working. RSS feed returns 30 entries with title, link, and published date. robots.txt allows all crawling."
 
   - name: "The Himalayan Times"
@@ -63,6 +107,12 @@ sources:
     robots_ok: true
     enabled: true
     trust_weight: 0.88
+    category_feeds:
+      health:
+        url: "https://thehimalayantimes.com/health"
+        method: "html_only"
+        include_url_patterns:
+          - "^/health/[a-zA-Z0-9_-]+"
     notes: "Verified working. General site-wide latest news feed at /rssFeed/0 returns 50 entries across all sections (Kathmandu, Nepal, etc.) with full titles, links, and timestamps. (Category feed #15 also available)."
 
   - name: "Setopati English"
@@ -97,6 +147,7 @@ sources:
     homepage: "https://nagariknews.nagariknetwork.com"
     rss: "https://nagariknews.nagariknetwork.com/feed"
     language: "ne"
+    language_policy: "translate"
     method: "rss"
     max_articles: 20
     robots_ok: true
@@ -108,6 +159,7 @@ sources:
     homepage: "https://rajdhanidaily.com"
     rss: "https://rajdhanidaily.com/feed"
     language: "ne"
+    language_policy: "translate"
     method: "rss"
     max_articles: 15
     robots_ok: true

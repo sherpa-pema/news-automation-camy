@@ -86,6 +86,41 @@
         "type": "string",
         "enum": ["exact", "metadata", "url_date", "missing"],
         "description": "Provenance of published_at timestamp"
+      },
+      "needs_translation": {
+        "type": "boolean",
+        "description": "True when language != 'en'"
+      },
+      "translation_status": {
+        "type": "string",
+        "enum": ["pending", "translated", "not_required"],
+        "description": "Written by scraper; flipped downstream"
+      },
+      "priority_score": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Normalized priority score combining recency, position, tags, and trust"
+      },
+      "extraction": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "description": "Winning extraction method: trafilatura, json_ld, meta_description, or rss_summary"
+          },
+          "chars": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Extracted text character count"
+          }
+        },
+        "required": ["method", "chars"],
+        "additionalProperties": false
+      },
+      "degraded_run": {
+        "type": "boolean",
+        "description": "Set on every article of a degraded pass"
       }
     },
     "required": ["source", "title", "url", "published_at", "text_summary"],

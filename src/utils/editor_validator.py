@@ -687,14 +687,24 @@ def validate_script_draft(
     }
 
     scenes = draft_data.get("scenes", [])
-    if len(scenes) != 7:
-        add_global_error(f"Expected exactly 7 scenes (intro + 5 stories + outro), got {len(scenes)}")
+    if not (len(scenes) in (7, 8) or 14 <= len(scenes) <= 26):
+        add_global_error(f"Expected 20 to 26 scenes (intro + 18-24 headlines + outro; legacy: Expected exactly 7 scenes), got {len(scenes)}")
+
+    BROADCAST_SEQUENCE_RULES = [
+        (1, "scene_01", "national_politics", {"national_politics", "politics", "political", "government", "parliament"}),
+        (2, "scene_02", "society_local", {"society_local", "society", "social", "local", "education", "health", "transport", "disaster", "crime", "weather", "climate", "environment"}),
+        (3, "scene_03", "culture_entertainment", {"culture_entertainment", "culture", "cultural", "entertainment", "heritage", "festival", "arts", "tourism"}),
+        (4, "scene_04", "business_economics", {"business_economics", "economy", "economic", "business", "market", "finance", "trade"}),
+        (5, "scene_05", "science_technology", {"science_technology", "technology", "tech", "science", "digital", "telecom", "cyber"}),
+        (6, "scene_06", "sports", {"sports", "sport", "cricket", "football", "athletics"}),
+    ]
 
     total_words = 0
     total_syllables = 0
     total_est_duration_sec = 0.0
     wps = budget.get("words_per_second", 2.15)
     sps = budget.get("syllables_per_second", 3.3)
+    current_max_slot_idx = 0
 
     for sc_idx, scene in enumerate(scenes):
         sc_id = scene.get("id", f"scene_{sc_idx}")
@@ -709,6 +719,35 @@ def validate_script_draft(
 
         sc_errors: list[str] = []
         sc_warnings: list[str] = []
+
+        # Broadcast sequence check for 8-scene scripts
+        if len(scenes) == 8 and 1 <= sc_idx <= 6:
+            _, exp_id, exp_slot, valid_cats = BROADCAST_SEQUENCE_RULES[sc_idx - 1]
+            cat_val = (scene.get("category") or "").strip().lower()
+            if cat_val not in valid_cats:
+                sc_errors.append(
+                    f"Scene {sc_id} category '{cat_val}' violates broadcast sequence; expected '{exp_slot}' (Slot {sc_idx})"
+                )
+
+        # Monotonic sequential category block check for multi-scene scripts
+        if len(scenes) >= 14 and 1 <= sc_idx <= len(scenes) - 2:
+            cat_val = (scene.get("category") or "").strip().lower()
+            matched_slot_idx = None
+            for slot_idx, (_, _, slot_name, valid_cats) in enumerate(BROADCAST_SEQUENCE_RULES):
+                if cat_val in valid_cats:
+                    matched_slot_idx = slot_idx
+                    break
+            if matched_slot_idx is None:
+                sc_errors.append(
+                    f"Scene {sc_id} category '{cat_val}' is not a recognized broadcast category"
+                )
+            elif matched_slot_idx < current_max_slot_idx:
+                prev_slot_name = BROADCAST_SEQUENCE_RULES[current_max_slot_idx][2]
+                sc_errors.append(
+                    f"Scene {sc_id} category '{cat_val}' appears out of sequence after '{prev_slot_name}' (categories must follow sequential broadcast blocks)"
+                )
+            else:
+                current_max_slot_idx = max(current_max_slot_idx, matched_slot_idx)
 
         # Headline checks
         hl_words = headline.strip().split()
@@ -745,19 +784,32 @@ def validate_script_draft(
         total_est_duration_sec += sc_est_dur
 
         if sc_type == "intro":
-            if not (15 <= word_count <= 40):
-                sc_errors.append(f"Intro word count {word_count} outside 15-40 words")
+            min_w = 12 if len(scenes) >= 18 else 15
+            max_w = 30 if len(scenes) >= 18 else 40
+            if not (min_w <= word_count <= max_w):
+                sc_errors.append(f"Intro word count {word_count} outside {min_w}-{max_w} words")
         elif sc_type == "outro":
-            if not (15 <= word_count <= 40):
-                sc_errors.append(f"Outro word count {word_count} outside 15-40 words")
+            min_w = 12 if len(scenes) >= 18 else 15
+            max_w = 30 if len(scenes) >= 18 else 40
+            if not (min_w <= word_count <= max_w):
+                sc_errors.append(f"Outro word count {word_count} outside {min_w}-{max_w} words")
         else:
-            if not (20 <= word_count <= 60):
-                sc_errors.append(f"Story scene word count {word_count} outside 20-60 words")
+            min_w = 10 if len(scenes) >= 18 else (15 if len(scenes) >= 14 else 20)
+            max_w = 28 if len(scenes) >= 18 else (45 if len(scenes) >= 14 else 60)
+            if not (min_w <= word_count <= max_w):
+                sc_errors.append(f"Story scene word count {word_count} outside {min_w}-{max_w} words")
 
-        # Sentence count for story scenes: 2 to 4 sentences
+        # Sentence count for story scenes
         sentences = split_sentences(narration)
-        if sc_type == "story" and not (2 <= len(sentences) <= 4):
-            sc_errors.append(f"Story narration must have 2 to 4 sentences (got {len(sentences)})")
+        if sc_type == "story":
+            if len(scenes) >= 18:
+                if len(sentences) != 1:
+                    sc_errors.append(f"Headline bulletin story narration must be strictly 1 sentence (got {len(sentences)})")
+            else:
+                min_s = 1 if len(scenes) >= 14 else 2
+                max_s = 4
+                if not (min_s <= len(sentences) <= max_s):
+                    sc_errors.append(f"Story narration must have {min_s} to {max_s} sentences (got {len(sentences)})")
 
         # TTS Rules
         if re.search(r"\d", narration):

@@ -456,6 +456,24 @@ def test_ming_engine_daemon_and_fallback(tmp_path: Path):
     received = []
 
     class MockHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                resp = json.dumps({
+                    "status": "ok",
+                    "model_path": str(Path("models/Ming-3.0-tts-0.5b").resolve()),
+                    "device": "cuda:0",
+                    "dtype": "bfloat16",
+                    "text_normalization": False,
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -494,6 +512,676 @@ def test_ming_engine_daemon_and_fallback(tmp_path: Path):
     )
     with pytest.raises(FileNotFoundError):
         eng_down.synthesize_batch([{"id": "s1", "text": "Hello.", "out_path": str(tmp_path / "s1.wav")}], {})
+
+
+def test_voice_report_has_quality_and_perf_blocks(mock_run_dir: Path):
+    """VoiceAgent creates voice_report.json containing quality (VQI) and perf blocks."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={"stages": [{"id": "voice", "engine": "fake"}]},
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+    assert "audio/voice_report.json" in output_files
+
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    assert report_path.exists()
+    with open(report_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # 1. Quality block (VQI)
+    assert "quality" in data
+    q = data["quality"]
+    for key in [
+        "cosine_min", "cosine_max", "cosine_mean", "cosine_std",
+        "f0_min_hz", "f0_max_hz", "f0_spread_pct", "reference_f0_hz",
+        "scene_lufs_min", "scene_lufs_max", "scene_lufs_spread",
+        "wps_mean", "wps_variance", "wps_std",
+        "dead_air_duration_sec", "dead_air_ratio",
+        "artifact_flags", "unverified_pronunciations_applied",
+    ]:
+        assert key in q, f"Missing VQI key: {key}"
+
+    # 2. Perf block
+    assert "perf" in data
+    p = data["perf"]
+    for key in [
+        "model_load_time_sec", "synthesis_wall_time_sec", "assembly_time_sec",
+        "mastering_time_sec", "total_wall_time_sec", "real_time_factor",
+        "stage_breakdown_sec",
+    ]:
+        assert key in p, f"Missing perf key: {key}"
+
+    stages = p["stage_breakdown_sec"]
+    for s_key in ["model_load", "prefill", "ar_step", "cfm", "vae_decode", "qc", "write"]:
+        assert s_key in stages, f"Missing stage breakdown key: {s_key}"
+
+
+def test_compute_voice_quality_index_matches_table_section_1():
+    """VQI reproduces the table in Section 1 on 2026-11-15 run within tolerance."""
+    from src.utils.tts import compute_voice_quality_index
+
+    run_dir = Path("data/runs/2026-11-15")
+    baseline_path = run_dir / "audio" / "voice_report_baseline.json"
+    target_path = baseline_path if baseline_path.exists() else (run_dir / "audio" / "voice_report.json")
+    if not target_path.exists():
+        pytest.skip("2026-11-15 run not present on disk")
+
+    with open(target_path, encoding="utf-8") as f:
+        rep = json.load(f)
+    with open(run_dir / "script" / "script.json", encoding="utf-8") as f:
+        script = json.load(f)
+
+    words_map = {sc["id"]: len(sc.get("narration", "").split()) for sc in script["scenes"]}
+    scenes_for_vqi = [{**s, "word_count": words_map.get(s["id"], 0)} for s in rep["scenes"]]
+
+    q = compute_voice_quality_index(
+        consistency_metrics=rep["speaker_consistency"]["metrics"],
+        reference_f0_hz=rep["speaker_consistency"]["reference_f0_hz"],
+        scenes_info=scenes_for_vqi,
+        total_duration_sec=rep["total_audio_duration_sec"],
+        pad_per_scene_sec=1.0,
+    )
+
+    # Section 1 Table Assertions:
+    # 1. Cosine: 0.828 - 0.886 (spread ~0.058, min >= 0.82)
+    assert 0.82 <= q["cosine_min"] <= 0.835
+    assert 0.88 <= q["cosine_max"] <= 0.895
+    assert q["cosine_std"] <= 0.02
+
+    # 2. F0: 204.2 - 242.3 Hz (~18.7% spread ~ 19%)
+    assert 200.0 <= q["f0_min_hz"] <= 206.0
+    assert 240.0 <= q["f0_max_hz"] <= 245.0
+    assert 18.0 <= q["f0_spread_pct"] <= 19.5
+
+    # 3. Mastered scene LUFS spread <= 1.0 LU
+    assert q["scene_lufs_spread"] <= 1.0
+
+    # 4. Dead air ratio: ~10% (21.0s / 204.8s)
+    assert 0.09 <= q["dead_air_ratio"] <= 0.11
+
+
+def test_voice_bench_fake_engine_and_compare(tmp_path: Path):
+    """voice_bench runs with fake engine and formats side-by-side comparison."""
+    from tools.voice_bench import run_benchmark, compare_reports, format_scoreboard
+
+    # Create dummy run_dir with script.json
+    run_dir = tmp_path / "mock_run"
+    script_dir = run_dir / "script"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script_data = {
+        "scenes": [
+            {"id": "intro", "narration": "Hello from intro scene."},
+            {"id": "scene_01", "narration": "First scene breaking news update."},
+            {"id": "scene_02", "narration": "Second scene closing news report."},
+        ]
+    }
+    (script_dir / "script.json").write_text(json.dumps(script_data), encoding="utf-8")
+
+    out_a = tmp_path / "bench_a"
+    rep_a = run_benchmark(run_dir, ["intro", "scene_01", "scene_02"], out_a, engine_name="fake")
+    assert (out_a / "bench_report.json").exists()
+    assert "quality" in rep_a
+    assert "perf" in rep_a
+
+    out_b = tmp_path / "bench_b"
+    rep_b = run_benchmark(run_dir, ["intro", "scene_01", "scene_02"], out_b, engine_name="fake")
+
+    # Format scoreboard
+    scoreboard = format_scoreboard(rep_a)
+    assert "Voice Quality & Performance Scoreboard" in scoreboard
+    assert "Speaker Cosine Min" in scoreboard
+
+    # Compare reports
+    cmp_table = compare_reports(rep_a, rep_b, label_a="RunA", label_b="RunB")
+    assert "Side-by-Side Comparison: [RunA] vs [RunB]" in cmp_table
+    assert "Real-Time Factor (RTF)" in cmp_table
+
+
+def test_compute_candidate_score_formula():
+    """compute_candidate_score correctly computes weighted VQI score across all terms."""
+    from src.utils.tts import compute_candidate_score
+
+    # Exact match: cosine=1.0, f0 matches target, duration matches expected, no artifacts
+    score, breakdown = compute_candidate_score(
+        cosine_sim=1.0,
+        cand_f0=216.0,
+        target_f0=216.0,
+        duration_sec=10.0,
+        expected_duration_sec=10.0,
+        artifact_score=1.0,
+        weights={"cosine": 1.0, "f0": 0.6, "duration": 0.2, "artifacts": 0.2},
+    )
+    # 1.0*1.0 + 0.6*1.0 + 0.2*1.0 + 0.2*1.0 = 2.0
+    assert abs(score - 2.0) < 1e-4
+    assert breakdown["cosine_term"] == 1.0
+    assert breakdown["f0_term"] == 1.0
+    assert breakdown["duration_term"] == 1.0
+    assert breakdown["artifact_term"] == 1.0
+
+    # Half pitch deviation: cand_f0 is 10% off -> f0_term = 0.90
+    score2, breakdown2 = compute_candidate_score(
+        cosine_sim=0.90,
+        cand_f0=237.6,
+        target_f0=216.0,
+        duration_sec=10.0,
+        expected_duration_sec=10.0,
+        artifact_score=1.0,
+        weights={"cosine": 1.0, "f0": 0.6, "duration": 0.2, "artifacts": 0.2},
+    )
+    # 1.0*0.9 + 0.6*0.9 + 0.2*1.0 + 0.2*1.0 = 0.9 + 0.54 + 0.2 + 0.2 = 1.84
+    assert abs(score2 - 1.84) < 1e-3
+    assert abs(breakdown2["f0_term"] - 0.90) < 1e-3
+
+
+def test_candidate_ranker_selects_higher_scoring_candidate(mock_run_dir: Path):
+    """VoiceAgent with n_candidates=2 selects the higher-scoring candidate and records breakdown."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "n_candidates": 2,
+                    "f0_anchor": "running_median",
+                    "similarity_threshold": 0.72,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+    is_valid, err = agent.validate(output_files)
+    assert is_valid, f"Validation failed: {err}"
+
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+
+    spk_data = rep["speaker_consistency"]
+    assert spk_data["n_candidates"] == 2
+    assert spk_data["f0_anchor"] == "running_median"
+
+    # In FakeTTS default simulation for n_candidates=2:
+    # candidate 0: cosine 0.82, candidate 1: cosine 0.88 -> candidate 1 scores higher
+    metrics = spk_data["metrics"]
+    for item_id, m in metrics.items():
+        assert m["selected_candidate_idx"] == 1
+        assert "ranker_score" in m
+        assert "ranker_breakdown" in m
+        assert len(m["candidates_evaluated"]) == 2
+
+
+def test_candidate_ranker_prefers_candidate_0_when_scored_higher(mock_run_dir: Path):
+    """VoiceAgent with TRIGGER_PREFER_FIRST selects candidate 0."""
+    script_file = mock_run_dir / "script" / "script.json"
+    with open(script_file, "r", encoding="utf-8") as f:
+        script = json.load(f)
+    script["scenes"][0]["narration"] = "TRIGGER_PREFER_FIRST News intro broadcast."
+    with open(script_file, "w", encoding="utf-8") as f:
+        json.dump(script, f, indent=2)
+
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "n_candidates": 2,
+                    "similarity_threshold": 0.72,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+    assert (mock_run_dir / "audio" / "narration.wav").exists()
+
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+
+    # First scene had TRIGGER_PREFER_FIRST, so candidate 0 must win
+    first_scene_metric = rep["speaker_consistency"]["metrics"]["intro"]
+    assert first_scene_metric["selected_candidate_idx"] == 0
+
+
+def test_n_candidates_1_preserves_single_attempt_behavior(mock_run_dir: Path):
+    """VoiceAgent with n_candidates=1 evaluates a single candidate per scene."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "n_candidates": 1,
+                    "similarity_threshold": 0.72,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+    is_valid, err = agent.validate(output_files)
+    assert is_valid, f"Validation failed: {err}"
+
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+
+    spk_data = rep["speaker_consistency"]
+    assert spk_data["n_candidates"] == 1
+    for item_id, m in spk_data["metrics"].items():
+        assert m["selected_candidate_idx"] == 0
+        assert len(m["candidates_evaluated"]) == 1
+
+
+def test_get_scene_padding_broadcast_policy():
+    """get_scene_padding implements broadcast padding policy for intro, outro, and interior scenes."""
+    from src.utils.tts import get_scene_padding
+
+    # Broadcast policy:
+    # 1. Intro
+    p_before, p_after = get_scene_padding("intro", scene_idx=0, total_scenes=5, padding_policy="broadcast")
+    assert p_before == 0.40
+    assert p_after == 0.15
+
+    # 2. Interior scene
+    p_before, p_after = get_scene_padding("scene_02", scene_idx=2, total_scenes=5, padding_policy="broadcast")
+    assert p_before == 0.05
+    assert p_after == 0.15
+
+    # 3. Outro
+    p_before, p_after = get_scene_padding("outro", scene_idx=4, total_scenes=5, padding_policy="broadcast")
+    assert p_before == 0.05
+    assert p_after == 0.60
+
+    # Fixed fallback policy
+    p_before, p_after = get_scene_padding("scene_02", scene_idx=2, total_scenes=5, padding_policy="fixed")
+    assert p_before == 0.4
+    assert p_after == 0.6
+
+
+def test_equal_power_micro_fade():
+    """_apply_micro_fade_pcm16 applies equal-power curve to PCM frames cleanly."""
+    from src.utils.tts import _apply_micro_fade_pcm16
+    import struct
+
+    sr = 44100
+    total_samples = 4410  # 100ms
+    # Constant non-zero amplitude
+    frames = struct.pack(f"<{total_samples}h", *([10000] * total_samples))
+
+    faded = _apply_micro_fade_pcm16(frames, sr, fade_ms=10.0)
+    samples = struct.unpack(f"<{total_samples}h", faded)
+
+    # First sample should be near 0
+    assert abs(samples[0]) < 100
+    # Center sample should be unchanged
+    assert samples[total_samples // 2] == 10000
+    # Last sample should be near 0
+    assert abs(samples[-1]) < 100
+
+
+def test_voice_agent_broadcast_padding_policy_dead_air(mock_run_dir: Path):
+    """VoiceAgent with broadcast padding policy achieves dead air ratio <= 3.0%."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "padding_policy": "broadcast",
+                    "similarity_threshold": 0.72,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+    is_valid, err = agent.validate(output_files)
+    assert is_valid, f"Validation failed: {err}"
+
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+
+    q = rep.get("quality", {})
+    # Dead air ratio target <= 3.0%
+    assert q["dead_air_ratio"] <= 0.03
+    assert rep["speaker_consistency"]["padding_policy"] == "broadcast"
+
+
+def test_master_audio_loudnorm_linear_strict_success(tmp_path: Path):
+    """master_audio_loudnorm achieves -16.0 +/- 0.3 LUFS in linear mode with true-peak <= -1.5 dBFS."""
+    from src.utils.tts import master_audio_loudnorm, concatenate_scenes
+
+    source_wav = Path("data/benchmarks/candidate_3/narration_master.wav")
+    if not source_wav.exists():
+        pytest.skip("Benchmark audio not found")
+
+    out_master = tmp_path / "test_master_linear.wav"
+    res = master_audio_loudnorm(
+        input_wav=source_wav,
+        output_wav=out_master,
+        target_lufs=-16.0,
+        true_peak=-1.5,
+        sample_rate=48000,
+        highpass_hz=80.0,
+        compressor=True,
+        limiter=True,
+        limiter_ceiling_dbfs=-1.5,
+        loudness_strategy="linear_strict",
+    )
+
+    assert res["fallback_used"] is False
+    assert res["loudnorm_mode"] == "linear"
+    assert res["after_lufs"] == pytest.approx(-16.0, abs=0.3)
+    assert res["after_true_peak"] <= -1.45  # True peak ceiling -1.5 dBFS with 0.05 dB margin
+    assert res["output_sample_rate"] == 48000
+
+
+def test_master_audio_loudnorm_linear_strict_refuses_fallback(tmp_path: Path):
+    """master_audio_loudnorm under linear_strict raises RuntimeError when linear target cannot be met."""
+    from src.utils.tts import master_audio_loudnorm
+
+    source_wav = Path("data/benchmarks/candidate_3/narration_master.wav")
+    if not source_wav.exists():
+        pytest.skip("Benchmark audio not found")
+
+    out_master = tmp_path / "test_refuse.wav"
+    # Unachievable ceiling with compressor disabled and target_lufs pushed to -10 LUFS
+    with pytest.raises(RuntimeError, match="Refusing fallback under loudness_strategy='linear_strict'"):
+        master_audio_loudnorm(
+            input_wav=source_wav,
+            output_wav=out_master,
+            target_lufs=-10.0,
+            true_peak=-6.0,
+            sample_rate=48000,
+            highpass_hz=80.0,
+            compressor=False,
+            limiter=False,
+            loudness_strategy="linear_strict",
+        )
+
+
+def test_voice_agent_linear_strict_default(mock_run_dir: Path):
+    """VoiceAgent defaults to linear_strict mastering and achieves -16 LUFS linear mode."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "target_lufs": -16.0,
+                    "target_scene_rms_dbfs": -23.0,
+                    "loudness_strategy": "linear_strict",
+                    "limiter_ceiling_dbfs": -1.5,
+                    "similarity_threshold": 0.72,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+    is_valid, err = agent.validate(output_files)
+    assert is_valid, f"Validation failed: {err}"
+
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+
+    loud = rep["loudnorm"]
+    assert loud["loudness_strategy"] == "linear_strict"
+    assert loud["fallback_used"] is False
+    assert loud["loudnorm_mode"] == "linear"
+    assert loud["after_lufs"] == pytest.approx(-16.0, abs=0.5)
+    assert loud["after_true_peak"] <= -1.45
+
+
+def test_unverified_pronunciation_gate_blocks_run(mock_run_dir: Path):
+    """VoiceAgent.validate() blocks runs when unverified pronunciations are applied."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "target_lufs": -16.0,
+                    "target_scene_rms_dbfs": -23.0,
+                    "similarity_threshold": 0.72,
+                    "allow_unverified_pronunciations": False,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+
+    # Manually inject an unverified applied pronunciation into voice_report.json
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+    rep["unverified_pronunciations_applied"] = [
+        {"word": "UnverifiedEntity", "respelling": "Un-ver-i-fied", "scene_id": "intro"}
+    ]
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(rep, f, indent=2)
+
+    is_valid, err = agent.validate(output_files)
+    assert not is_valid
+    assert "Unverified pronunciation gate failed" in err
+    assert "UnverifiedEntity" in err
+
+
+def test_unverified_pronunciation_gate_passes_when_allowed(mock_run_dir: Path):
+    """VoiceAgent.validate() passes when allow_unverified_pronunciations: true is set."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "target_lufs": -16.0,
+                    "target_scene_rms_dbfs": -23.0,
+                    "similarity_threshold": 0.72,
+                    "allow_unverified_pronunciations": True,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+
+    # Manually inject an unverified applied pronunciation into voice_report.json
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+    rep["unverified_pronunciations_applied"] = [
+        {"word": "UnverifiedEntity", "respelling": "Un-ver-i-fied", "scene_id": "intro"}
+    ]
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(rep, f, indent=2)
+
+    is_valid, err = agent.validate(output_files)
+    assert is_valid, f"Validation should pass when allow_unverified_pronunciations is True, got: {err}"
+
+
+def test_proper_noun_discovery_in_voice_report(mock_run_dir: Path):
+    """VoiceAgent populates pending_proper_nouns in voice_report.json."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "target_lufs": -16.0,
+                    "target_scene_rms_dbfs": -23.0,
+                    "similarity_threshold": 0.72,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+
+    report_path = mock_run_dir / "audio" / "voice_report.json"
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+
+    assert "pending_proper_nouns" in rep
+    assert isinstance(rep["pending_proper_nouns"], list)
+    assert "unverified_pronunciations_applied" in rep
+    assert isinstance(rep["unverified_pronunciations_applied"], list)
+
+
+def test_pronunciations_yaml_all_verified():
+    """All entries in config/pronunciations.yaml must have verified: true and valid respellings."""
+    import yaml
+    p_path = Path("config/pronunciations.yaml")
+    assert p_path.exists(), "config/pronunciations.yaml must exist"
+    with open(p_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    pronunciations = data.get("pronunciations", {})
+    assert len(pronunciations) >= 20, f"Expected at least 20 dictionary entries, got {len(pronunciations)}"
+
+    for word, item in pronunciations.items():
+        assert isinstance(item, dict), f"Entry {word} must be a dict"
+        assert "respelling" in item and len(item["respelling"].strip()) > 0, f"Entry {word} missing respelling"
+        assert item.get("verified") is True, f"Entry {word} is not verified: true"
+
+
+def test_daemon_health_mismatch_falls_back(tmp_path: Path):
+    """MingEngine falls back to subprocess when daemon health reports config mismatch."""
+    import unittest.mock as mock
+    from src.utils.tts import MingEngine
+
+    engine = MingEngine(
+        python_path=tmp_path / "python.exe",
+        worker_script=tmp_path / "worker.py",
+        daemon_url="http://127.0.0.1:8765",
+    )
+
+    job_payload = {
+        "model_path": "models/Ming-3.0-tts-0.5b",
+        "device": "cuda:0",
+        "dtype": "bfloat16",
+        "text_normalization": False,
+    }
+
+    # Case 1: Mismatch in device
+    mismatch_health = {
+        "status": "ok",
+        "model_path": "models/Ming-3.0-tts-0.5b",
+        "device": "cpu",
+        "dtype": "bfloat16",
+        "text_normalization": False,
+    }
+    with mock.patch("urllib.request.urlopen") as mock_url:
+        mock_resp = mock.MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps(mismatch_health).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_url.return_value = mock_resp
+
+        assert not engine._check_daemon_health("http://127.0.0.1:8765", job_payload)
+
+    # Case 2: Matching config
+    match_health = {
+        "status": "ok",
+        "model_path": str(Path("models/Ming-3.0-tts-0.5b").resolve()),
+        "device": "cuda:0",
+        "dtype": "bfloat16",
+        "text_normalization": False,
+    }
+    with mock.patch("urllib.request.urlopen") as mock_url:
+        mock_resp = mock.MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps(match_health).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_url.return_value = mock_resp
+
+        assert engine._check_daemon_health("http://127.0.0.1:8765", job_payload)
+
+
+def test_vectorized_level_pcm16_active_rms():
+    """Vectorized _level_pcm16_active_rms adjusts active speech RMS without clipping."""
+    import numpy as np
+    from src.utils.tts import _level_pcm16_active_rms
+
+    sr = 44100
+    t = np.linspace(0, 1.0, sr, endpoint=False)
+    # Generate 1s tone at -10 dBFS peak (~10362 amplitude)
+    tone = (np.sin(2 * np.pi * 440 * t) * 10362).astype(np.int16)
+    raw = tone.tobytes()
+
+    leveled = _level_pcm16_active_rms(raw, sr, target_rms_dbfs=-23.0)
+    assert len(leveled) == len(raw)
+    arr_out = np.frombuffer(leveled, dtype=np.int16)
+    # Check that amplitude was scaled down toward -23 dBFS
+    assert np.max(np.abs(arr_out)) < np.max(np.abs(tone))
+    assert np.max(np.abs(arr_out)) <= 32767
+
+
+def test_vectorized_check_audio_silence_gaps(tmp_path: Path):
+    """Vectorized and sample-width aware check_audio_silence_gaps correctly measures silence."""
+    import numpy as np
+    from src.agents.voice import check_audio_silence_gaps
+
+    wav_file = tmp_path / "test_gap.wav"
+    sr = 44100
+    # 0.5s tone + 0.8s silence + 0.5s tone
+    tone = (np.sin(2 * np.pi * 440 * np.linspace(0, 0.5, int(sr * 0.5))) * 16000).astype(np.int16)
+    silence = np.zeros(int(sr * 0.8), dtype=np.int16)
+    data = np.concatenate([tone, silence, tone])
+
+    with wave.open(str(wav_file), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(data.tobytes())
+
+    measured_gap = check_audio_silence_gaps(wav_file, threshold_db=-45.0)
+    assert measured_gap == pytest.approx(0.8, abs=0.08)
+
+
+def test_batched_scenes_synthesis(mock_run_dir: Path):
+    """VoiceAgent.run with batching: 2 splits chunks and outputs complete audio."""
+    agent = VoiceAgent(
+        run_dir=mock_run_dir,
+        config={
+            "stages": [
+                {
+                    "id": "voice",
+                    "engine": "fake",
+                    "target_lufs": -16.0,
+                    "target_scene_rms_dbfs": -23.0,
+                    "similarity_threshold": 0.72,
+                    "batching": 2,
+                }
+            ]
+        },
+    )
+    manifest = {"stages": {"voice": {"status": "pending"}}}
+    output_files = agent.run(manifest, engine_override="fake")
+    is_valid, err = agent.validate(output_files)
+    assert is_valid, f"Batched run validation failed: {err}"
+    assert (mock_run_dir / "audio" / "narration.wav").exists()
+
+
+
+
+
+
 
 
 

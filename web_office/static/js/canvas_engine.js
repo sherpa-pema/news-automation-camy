@@ -41,11 +41,24 @@ export class OfficeCanvasEngine {
     this.offsetY = 0;
     this.mouseX = -999;
     this.mouseY = -999;
+    this._running = true;
 
     this._bindEvents();
     this._loop = this._loop.bind(this);
     this._lastTs = performance.now();
     requestAnimationFrame(this._loop);
+  }
+
+  _bindEvents() {
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        this._running = false;
+      } else if (!this._running) {
+        this._running = true;
+        this._lastTs = performance.now();
+        requestAnimationFrame(this._loop);
+      }
+    });
   }
 
   setState(state) {
@@ -212,7 +225,7 @@ export class OfficeCanvasEngine {
   }
 
   _resizeIfNeeded() {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rect = this.canvas.parentElement.getBoundingClientRect();
     const w = Math.max(320, Math.floor(rect.width));
     const h = Math.max(240, Math.floor(rect.height));
@@ -227,6 +240,10 @@ export class OfficeCanvasEngine {
   }
 
   _loop(now) {
+    if (!this._running || document.hidden) {
+      this._running = false;
+      return;
+    }
     const dt = Math.min(0.1, (now - this._lastTs) / 1000);
     this._lastTs = now;
 

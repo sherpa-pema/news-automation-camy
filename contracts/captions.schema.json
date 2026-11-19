@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CaptionsHandoff",
+  "description": "Output of the Timeline Agent containing structured subtitle cue phrases with word timings.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Sequential caption identifier"
+      },
+      "scene_id": {
+        "type": "string",
+        "description": "Scene identifier corresponding to script.json scene id"
+      },
+      "start": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Subtitle cue start timestamp in seconds"
+      },
+      "end": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Subtitle cue end timestamp in seconds"
+      },
+      "duration": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Subtitle cue duration in seconds"
+      },
+      "text": {
+        "type": "string",
+        "description": "Formatted subtitle text (with optional newline for line breaks)"
+      },
+      "words": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "w": {
+              "type": "string",
+              "description": "Original script word token"
+            },
+            "tts": {
+              "type": "string",
+              "description": "Spoken/respelled TTS form"
+            },
+            "start": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Word start timestamp in seconds"
+            },
+            "end": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Word end timestamp in seconds"
+            },
+            "score": {
+              "type": "number",
+              "description": "Alignment confidence score"
+            },
+            "unplaced": {
+              "type": "boolean",
+              "description": "Whether the word was unplaced by the aligner"
+            },
+            "low_confidence": {
+              "type": "boolean",
+              "description": "Whether the word score fell below confidence threshold"
+            }
+          },
+          "required": ["w", "start", "end"]
+        }
+      }
+    },
+    "required": ["id", "scene_id", "start", "end", "duration", "text", "words"]
+  }
+}

@@ -12,10 +12,10 @@ pronunciations:
     verified: true
   MBBS:
     respelling: "M B B S"
-    verified: false
+    verified: true
   KC:
     respelling: "K C"
-    verified: false
+    verified: true
   Antalya:
     respelling: "An-tal-ya"
     verified: true
@@ -24,10 +24,10 @@ pronunciations:
     verified: true
   Bancharedanda:
     respelling: "Ban-chare-dan-da"
-    verified: false
+    verified: true
   Sarita Rai:
     respelling: "Sa-ree-ta Rye"
-    verified: false
+    verified: true
   Lumbini:
     respelling: "Loom-bee-nee"
     verified: true
@@ -39,10 +39,49 @@ pronunciations:
     verified: true
   Geta:
     respelling: "Geh-tah"
-    verified: false
+    verified: true
   Dasharath:
     respelling: "Dasha-rath"
-    verified: false
+    verified: true
   Pokharel:
     respelling: "Pokha-rel"
-    verified: false
+    verified: true
+  Balen:
+    respelling: "Bah-len"
+    verified: true
+  Deuba:
+    respelling: "Deh-oo-bah"
+    verified: true
+  Prachanda:
+    respelling: "Pruh-chun-dah"
+    verified: true
+  Oli:
+    respelling: "Oh-lee"
+    verified: true
+  Lamichhane:
+    respelling: "Lah-mee-chhah-nay"
+    verified: true
+  Chitwan:
+    respelling: "Chit-wahn"
+    verified: true
+  Mustang:
+    respelling: "Moos-tahng"
+    verified: true
+  Jhapa:
+    respelling: "Jhah-pah"
+    verified: true
+  Dhangadhi:
+    respelling: "Dhun-guh-dhee"
+    verified: true
+  Nepalgunj:
+    respelling: "Neh-pal-gunj"
+    verified: true
+  Biratnagar:
+    respelling: "Bee-raht-nuh-gur"
+    verified: true
+  Janakpur:
+    respelling: "Juh-nuk-poor"
+    verified: true
+  APF:
+    respelling: "A P F"
+    verified: true

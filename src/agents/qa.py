@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from typing import Any
+import yaml
 from PIL import Image, ImageDraw, ImageFont
 
 from src.agents.base import BaseAgent
@@ -19,6 +20,8 @@ from src.utils.editor_validator import (
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest
 from src.utils.storyboard import generate_storyboard
+from src.utils.overlay_plan import STOCK_SOURCES, validate_layout
+from src.utils.timeline import audit_captions
 
 logger = logging.getLogger("qa")
 
@@ -47,6 +50,22 @@ class QAAgent(BaseAgent):
     def __init__(self, run_dir: Path, config: dict[str, Any] | None = None) -> None:
         super().__init__(run_dir, config)
         self.logger = setup_logger("qa_agent", self.run_dir / "run.log")
+        self.style_config = self._load_style_config()
+        self.channel_config = self._load_channel_config()
+
+    def _load_style_config(self) -> dict[str, Any]:
+        p = Path("config/style.yaml")
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        return {}
+
+    def _load_channel_config(self) -> dict[str, Any]:
+        p = Path("config/channel.yaml")
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        return {}
 
     @property
     def name(self) -> str:
@@ -103,9 +122,21 @@ class QAAgent(BaseAgent):
         if not frame_paths:
             return
 
-        # Stitch into grid (2 columns wide, N rows)
-        thumb_w, thumb_h = 640, 360
-        cols = 2
+        # Check aspect ratio of extracted frames
+        is_vert = False
+        try:
+            with Image.open(frame_paths[0][1]) as f_img:
+                is_vert = f_img.height > f_img.width
+        except Exception:
+            pass
+
+        # Stitch into grid
+        if is_vert:
+            thumb_w, thumb_h = 360, 640
+            cols = 3
+        else:
+            thumb_w, thumb_h = 640, 360
+            cols = 2
         rows = (len(frame_paths) + cols - 1) // cols
         sheet_w = cols * thumb_w + (cols + 1) * 20
         sheet_h = rows * (thumb_h + 30) + 40
@@ -163,6 +194,9 @@ class QAAgent(BaseAgent):
         captions_file = self.run_dir / "timeline" / "captions.json"
         if not captions_file.exists():
             captions_file = self.run_dir / "captions.json"
+        caption_audit_file = self.run_dir / "timeline" / "caption_audit.json"
+        if not caption_audit_file.exists():
+            caption_audit_file = self.run_dir / "caption_audit.json"
         ass_file = self.run_dir / "motion" / "captions.ass"
         media_file = self.run_dir / "media" / "media_manifest.json"
         desc_file = self.run_dir / "render" / "description.md"
@@ -209,6 +243,27 @@ class QAAgent(BaseAgent):
         # ----------------------------------------------------------------------
         # Check 2: Final MP4 stream metadata and duration sync
         # ----------------------------------------------------------------------
+        expected_w, expected_h = 1920, 1080
+        if render_plan_file.exists():
+            try:
+                with open(render_plan_file, "r", encoding="utf-8") as rpf:
+                    rp_json = json.load(rpf)
+                rp_res = rp_json.get("resolution")
+                if rp_res and isinstance(rp_res, str) and "x" in rp_res:
+                    p = [int(x) for x in rp_res.split("x")]
+                    expected_w, expected_h = p[0], p[1]
+            except Exception:
+                pass
+        elif media_file.exists():
+            try:
+                with open(media_file, "r", encoding="utf-8") as mf:
+                    m_json = json.load(mf)
+                m_res = m_json.get("resolution")
+                if m_res and isinstance(m_res, (list, tuple)) and len(m_res) >= 2:
+                    expected_w, expected_h = int(m_res[0]), int(m_res[1])
+            except Exception:
+                pass
+
         stream_passed = True
         stream_details: list[str] = []
         try:
@@ -229,9 +284,9 @@ class QAAgent(BaseAgent):
                 if codec_v != "h264":
                     stream_passed = False
                     stream_details.append(f"Expected H.264 video, got {codec_v}")
-                if w != 1920 or h != 1080:
+                if w != expected_w or h != expected_h:
                     stream_passed = False
-                    stream_details.append(f"Expected 1920x1080 resolution, got {w}x{h}")
+                    stream_details.append(f"Expected {expected_w}x{expected_h} resolution, got {w}x{h}")
 
             if not a_streams:
                 stream_passed = False
@@ -340,7 +395,8 @@ class QAAgent(BaseAgent):
                     with open(voice_report_file, "r", encoding="utf-8") as vf:
                         v_rep = json.load(vf)
                     v_lufs = float(v_rep.get("loudness_after_lufs", -99.0))
-                    if abs(v_lufs - (-18.0)) <= 1.5:
+                    v_target = float(v_rep.get("loudnorm", {}).get("target_lufs", v_rep.get("target_lufs", -16.0)))
+                    if abs(v_lufs - v_target) <= 1.5:
                         voice_was_ok = True
                 except Exception:
                     pass
@@ -436,16 +492,42 @@ class QAAgent(BaseAgent):
                         attr_passed = False
                         attr_details.append(f"Scene '{sc_id}' lower-third missing headline or source credit")
 
-                    # Verify lower third overlay is scheduled
+                    # Verify source credit reflects script source if present
+                    script_src = sc_script.get("source") or sc_script.get("sources")
+                    if script_src and lt:
+                        lt_credit = lt.get("source_credit", "")
+                        raw_parts = [script_src] if isinstance(script_src, str) else script_src
+                        script_outlets = []
+                        for p in raw_parts:
+                            for sub in re.split(r",|\band\b", p):
+                                c = sub.strip().strip(". ,;:")
+                                c = re.sub(r"^source:\s*", "", c, flags=re.IGNORECASE).strip()
+                                if c:
+                                    script_outlets.append(c)
+
+                        channel_fallback = self.channel_config.get("channel_name", "Nepal Daily Briefing")
+                        if lt_credit == channel_fallback or "Verified Outlets" in lt_credit:
+                            attr_passed = False
+                            attr_details.append(
+                                f"Scene '{sc_id}' source_credit fell back to channel '{lt_credit}' while script source exists ('{script_src}')"
+                            )
+                        elif script_outlets and not any(outlet.lower() in lt_credit.lower() for outlet in script_outlets):
+                            attr_passed = False
+                            attr_details.append(
+                                f"Scene '{sc_id}' source_credit '{lt_credit}' does not reflect script source '{script_src}'"
+                            )
+
+                    # Verify attribution overlay is scheduled (lower_third or featured card)
                     sc_overlays = sc_plan.get("overlays", [])
-                    has_lt_ov = any(ov.get("type") == "lower_third" for ov in sc_overlays)
-                    if not has_lt_ov:
+                    FEATURED_ATTR_TYPES = {"lower_third", "quote_card", "stat_callout", "headline_split"}
+                    has_attr_ov = any(ov.get("type") in FEATURED_ATTR_TYPES for ov in sc_overlays)
+                    if not has_attr_ov:
                         attr_passed = False
-                        attr_details.append(f"Scene '{sc_id}' missing scheduled lower_third overlay")
+                        attr_details.append(f"Scene '{sc_id}' missing scheduled attribution overlay (lower_third or featured card)")
 
                     # Check illustrative tag if stock shots used
                     has_stock = any(
-                        s.get("source") in ("wikimedia_commons", "pixabay", "coverr", "openverse", "nasa")
+                        s.get("source") in STOCK_SOURCES
                         for s in sc_plan.get("shots", [])
                     )
                     if has_stock:
@@ -475,27 +557,21 @@ class QAAgent(BaseAgent):
             with open(render_plan_file, "r", encoding="utf-8") as pf:
                 plan_data = json.load(pf)
 
-            overlays = plan_data.get("overlays", [])
-            # 5% safe margins in 1920x1080: x: 96..1824, y: 54..1026
-            for ov in overlays:
-                ox = ov.get("x", 0)
-                oy = ov.get("y", 0)
-                ow = ov.get("w", 0)
-                oh = ov.get("h", 0)
-                ov_id = ov.get("id")
-
-                if ox < 96 or oy < 54 or (ox + ow) > 1824 or (oy + oh) > 1026:
-                    layout_passed = False
-                    layout_details.append(f"Overlay '{ov_id}' exceeds 5% safe margin bounds (rect: [{ox},{oy},{ow},{oh}])")
-
-                # Caption band collision check: captions sit in y: 910..1020
-                if ov.get("type") == "lower_third" and (oy + oh) > 900:
-                    layout_passed = False
-                    layout_details.append(f"Lower-third '{ov_id}' overlaps caption band (bottom y={oy+oh} > 900)")
+            layout_details = validate_layout(plan_data, self.style_config)
+            if layout_details:
+                layout_passed = False
 
         except Exception as e:
             layout_passed = False
             layout_details.append(f"Overlay layout check error: {e}")
+
+        checks.append({
+            "name": "overlay_safe_zone",
+            "passed": layout_passed,
+            "detail": "; ".join(layout_details) if layout_details else "All overlays within 5% safe margin bounds and do not collide",
+        })
+        if not layout_passed and not redo_stage:
+            redo_stage = "motion"
 
         checks.append({
             "name": "overlay_layout",
@@ -508,19 +584,30 @@ class QAAgent(BaseAgent):
         # ----------------------------------------------------------------------
         # Check 8: Subtitle captions presence & timing
         # ----------------------------------------------------------------------
+        qa_cfg: dict[str, Any] = {}
+        if self.config:
+            for st in self.config.get("stages", []):
+                if st.get("id") == "qa":
+                    qa_cfg = st
+                    break
+
         captions_passed = True
         cap_details: list[str] = []
+        json_caps: list[dict[str, Any]] = []
+        audit_data: dict[str, Any] | None = None
+
         try:
             if not ass_file.exists():
                 captions_passed = False
                 cap_details.append(f"Missing {ass_file}")
             else:
-                with open(captions_file, "r", encoding="utf-8") as cf:
-                    json_caps = json.load(cf)
+                if captions_file.exists():
+                    with open(captions_file, "r", encoding="utf-8") as cf:
+                        json_caps = json.load(cf)
                 ass_content = ass_file.read_text(encoding="utf-8")
                 dialogue_lines = [l for l in ass_content.splitlines() if l.startswith("Dialogue:")]
 
-                if len(dialogue_lines) != len(json_caps):
+                if json_caps and len(dialogue_lines) != len(json_caps):
                     captions_passed = False
                     cap_details.append(f"ASS dialogue count ({len(dialogue_lines)}) != captions.json count ({len(json_caps)})")
 
@@ -531,6 +618,90 @@ class QAAgent(BaseAgent):
                         captions_passed = False
                         cap_details.append(f"Caption '{cap.get('id')}' ends past video duration ({cap.get('end')}s > {vid_dur}s)")
                         break
+
+            # Caption Audit & Sync validation
+            if caption_audit_file.exists():
+                try:
+                    with open(caption_audit_file, "r", encoding="utf-8") as caf:
+                        audit_data = json.load(caf)
+                except Exception as e:
+                    self.logger.warning(f"Failed to read {caption_audit_file}: {e}")
+
+            if not audit_data and json_caps:
+                try:
+                    scenes_data = None
+                    if timeline_file.exists():
+                        with open(timeline_file, "r", encoding="utf-8") as tf:
+                            scenes_data = json.load(tf).get("scenes")
+                    audit_data = audit_captions(json_caps, scenes=scenes_data)
+                except Exception as e:
+                    self.logger.warning(f"Failed to run audit_captions fallback: {e}")
+
+            if audit_data:
+                summary = audit_data.get("summary", {})
+                metrics["caption_audit"] = {
+                    "total_captions": summary.get("total_captions", len(json_caps)),
+                    "max_late_ms": summary.get("max_late_ms", 0.0),
+                    "max_cps": summary.get("max_cps", 0.0),
+                    "median_cps": summary.get("median_cps", 0.0),
+                    "violations_count": summary.get("violations_count", 0),
+                    "passed": summary.get("passed", True),
+                }
+
+                if not summary.get("passed", True):
+                    violations = audit_data.get("violations", [])
+                    allow_soft = bool(qa_cfg.get("allow_soft_captions", False))
+                    max_allowed_cps = float(qa_cfg.get("max_cps_threshold", 26.0))
+                    max_allowed_late = float(qa_cfg.get("max_late_ms_threshold", 100.0))
+
+                    fatal_samples: list[str] = []
+                    advisory_samples: list[str] = []
+
+                    for v in violations:
+                        vtype = v.get("type")
+                        vdetail = v.get("detail", "")
+                        # Critical broadcast failures are always fatal
+                        if vtype in ("inverted_timing", "overlap", "word_cut_off", "word_conservation_mismatch", "line_count_exceeded", "line_length_exceeded"):
+                            fatal_samples.append(f"{vtype}: {vdetail}")
+                        elif vtype == "late_start" and float(v.get("late_ms", 0.0)) > max_allowed_late:
+                            fatal_samples.append(f"{vtype}: {vdetail}")
+                        elif vtype == "high_cps" and float(v.get("cps", 0.0)) > max_allowed_cps:
+                            fatal_samples.append(f"{vtype}: {vdetail}")
+                        elif not allow_soft:
+                            fatal_samples.append(f"{vtype}: {vdetail}")
+                        else:
+                            advisory_samples.append(f"{vtype}: {vdetail}")
+                            warnings.append(f"Caption advisory: {vdetail}")
+
+                    if fatal_samples:
+                        captions_passed = False
+                        cap_details.append(
+                            f"Caption audit failed with {len(fatal_samples)} fatal violation(s) "
+                            f"(max late: {summary.get('max_late_ms', 0)}ms, max CPS: {summary.get('max_cps', 0)}): "
+                            + "; ".join(fatal_samples[:3])
+                        )
+                    elif advisory_samples:
+                        cap_details.append(
+                            f"Caption audit has {len(advisory_samples)} advisory tolerance(s) permitted by QA config "
+                            f"(max late: {summary.get('max_late_ms', 0)}ms, max CPS: {summary.get('max_cps', 0)})"
+                        )
+
+            # Timeline degraded check
+            if timeline_file.exists():
+                try:
+                    with open(timeline_file, "r", encoding="utf-8") as tf:
+                        tl_data = json.load(tf)
+                    if tl_data.get("degraded", False):
+                        lc_scenes = tl_data.get("low_confidence_scenes", [])
+                        msg = f"Timeline alignment degraded (low_confidence_scenes: {lc_scenes})"
+                        if qa_cfg.get("allow_degraded_timeline", False):
+                            warnings.append(msg)
+                            cap_details.append(f"{msg} (advisory warning permitted by QA config)")
+                        else:
+                            captions_passed = False
+                            cap_details.append(msg)
+                except Exception as e:
+                    self.logger.warning(f"Failed to check timeline degraded status: {e}")
 
         except Exception as e:
             captions_passed = False

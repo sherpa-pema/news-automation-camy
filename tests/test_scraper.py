@@ -1,5 +1,6 @@
 """Unit and integration tests for the Scraper Agent using local fixtures."""
 from datetime import datetime
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
@@ -11,6 +12,8 @@ from src.agents.scraper import (
     build_text_summary,
     canonical_url_key,
     compute_importance_hint,
+    compute_priority_score,
+    extract_jsonld_article,
     infer_category_hint,
     is_duplicate_title,
     normalize_language_code,
@@ -194,7 +197,12 @@ def test_broken_source_does_not_fail_whole_run(sample_feed_xml, sample_article_h
 
     def mock_fetch(url, *args, **kwargs):
         resp = MagicMock()
-        if "broken.news.com" in url:
+        if "robots.txt" in url:
+            resp.status_code = 200
+            resp.content = b"User-agent: *\nAllow: /\n"
+            resp.text = "User-agent: *\nAllow: /\n"
+            return resp
+        elif "broken.news.com" in url:
             resp.status_code = 500
             resp.content = b"Internal Server Error"
             resp.text = "Internal Server Error"
@@ -664,3 +672,649 @@ def test_nepali_clustering_and_devanagari_number_validation():
     nums = extract_numbers_from_text("भीमफेदी इभी दुर्घटनामा १४ जनाको मृत्यु, ६ घाइते")
     assert 14.0 in nums
     assert 6.0 in nums
+
+
+# =============================================================================
+# 10. Refinement Plan Verification Tests (T1.1 - T3.5)
+# =============================================================================
+
+def test_thin_story_rejected_at_ingest(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    feed_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>News</title>
+      <item>
+        <title>Quick Update On Roads</title>
+        <link>https://example.com/road-update</link>
+        <pubDate>Thu, 12 Nov 2026 07:00:00 +0545</pubDate>
+      </item>
+    </channel></rss>"""
+    short_html = (
+        "<html><body><article><p>"
+        "Traffic resumed after a major landslide was cleared early this morning on the Prithvi Highway near Mugling. "
+        "Authorities confirmed that heavy excavators worked overnight to remove large boulders blocking both lanes, "
+        "allowing passenger buses and cargo trucks to proceed safely toward Kathmandu."
+        "</p></article></body></html>"
+    )
+
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "request_delay_seconds": 0},
+        "sources": [{"name": "ShortNews", "rss": "https://example.com/feed", "method": "rss", "enabled": True}],
+    }
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "robots.txt" in url:
+            resp.text = "User-agent: *\nAllow: /\n"
+            resp.content = resp.text.encode("utf-8")
+        elif "feed" in url:
+            resp.text = feed_xml.decode("utf-8")
+            resp.content = feed_xml
+        else:
+            resp.text = short_html
+            resp.content = short_html.encode("utf-8")
+        return resp
+
+    ref_time = datetime(2026, 11, 12, 10, 0, 0, tzinfo=KATHMANDU_TZ)
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(ref_time=ref_time)
+
+    assert len(articles) == 0
+    assert stats["ShortNews"]["drop_reasons"]["thin_story"] >= 1
+
+
+def test_advertorial_rejected_at_ingest(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    feed_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>News</title>
+      <item>
+        <title>Sponsored: Special Promotional Offer On Vehicles</title>
+        <link>https://example.com/sponsored/deal</link>
+        <pubDate>Thu, 12 Nov 2026 07:00:00 +0545</pubDate>
+      </item>
+    </channel></rss>"""
+    promo_html = "<html><body><article><p>" + ("Sponsored content: Click here to buy and claim your promotional discount today with special offers and limited deals. " * 8) + "</p></article></body></html>"
+
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "request_delay_seconds": 0},
+        "sources": [{"name": "PromoNews", "rss": "https://example.com/feed", "method": "rss", "enabled": True}],
+    }
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "robots.txt" in url:
+            resp.text = "User-agent: *\nAllow: /\n"
+            resp.content = resp.text.encode("utf-8")
+        elif "feed" in url:
+            resp.text = feed_xml.decode("utf-8")
+            resp.content = feed_xml
+        else:
+            resp.text = promo_html
+            resp.content = promo_html.encode("utf-8")
+        return resp
+
+    ref_time = datetime(2026, 11, 12, 10, 0, 0, tzinfo=KATHMANDU_TZ)
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(ref_time=ref_time)
+
+    assert len(articles) == 0
+    assert stats["PromoNews"]["drop_reasons"]["advertorial"] >= 1
+
+
+def test_robots_checked_on_rss_and_article(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    robots_text = "User-agent: *\nDisallow: /disallowed-feed\nDisallow: /blocked-article\n"
+    with patch.object(scraper, "_get_robot_parser") as mock_rp:
+        import urllib.robotparser
+        rp = urllib.robotparser.RobotFileParser()
+        rp.parse(robots_text.splitlines())
+        mock_rp.return_value = (True, rp, None)
+        can_feed, _ = scraper._check_robots_for_url("https://example.com/disallowed-feed", "Bot", 0)
+        can_allowed, _ = scraper._check_robots_for_url("https://example.com/allowed-article", "Bot", 0)
+        can_blocked, _ = scraper._check_robots_for_url("https://example.com/blocked-article", "Bot", 0)
+        assert can_feed is False
+        assert can_allowed is True
+        assert can_blocked is False
+
+
+def test_robots_failure_fails_closed(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "robots_policy": "fail_closed", "request_delay_seconds": 0},
+        "sources": [{"name": "BlockedSource", "rss": "https://blocked.example.com/rss", "method": "rss", "enabled": True}],
+    }
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        if "robots.txt" in url:
+            resp.status_code = 500
+            resp.text = "Server Error"
+            resp.content = b"Server Error"
+            return resp
+        resp.status_code = 200
+        return resp
+
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(target_date="2026-11-15")
+
+    assert len(articles) == 0
+    assert "BlockedSource" in errors
+    assert "ROBOTS_UNKNOWN" in errors["BlockedSource"]
+    assert stats["BlockedSource"]["robots_unknown"] is True
+    assert stats["BlockedSource"]["drop_reasons"]["robots_unavailable"] >= 1
+
+
+def test_robots_fallback_flag_overrides(tmp_path, sample_feed_xml, sample_article_html):
+    scraper = ScraperAgent(run_dir=tmp_path, allow_robots_fallback=True)
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "robots_policy": "fail_closed", "request_delay_seconds": 0},
+        "sources": [{"name": "FallbackSource", "rss": "https://fallback.example.com/rss", "method": "rss", "enabled": True}],
+    }
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        if "robots.txt" in url:
+            resp.status_code = 500
+            resp.text = "Server Error"
+            resp.content = b"Server Error"
+            return resp
+        elif "rss" in url:
+            resp.status_code = 200
+            resp.content = sample_feed_xml
+            resp.text = sample_feed_xml.decode("utf-8")
+            return resp
+        else:
+            resp.status_code = 200
+            resp.content = sample_article_html.encode("utf-8")
+            resp.text = sample_article_html
+            return resp
+
+    ref_time = datetime(2026, 11, 6, 12, 0, 0, tzinfo=KATHMANDU_TZ)
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(ref_time=ref_time, backfill=True)
+
+    assert len(articles) > 0
+    assert "FallbackSource" in stats
+
+
+def test_429_respects_retry_after(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    url = "https://rate-limited.com/article"
+    resp_429 = MagicMock()
+    resp_429.status_code = 429
+    resp_429.headers = {"Retry-After": "3"}
+    resp_429.text = "Too Many Requests"
+
+    with patch.object(scraper, "_get_session") as mock_session_getter:
+        sess = MagicMock()
+        sess.get.return_value = resp_429
+        mock_session_getter.return_value = sess
+        res = scraper.fetch_with_retry(url, "Bot/1.0", 0.0)
+
+    assert res.status_code == 429
+    assert "rate-limited.com" in scraper._domain_cooldowns
+    assert scraper._domain_cooldowns["rate-limited.com"] > 0
+
+
+def test_degraded_pass_widens_lookback(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    manifest = {
+        "date": "2026-11-15",
+        "stages": {"scraper": {"status": "pending", "metrics": {}, "source_errors": {}}},
+    }
+    sample_art = {
+        "source": "Sample",
+        "title": "Story",
+        "url": "https://sample.com/1",
+        "published_at": "2026-11-14T10:00:00+05:45",
+        "word_count": 100,
+        "text_summary": "summary",
+        "full_text": "full text " * 20,
+    }
+    call_counts = []
+
+    def mock_scrape_all(lookback_hours=None, **kwargs):
+        call_counts.append(lookback_hours)
+        arts = [dict(sample_art, url=f"https://sample.com/{i}", title=f"Story {i}") for i in range(4)]
+        return arts, {"Sample": {"found": 4, "extracted_ok": 4, "drop_reasons": {}}}, {}
+
+    with patch.object(scraper, "scrape_all", side_effect=mock_scrape_all):
+        outputs = scraper.run(manifest)
+
+    assert "raw/articles.json" in outputs
+    assert len(call_counts) == 2
+    assert call_counts == [30, 48]
+    arts_on_disk = json.loads((tmp_path / "raw" / "articles.json").read_text(encoding="utf-8"))
+    assert all(a.get("degraded_run") is True for a in arts_on_disk)
+    m_metrics = manifest["stages"]["scraper"]["metrics"]
+    assert m_metrics.get("degraded") is True
+    news_md = (tmp_path / "raw" / "news.md").read_text(encoding="utf-8")
+    assert "DEGRADED INGEST" in news_md
+
+
+def test_access_outage_is_hard_failure_not_degraded(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    manifest = {
+        "date": "2026-11-15",
+        "stages": {"scraper": {"status": "pending", "metrics": {}, "source_errors": {}}},
+    }
+
+    def mock_scrape_all(**kwargs):
+        stats = {
+            "Source1": {"found": 0, "extracted_ok": 0, "robots_unknown": True, "drop_reasons": {"robots_unavailable": 1}},
+            "Source2": {"found": 0, "extracted_ok": 0, "drop_reasons": {"rate_limited": 1}},
+        }
+        errors = {"Source1": "ROBOTS_UNKNOWN", "Source2": "HTTP 429"}
+        return [], stats, errors
+
+    with patch.object(scraper, "scrape_all", side_effect=mock_scrape_all):
+        with pytest.raises(RuntimeError, match="ACCESS_OUTAGE"):
+            scraper.run(manifest)
+
+
+def test_summary_skips_boilerplate_lead():
+    body_with_lead = (
+        "KATHMANDU, Nov 15 (RSS) — The government has announced a new infrastructure budget.\n\n"
+        "Follow us on Facebook and Twitter for more updates. Subscribe to our newsletter.\n\n"
+        "The Ministry of Finance allocated sixty billion rupees for national pride road projects across all seven provinces. "
+        "The project will span four years and connect remote mountainous districts to the national highway network."
+    )
+    summary = build_text_summary(body_with_lead)
+    assert "KATHMANDU, Nov 15 (RSS) —" not in summary
+    assert "Follow us on Facebook" not in summary
+    assert "The government has announced a new infrastructure budget" in summary or "The Ministry of Finance allocated" in summary
+
+
+def test_jsonld_extraction_fallback():
+    jsonld_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": "Special Cabinet Decision On Trade Policy",
+        "articleBody": "The Cabinet of Ministers endorsed the updated bilateral trade agreement with neighboring nations during an emergency meeting at the Prime Minister residence in Baluwatar. The deal aims to streamline cargo clearance and reduce transit costs.",
+        "datePublished": "2026-11-15T08:00:00+05:45"
+      }
+      </script>
+    </head>
+    <body>
+      <div><!-- No standard article paragraph tags --></div>
+    </body>
+    </html>
+    """
+    body, meta = extract_jsonld_article(jsonld_html)
+    assert "The Cabinet of Ministers endorsed" in body
+    assert meta.get("headline") == "Special Cabinet Decision On Trade Policy"
+    assert meta.get("published_at") == "2026-11-15T08:00:00+05:45"
+
+
+def test_cross_source_same_event_deduped(tmp_path, sample_article_html):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    feed_a = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>A</title>
+      <item><title>10 killed in electric microbus crash in Sindhuli</title>
+      <link>https://a.news.com/1</link>
+      <pubDate>Thu, 12 Nov 2026 07:00:00 +0545</pubDate></item>
+    </channel></rss>"""
+    feed_b = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>B</title>
+      <item><title>10 killed as EV plunges 70m in Sindhuli</title>
+      <link>https://b.news.com/1</link>
+      <pubDate>Thu, 12 Nov 2026 07:30:00 +0545</pubDate></item>
+    </channel></rss>"""
+
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "request_delay_seconds": 0, "dedupe_mode": "url+title+token"},
+        "sources": [
+            {"name": "Source A", "rss": "https://a.news.com/feed", "method": "rss", "enabled": True, "trust": 0.85},
+            {"name": "Source B", "rss": "https://b.news.com/feed", "method": "rss", "enabled": True, "trust": 0.70},
+        ],
+    }
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "robots.txt" in url:
+            resp.text = "User-agent: *\nAllow: /\n"
+            resp.content = resp.text.encode("utf-8")
+        elif "a.news.com/feed" in url:
+            resp.text = feed_a.decode("utf-8")
+            resp.content = feed_a
+        elif "b.news.com/feed" in url:
+            resp.text = feed_b.decode("utf-8")
+            resp.content = feed_b
+        else:
+            resp.text = sample_article_html
+            resp.content = sample_article_html.encode("utf-8")
+        return resp
+
+    ref_time = datetime(2026, 11, 12, 10, 0, 0, tzinfo=KATHMANDU_TZ)
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(ref_time=ref_time)
+
+    assert len(articles) == 1
+    assert articles[0]["source"] == "Source A"
+
+
+def test_nepali_article_marked_needs_translation(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    art_ne = scraper._extract_article(
+        url="https://rajdhanidaily.com/id/151315/",
+        html_text="<html><body><article><p>" + ("काठमाडौंमा नयाँ योजना सार्वजनिक गरिएको छ। " * 10) + "</p></article></body></html>",
+        source={"name": "Rajdhani Daily", "language": "ne", "trust": 0.75},
+        user_agent="Bot/1.0",
+        delay_seconds=0.0,
+        published_at="2026-11-15T10:00:00+05:45",
+        title="काठमाडौंमा नयाँ योजना",
+    )
+    assert art_ne is not None
+    assert art_ne["language"] == "ne"
+    assert art_ne["needs_translation"] is True
+    assert art_ne["translation_status"] == "pending"
+
+    art_en = scraper._extract_article(
+        url="https://kathmandupost.com/story/1",
+        html_text="<html><body><article><p>" + ("The Kathmandu Valley witnessed steady economic growth this quarter. " * 8) + "</p></article></body></html>",
+        source={"name": "Kathmandu Post", "language": "en", "trust": 0.85},
+        user_agent="Bot/1.0",
+        delay_seconds=0.0,
+        published_at="2026-11-15T10:00:00+05:45",
+        title="Kathmandu Valley Economic Growth",
+    )
+    assert art_en is not None
+    assert art_en["language"] == "en"
+    assert art_en["needs_translation"] is False
+    assert art_en["translation_status"] == "not_required"
+
+
+def test_devanagari_number_grounding_after_translation():
+    source_ne = "दुर्घटनामा ५ जनाको मृत्यु भएको छ भने १० जना घाइते छन्।"
+    nums_source = extract_numbers_from_text(source_ne)
+    assert 5.0 in nums_source
+    assert 10.0 in nums_source
+
+    narration_en = "Five people were killed and 10 injured in the accident."
+    nums_narration = extract_numbers_from_text(narration_en)
+    assert 5.0 in nums_narration
+    assert 10.0 in nums_narration
+    assert set(nums_narration).issubset(set(nums_source))
+
+
+def test_priority_score_prefers_recency():
+    score_fresh = compute_priority_score(age_hours=2.0, feed_position=1, raw_tags=["politics"], source_trust=0.8)
+    score_old = compute_priority_score(age_hours=28.0, feed_position=1, raw_tags=["politics"], source_trust=0.8)
+    assert score_fresh > score_old
+    assert score_fresh - score_old >= 0.20
+
+
+def test_budget_exhaustion_stops_gracefully(tmp_path, sample_article_html):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    feed_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>News</title>
+      <item><title>Story 1</title><link>https://example.com/1</link><pubDate>Sun, 15 Nov 2026 07:00:00 +0545</pubDate></item>
+      <item><title>Story 2</title><link>https://example.com/2</link><pubDate>Sun, 15 Nov 2026 07:00:00 +0545</pubDate></item>
+    </channel></rss>"""
+
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "budget_seconds": 0.001, "request_delay_seconds": 0},
+        "sources": [{"name": "BudgetSource", "rss": "https://example.com/feed", "method": "rss", "enabled": True}],
+    }
+
+    def mock_fetch(url, *args, **kwargs):
+        import time
+        time.sleep(0.01)
+        resp = MagicMock()
+        resp.status_code = 200
+        if "robots.txt" in url:
+            resp.text = "User-agent: *\nAllow: /\n"
+            resp.content = resp.text.encode("utf-8")
+        elif "feed" in url:
+            resp.text = feed_xml.decode("utf-8")
+            resp.content = feed_xml
+        else:
+            resp.text = sample_article_html
+            resp.content = sample_article_html.encode("utf-8")
+        return resp
+
+    ref_time = datetime(2026, 11, 15, 10, 0, 0, tzinfo=KATHMANDU_TZ)
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(ref_time=ref_time)
+
+    assert stats["BudgetSource"]["budget_exhausted"] is True
+
+
+def test_html_predate_filter_avoids_deep_fetch(tmp_path, sample_article_html):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    listing_html = """
+    <html><body>
+      <div class="card">
+        <a href="/2026/11/15/recent-story">Recent Story</a>
+        <time datetime="2026-11-15T08:00:00+05:45">Nov 15, 2026</time>
+      </div>
+      <div class="card">
+        <a href="/2024/05/01/old-story">Old Story From Two Years Ago</a>
+        <time datetime="2024-05-01T08:00:00+05:45">May 1, 2024</time>
+      </div>
+    </body></html>
+    """
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "request_delay_seconds": 0},
+        "sources": [{"name": "HtmlSource", "homepage": "https://example.com", "method": "html", "enabled": True}],
+    }
+    deep_fetched_urls = []
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "robots.txt" in url:
+            resp.text = "User-agent: *\nAllow: /\n"
+            resp.content = resp.text.encode("utf-8")
+        elif url == "https://example.com" or url == "https://example.com/":
+            resp.text = listing_html
+            resp.content = listing_html.encode("utf-8")
+        else:
+            deep_fetched_urls.append(url)
+            resp.text = sample_article_html
+            resp.content = sample_article_html.encode("utf-8")
+        return resp
+
+    ref_time = datetime(2026, 11, 15, 12, 0, 0, tzinfo=KATHMANDU_TZ)
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(ref_time=ref_time)
+
+    assert any("recent-story" in u for u in deep_fetched_urls)
+    assert not any("old-story" in u for u in deep_fetched_urls)
+
+
+def test_html_dup_title_checked_before_fetch(tmp_path, sample_article_html):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    listing_html = """
+    <html><body>
+      <a href="/link1">Government Announces New Highway Plan</a>
+      <a href="/link2">Government Announces New Highway Plan</a>
+    </body></html>
+    """
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "request_delay_seconds": 0},
+        "sources": [{"name": "HtmlDupSource", "homepage": "https://example.com", "method": "html", "enabled": True}],
+    }
+    fetched_articles = []
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "robots.txt" in url:
+            resp.text = "User-agent: *\nAllow: /\n"
+            resp.content = resp.text.encode("utf-8")
+        elif url == "https://example.com" or url == "https://example.com/":
+            resp.text = listing_html
+            resp.content = listing_html.encode("utf-8")
+        else:
+            fetched_articles.append(url)
+            resp.text = sample_article_html
+            resp.content = sample_article_html.encode("utf-8")
+        return resp
+
+    ref_time = datetime(2026, 11, 15, 12, 0, 0, tzinfo=KATHMANDU_TZ)
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(ref_time=ref_time)
+
+    assert len(fetched_articles) == 1
+    assert stats["HtmlDupSource"]["drop_reasons"]["dup_title"] >= 1
+
+
+def test_circuit_breaker_skips_dead_source(tmp_path):
+    scraper = ScraperAgent(run_dir=tmp_path)
+    state_file = tmp_path / "source_health.json"
+    scraper._circuit_breaker_file = state_file
+
+    scraper._record_circuit_breaker_outcome("DeadSource", kept=0, error="ERROR")
+    scraper._record_circuit_breaker_outcome("DeadSource", kept=0, error="EMPTY")
+    scraper._record_circuit_breaker_outcome("DeadSource", kept=0, error="ROBOTS_UNKNOWN")
+
+    tripped = scraper._is_circuit_breaker_tripped("DeadSource")
+    assert tripped is True
+
+    scraper.force_source = "DeadSource"
+    tripped_force = scraper._is_circuit_breaker_tripped("DeadSource")
+    assert tripped_force is False
+
+
+def test_parse_category_input_and_aliases():
+    from src.agents.scraper import parse_category_input
+
+    assert parse_category_input("1,5") == ["headlines", "health"]
+    assert parse_category_input("politics, international") == ["politics", "international"]
+    assert parse_category_input("all") == ["all"]
+    assert parse_category_input("A") == ["all"]
+    assert parse_category_input("") == ["all"]
+    assert parse_category_input("8") == ["sports"]
+    assert parse_category_input("health, sports") == ["health", "sports"]
+
+
+def test_article_matches_categories():
+    from src.agents.scraper import article_matches_categories
+
+    # 1. All categories
+    assert article_matches_categories("sports", selected_categories={"all"}) is True
+
+    # 2. Headlines matching
+    assert article_matches_categories("politics", feed_position=1, selected_categories={"headlines"}) is True
+    assert article_matches_categories("politics", feed_position=5, raw_tags=["Exclusive", "Breaking"], selected_categories={"headlines"}) is True
+    assert article_matches_categories("politics", feed_position=6, importance_hint=0.85, selected_categories={"headlines"}) is True
+    assert article_matches_categories("politics", feed_position=8, importance_hint=0.3, title="Routine meeting", selected_categories={"headlines"}) is False
+
+    # 3. Health matching
+    assert article_matches_categories("health", selected_categories={"health"}) is True
+    assert article_matches_categories("society", raw_tags=["hospital"], selected_categories={"health"}) is False
+
+    # 4. International matching
+    assert article_matches_categories("world", selected_categories={"international"}) is True
+    assert article_matches_categories("international", selected_categories={"international"}) is True
+    assert article_matches_categories("sports", selected_categories={"international"}) is False
+
+
+def test_automated_category_fallback():
+    from src.agents.scraper import prompt_category_selection
+
+    # In automated / non-interactive mode, always returns ["headlines"]
+    selected = prompt_category_selection(interactive=False)
+    assert selected == ["headlines"]
+
+
+def test_scraper_filters_by_category(tmp_path):
+    import zoneinfo
+    from src.agents.scraper import ScraperAgent
+
+    scraper = ScraperAgent(run_dir=tmp_path, categories=["health"])
+    feed_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>HealthNews</title>
+      <item>
+        <title>New hospital wing opens in Lalitpur with modern ICU</title>
+        <link>https://health.news.com/icu-wing</link>
+        <pubDate>Thu, 12 Nov 2026 07:00:00 +0545</pubDate>
+        <category>Health</category>
+        <description>The state hospital inaugurated a forty bed ICU facility.</description>
+      </item>
+      <item>
+        <title>Parliament passes regular administrative procedures amendment</title>
+        <link>https://health.news.com/parliament-bill</link>
+        <pubDate>Thu, 12 Nov 2026 07:15:00 +0545</pubDate>
+        <category>Politics</category>
+        <description>Lawmakers approved the administrative guidelines without debate.</description>
+      </item>
+    </channel></rss>"""
+
+    mock_sources_cfg = {
+        "settings": {"user_agent": "Bot/1.0", "request_delay_seconds": 0},
+        "sources": [
+            {"name": "HealthSource", "rss": "https://health.news.com/feed", "method": "rss", "enabled": True, "trust": 0.85},
+        ],
+    }
+
+    def mock_fetch(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "robots.txt" in url:
+            resp.text = "User-agent: *\nAllow: /\n"
+            resp.content = resp.text.encode("utf-8")
+        elif "health.news.com/feed" in url:
+            resp.text = feed_xml.decode("utf-8")
+            resp.content = feed_xml
+        else:
+            p_text = "Detailed article body content describing the health development in comprehensive fashion for readers across Nepal. " * 8
+            resp.text = f"<html><body><article><p>{p_text}</p></article></body></html>"
+            resp.content = resp.text.encode("utf-8")
+        return resp
+
+    ref_time = datetime(2026, 11, 12, 10, 0, 0, tzinfo=zoneinfo.ZoneInfo("Asia/Kathmandu"))
+    with patch.object(scraper, "_load_sources_config", return_value=mock_sources_cfg):
+        with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
+            articles, stats, errors = scraper.scrape_all(categories=["health"], ref_time=ref_time)
+
+    # Health article should be kept, parliament politics article dropped by category
+    assert len(articles) == 1
+    assert "hospital wing" in articles[0]["title"].lower()
+    assert stats["HealthSource"]["drop_reasons"]["category_filtered"] >= 1
+
+
+def test_infer_category_hint_no_substring_false_positives():
+    """Keywords must match whole words (e.g. 'league' must not match 'colleagues', 'sport' not 'passport')."""
+    editor_cats = {
+        "crime": ["crime", "police", "investigation"],
+        "sports": ["sports", "cricket", "football", "league", "match"],
+        "technology": ["technology", "ai", "cyber"],
+    }
+    # Regression: 'colleagues' previously matched 'league' twice and 'failed' matched 'ai'
+    cat = infer_category_hint(
+        url="https://kathmandupost.com/national/2026/11/18/police-inspector-found-dead-at-official-residence-in-gulmi",
+        title="Police inspector found dead at official residence in Gulmi",
+        text_summary="The officer was found unresponsive in his bed after colleagues broke open a window when he failed to wake up.",
+        raw_tags=[],
+        editor_categories=editor_cats,
+    )
+    assert cat == "crime"
+
+    # URL slug 'passport' must not trigger 'sport'
+    cat_passport = infer_category_hint(
+        url="https://example.com/passport/renewal-process",
+        title="Department eases passport renewal rules",
+        text_summary="Applicants can now submit documents online.",
+        raw_tags=["Passport"],
+        editor_categories=editor_cats,
+    )
+    assert cat_passport != "sports"
+
+

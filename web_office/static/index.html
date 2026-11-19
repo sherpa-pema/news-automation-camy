@@ -36,6 +36,7 @@
       </div>
 
       <div class="hud-right">
+        <button class="btn btn-danger btn-sm hidden" id="hudStopBtn" title="Stop pipeline run">⏹ Stop</button>
         <button class="btn btn-sm btn-ghost" id="soundToggleBtn" title="Toggle office audio chimes">🔇 Sound Off</button>
         <button class="btn btn-sm btn-ghost" id="doctorBtn" title="Run system readiness check">🩺 Doctor</button>
         <button class="btn btn-sm btn-ghost" id="bossDrawerBtn" title="Open Boss Controls">👔 Boss Desk</button>
@@ -43,39 +44,51 @@
       </div>
     </header>
 
+    <!-- 8 Accessible Stage Chips Rail -->
+    <nav class="stage-rail" id="stageRail" aria-label="Pipeline Stages"></nav>
+
+    <!-- Live Next-Action Banner -->
+    <div class="next-action-bar hidden" id="nextActionBar">
+      <div class="next-action-content">
+        <span class="next-action-badge">NEXT ACTION</span>
+        <span class="next-action-text" id="nextActionText"></span>
+      </div>
+      <div class="next-action-actions" id="nextActionActions"></div>
+    </div>
+
     <!-- Main 2D Office Canvas Stage -->
-    <main class="stage-wrap">
+    <main class="stage-wrap" role="main" aria-label="Interactive 2D Office Stage">
       <div class="canvas-container">
-        <canvas id="officeCanvas"></canvas>
-        <div id="hoverTooltip" class="tooltip hidden"></div>
+        <canvas id="officeCanvas" aria-label="Nepal News Bot 2D Animated Floorplan"></canvas>
+        <div id="hoverTooltip" class="tooltip hidden" role="tooltip"></div>
 
         <!-- Floating Replay Banner -->
-        <div id="replayBanner" class="replay-banner hidden">
+        <div id="replayBanner" class="replay-banner hidden" role="status" aria-live="polite">
           <span id="replayLabel">Replaying run...</span>
           <button class="btn btn-xs btn-ghost" id="stopReplayBtn">Stop Replay</button>
         </div>
       </div>
 
       <!-- Slide-out Right Inspector / Boss Drawer -->
-      <aside id="sideDrawer" class="drawer hidden">
+      <aside id="sideDrawer" class="drawer hidden" role="region" aria-label="Station Inspector Drawer">
         <div class="drawer-header">
           <div>
             <h2 id="drawerTitle">Station Inspector</h2>
             <p id="drawerSubtitle" class="muted">Click any desk or Boss Office to inspect</p>
           </div>
-          <button class="btn btn-xs btn-ghost" id="closeDrawerBtn">✕</button>
+          <button class="btn btn-xs btn-ghost" id="closeDrawerBtn" aria-label="Close station inspector">✕</button>
         </div>
 
-        <div class="drawer-tabs" id="drawerTabs"></div>
-        <div class="drawer-body" id="drawerBody"></div>
+        <div class="drawer-tabs" id="drawerTabs" role="tablist"></div>
+        <div class="drawer-body" id="drawerBody" role="tabpanel"></div>
       </aside>
     </main>
 
     <!-- Bottom Live Activity Ticker & Log Strip -->
-    <footer class="ticker-bar">
+    <footer class="ticker-bar" role="contentinfo">
       <div class="ticker-status">
         <span class="ticker-tag">FEED</span>
-        <span id="tickerLatest">Connecting to Nepal News Bot HQ...</span>
+        <span id="tickerLatest" role="status" aria-live="polite">Connecting to Nepal News Bot HQ...</span>
       </div>
       <div class="ticker-actions">
         <button class="btn btn-xs btn-ghost" id="toggleLogDrawerBtn">📜 Live Logs</button>
@@ -83,16 +96,19 @@
     </footer>
   </div>
 
-  <!-- Modal for Video / Storyboard / Picker / Doctor -->
-  <div id="modalOverlay" class="modal-overlay hidden">
+  <!-- Modal for Video / Storyboard / Picker / Doctor / Maintenance -->
+  <div id="modalOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal-card">
       <div class="modal-header">
         <h3 id="modalTitle">Preview</h3>
-        <button class="btn btn-xs btn-ghost" id="closeModalBtn">✕</button>
+        <button class="btn btn-xs btn-ghost" id="closeModalBtn" aria-label="Close modal">✕</button>
       </div>
       <div class="modal-body" id="modalBody"></div>
     </div>
   </div>
+
+  <!-- Toast Notifications Container -->
+  <div id="toastContainer" class="toast-container"></div>
 
   <script type="module" src="/js/main.js"></script>
 </body>

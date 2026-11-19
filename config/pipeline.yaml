@@ -15,7 +15,11 @@ stages:
     depends_on: []
     retries: 2
     timeout_seconds: 180
-    min_articles: 5
+    budget_seconds: 150
+    min_articles: 6
+    min_eligible_articles: 6
+    degraded_floor: 3
+    degradation_lookback_hours: 48
     inputs:
       - "config/sources.yaml"
     outputs:
@@ -58,23 +62,36 @@ stages:
     use_zero_spk_emb: false
     chunk_mode: "scene"
     similarity_threshold: 0.72
-    f0_tolerance_pct: 0.25
+    f0_tolerance_pct: 0.15
+    n_candidates: 1
+    f0_anchor: "running_median"
+    ranker_weights:
+      cosine: 1.0
+      f0: 0.6
+      duration: 0.2
+      artifacts: 0.2
+    base_seed: 1895
     max_retries: 2
     language_id: "en"
     instruction_schema: "en"
     device: "cuda:0"
     dtype: "bfloat16"
+    daemon_url: "http://127.0.0.1:8766"
+    batching: 4
     subprocess_python: ".venv-tts/Scripts/python.exe"
     worker_timeout_sec: 3600
     pause_between_sentences: 0.25
+    padding_policy: "broadcast"
     pad_before: 0.4
     pad_after: 0.6
     cfg: 2.0
     sigma: 0.25
     temperature: 0.0
-    max_length: 24
-    crossfade_ms: 12.0
-    target_scene_rms_dbfs: -20.0
+    max_length: 48
+    crossfade_ms: 25.0
+    target_scene_rms_dbfs: -23.0
+    loudness_strategy: "linear_strict"
+    limiter_ceiling_dbfs: -1.5
     highpass_hz: 80.0
     target_lufs: -16
     output_sample_rate: 48000
@@ -127,6 +144,7 @@ stages:
     low_score_threshold: 0.35
     max_unplaced_scene_ratio: 0.15
     max_unplaced_total_ratio: 0.05
+    max_low_score_total_ratio: 0.15
     min_wps: 1.2
     max_wps: 6.0
     max_chars_per_line: 42
@@ -136,6 +154,12 @@ stages:
     lead_in_sec: 0.05
     hold_after_sec: 0.15
     min_gap_sec: 0.04
+    target_cps: 17.0
+    max_cps: 24.0
+    use_cache: true
+    preview_enabled: true
+    preview_fps: 10
+    preview_preset: "veryfast"
     tool: "torchaudio MMS_FA forced aligner"
     notes: "Extracts word-level and scene-level timestamps from narration audio using MMS_FA forced aligner."
 
@@ -172,8 +196,12 @@ stages:
   - id: "qa"
     agent: "QAAgent"
     depends_on: ["render"]
-    retries: 2
+    retries: 0
     timeout_seconds: 180
+    allow_degraded_timeline: true
+    allow_soft_captions: true
+    max_cps_threshold: 26.0
+    max_late_ms_threshold: 100.0
     inputs:
       - "render/final.mp4"
       - "audio/narration.wav"

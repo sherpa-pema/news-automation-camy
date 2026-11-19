@@ -26,17 +26,21 @@ def load_mms_model(model_path: str | Path | None, device: str = "cuda:0", dtype:
 
     local_pt = Path(model_path) if model_path else None
     if local_pt and local_pt.exists() and local_pt.is_file():
-        model = utils._get_model(bundle._model_type, bundle._params)
-        state_dict = torch.load(str(local_pt), map_location="cpu")
-        if bundle._remove_aux_axis:
-            utils._remove_aux_axes(state_dict, bundle._remove_aux_axis)
-        model.load_state_dict(state_dict)
-        model = utils._extend_model(
-            model,
-            normalize_waveform=bundle._normalize_waveform,
-            apply_log_softmax=True,
-            append_star=True,
-        )
+        try:
+            model = utils._get_model(bundle._model_type, bundle._params)
+            state_dict = torch.load(str(local_pt), map_location="cpu")
+            if bundle._remove_aux_axis:
+                utils._remove_aux_axes(state_dict, bundle._remove_aux_axis)
+            model.load_state_dict(state_dict)
+            model = utils._extend_model(
+                model,
+                normalize_waveform=bundle._normalize_waveform,
+                apply_log_softmax=True,
+                append_star=True,
+            )
+        except Exception as e:
+            print(f"Warning: Failed to load local model weights from '{local_pt}': {e}. Falling back to bundle.get_model().", file=sys.stderr)
+            model = bundle.get_model()
     else:
         model = bundle.get_model()
 
@@ -161,8 +165,11 @@ def main() -> int:
     dtype = job.get("dtype", "float32")
     scenes = job.get("scenes", [])
 
+    device_fallback = False
     if not torch.cuda.is_available() and "cuda" in device:
+        print(f"CUDA requested ('{device}') but not available; falling back to CPU.", file=sys.stderr)
         device = "cpu"
+        device_fallback = True
 
     t0 = time.perf_counter()
     try:
@@ -199,19 +206,29 @@ def main() -> int:
             alignment_times[sc_id] = round(time.perf_counter() - t_scene_start, 3)
             scene_results[sc_id] = res
         except Exception as e:
-            error_result = {
-                "status": "error",
-                "error": f"Failed to align scene '{sc_id}': {e}",
-                "model_load_time_sec": load_time_sec,
+            print(f"Warning: Failed to align scene '{sc_id}': {e}", file=sys.stderr)
+            alignment_times[sc_id] = round(time.perf_counter() - t_scene_start, 3)
+            scene_results[sc_id] = {
+                "duration_sec": 0.0,
+                "error": str(e),
+                "words": [
+                    {
+                        "w": item.get("orig", ""),
+                        "tts": item.get("tts", ""),
+                        "start": None,
+                        "end": None,
+                        "score": 0.0,
+                        "unplaced": True,
+                    }
+                    for item in words_data
+                ],
             }
-            with open(args.result_file, "w", encoding="utf-8") as f:
-                json.dump(error_result, f, indent=2)
-            return 1
 
     out_payload = {
         "status": "success",
         "model_load_time_sec": load_time_sec,
         "device": device,
+        "device_fallback": device_fallback,
         "dtype": dtype,
         "alignment_times_sec": alignment_times,
         "scenes": scene_results,

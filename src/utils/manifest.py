@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Iterator
 
 from src.utils.schema_validate import validate_contract
@@ -250,8 +251,10 @@ def save_manifest(manifest: dict[str, Any], manifest_path: Path | str) -> None:
             raise ValueError(f"manifest.json schema validation failed: {err}")
     path = Path(manifest_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    temp_path = path.with_suffix(f".tmp.{os.getpid()}.{time.time_ns()}")
+    with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
+    os.replace(temp_path, path)
 
 
 def update_stage_status(
@@ -273,10 +276,13 @@ def update_stage_status(
 
     if status == "running":
         stage["start_time"] = now_iso
-    elif status in ("done", "failed"):
+    elif status == "done":
+        stage["end_time"] = now_iso
+        stage["error_message"] = None
+    elif status == "failed":
         stage["end_time"] = now_iso
 
-    if error_message is not None:
+    if error_message is not None and status != "done":
         stage["error_message"] = error_message
     if output_files is not None:
         stage["output_files"] = output_files
