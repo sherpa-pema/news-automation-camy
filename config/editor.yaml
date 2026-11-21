@@ -18,7 +18,7 @@ budget:
   default_words_per_sec: 2.15
   tolerance_pct: 0.10
   scenes:
-    intro_min_words: 12
+    intro_min_words: 10
     intro_max_words: 25
     story_min_words: 10
     story_max_words: 25
@@ -460,4 +460,57 @@ llm_curator:
   enabled: true
   timeout_sec: 60
   max_candidates: 40
+
+intro_templates:
+  default:
+    label: "Daily Briefing"
+    headline_template: "Nepal Daily Briefing for {spoken_date}"
+    narration: "The top stories and major developments shaping the nation right now."
+    visual_keywords: ["Kathmandu valley", "news studio", "map of Nepal"]
+  headlines:
+    label: "Headlines & Breaking News"
+    headline_template: "Nepal Headlines and Breaking News for {spoken_date}"
+    narration: "Top headlines, breaking stories, and major developments from across the nation."
+    visual_keywords: ["Kathmandu valley", "news studio", "breaking news desk"]
+  sports:
+    label: "Sports News"
+    headline_template: "Nepal Sports Roundup for {spoken_date}"
+    narration: "Top sports news, major highlights, and match updates from Nepal and around the world."
+    visual_keywords: ["sports stadium", "Nepal cricket", "athletes competing"]
+  politics:
+    label: "National Politics"
+    headline_template: "Nepal Political Briefing for {spoken_date}"
+    narration: "Major political shifts, parliamentary decisions, and government updates from across the nation."
+    visual_keywords: ["parliament building", "news studio", "Kathmandu city"]
+  business_economics:
+    label: "Business & Economics"
+    headline_template: "Nepal Business Report for {spoken_date}"
+    narration: "Market trends, economic shifts, and major financial headlines from Nepal and global markets."
+    visual_keywords: ["stock exchange", "news studio", "banking district"]
+  health:
+    label: "Health & Medicine"
+    headline_template: "Nepal Health Briefing for {spoken_date}"
+    narration: "Critical healthcare updates, medical breakthroughs, and wellness news from across the nation."
+    visual_keywords: ["hospital building", "news studio", "medical clinic"]
+  culture_entertainment:
+    label: "Culture & Entertainment"
+    headline_template: "Nepal Culture and Entertainment for {spoken_date}"
+    narration: "Vibrant arts, heritage festivals, and top entertainment headlines from across Nepal and beyond."
+    visual_keywords: ["temple heritage", "cultural festival", "Kathmandu arts"]
+  science_technology:
+    label: "Science & Technology"
+    headline_template: "Nepal Technology Briefing for {spoken_date}"
+    narration: "Cutting edge innovations, digital breakthroughs, and major technology headlines shaping tomorrow."
+    visual_keywords: ["digital technology", "telecom tower", "computer laboratory"]
+  society_local:
+    label: "Society & Local News"
+    headline_template: "Nepal Local News Briefing for {spoken_date}"
+    narration: "Grassroots voices, regional developments, and vital community stories from across Nepal."
+    visual_keywords: ["community gathering", "Kathmandu streets", "local village"]
+  international:
+    label: "International News"
+    headline_template: "Nepal World Report for {spoken_date}"
+    narration: "Global diplomacy, breaking world headlines, and major international developments from around the world."
+    visual_keywords: ["world map", "diplomatic summit", "international news"]
+
 

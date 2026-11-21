@@ -3,6 +3,9 @@ from datetime import datetime
 import json
 from typing import Any
 
+from src.utils.category_intro import normalize_selected_categories, resolve_category_intro
+
+
 
 def format_spoken_date(date_str: str) -> str:
     """Formats YYYY-MM-DD into natural spoken words (e.g. Saturday, November 7, 2026 / Kartik 22, 2083 BS)."""
@@ -29,6 +32,8 @@ def generate_editor_brief(
     stale_preview_clusters: list[dict[str, Any]] | None = None,
     run_kind: str = "test",
     mode: str = "headlines",
+    selected_categories: list[str] | str | None = None,
+    custom_templates: dict[str, Any] | None = None,
 ) -> str:
     """Assembles the comprehensive editor brief markdown document."""
     spoken_date = format_spoken_date(run_date)
@@ -39,10 +44,20 @@ def generate_editor_brief(
     max_words = budget["max_total_words"]
     is_headlines = (mode == "headlines" or len(shortlist) >= 12)
 
+    intro_info = resolve_category_intro(
+        categories=selected_categories,
+        spoken_date=spoken_date,
+        custom_templates=custom_templates,
+    )
+
     lines = []
     lines.append(f"# Broadcast Editor Brief - {spoken_date}")
     lines.append("")
     lines.append(f"- **Run Date**: `{run_date}` | **Run Kind**: `{run_kind}`")
+    norm_cats = normalize_selected_categories(selected_categories)
+    if norm_cats and "all" not in norm_cats:
+        lines.append(f"- **Selected Category Focus**: `{intro_info['category_label']}` (`{', '.join(norm_cats)}`)")
+        lines.append(f"- **Intro Directive**: {intro_info['prompt_instruction']}")
     lines.append("")
 
     is_degraded = any(
@@ -120,13 +135,13 @@ def generate_editor_brief(
             {
                 "id": "intro",
                 "type": "intro",
-                "headline": f"Nepal Daily Briefing for {spoken_date}",
-                "narration": "Good evening. Welcome to the Nepal Daily Briefing. Here are today's top stories from across the nation.",
+                "headline": intro_info["headline"],
+                "narration": intro_info["narration"],
                 "category": None,
                 "sensitive": False,
                 "source": "Nepal News Desk",
                 "source_urls": [],
-                "visual_keywords": ["Kathmandu valley", "news studio", "map of Nepal"],
+                "visual_keywords": intro_info["visual_keywords"],
                 "evidence": []
             },
             {
@@ -199,7 +214,7 @@ def generate_editor_brief(
         repeat_tag = " [COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]" if c.get("covered_recently") else ""
         slot_label = f" [SLOT: {c['broadcast_slot_title']}]" if c.get("broadcast_slot_title") else ""
         lines.append(f"### [{c['cluster_id']}] {c['primary_title']}{slot_label}{repeat_tag}")
-        cluster_meta = f"- **Category Guess**: `{c['category_guess']}`"
+        cluster_meta = f"- **Category Guess**: `{c.get('category_guess', 'other')}`"
         if c.get("broadcast_slot_id"):
             cluster_meta += f" | **Designated Slot**: `{c['broadcast_slot_id']}` ({c.get('broadcast_slot')})"
         if c.get("max_importance_hint") is not None:
@@ -211,7 +226,8 @@ def generate_editor_brief(
         if c.get("covered_recently") and c.get("repeat_reason"):
             cluster_meta += f" | **[COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]** ({c['repeat_reason']})"
         lines.append(cluster_meta)
-        lines.append(f"- **Confirmed Outlets ({c['source_count']})**: {', '.join(c['sources'])}")
+        sources = c.get("sources", [])
+        lines.append(f"- **Confirmed Outlets ({c.get('source_count', len(sources))})**: {', '.join(sources)}")
         if c.get("synthesis_notes"):
             lines.append(f"- **Multi-Source Synthesis**: {c['synthesis_notes']}")
         if c.get("conflicting_figures_resolution"):

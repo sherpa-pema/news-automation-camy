@@ -50,12 +50,15 @@ class EditorAgent(BaseAgent):
         run_dir: Path | str,
         config: dict[str, Any] | None = None,
         editor_mode: str = "ide_agent",
+        categories: list[str] | str | None = None,
     ) -> None:
         super().__init__(run_dir, config)
         self.script_dir = self.run_dir / "script"
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.editor_cfg, self.whitelist = load_editor_config()
         self.editor_mode = editor_mode
+        self.categories = categories
+
 
     def _get_default_run_kind(self) -> str:
         """Reads default_run_kind from config/pipeline.yaml (defaults to 'test')."""
@@ -246,10 +249,13 @@ class EditorAgent(BaseAgent):
 
         # Defense-in-depth: drop off-topic clusters when the run targets specific topic categories
         raw_selected_cats = (
-            manifest.get("selected_categories")
+            self.categories
+            or manifest.get("selected_categories")
             or manifest.get("stages", {}).get("scraper", {}).get("metrics", {}).get("selected_categories")
             or []
         )
+        if isinstance(raw_selected_cats, str):
+            raw_selected_cats = [c.strip() for c in raw_selected_cats.split(",") if c.strip()]
         selected_cats_norm = [str(c).strip().lower() for c in raw_selected_cats if str(c).strip()]
         if selected_cats_norm and "all" not in selected_cats_norm and "headlines" not in selected_cats_norm:
             from src.agents.scraper import CATEGORY_ALIAS_MAP
@@ -364,6 +370,8 @@ class EditorAgent(BaseAgent):
             opinion_clusters=opinion_clusters,
             stale_preview_clusters=stale_clusters,
             run_kind=run_kind,
+            selected_categories=selected_cats_norm,
+            custom_templates=self.editor_cfg.get("intro_templates"),
         )
         brief_path = self.script_dir / "editor_brief.md"
         with open(brief_path, "w", encoding="utf-8") as f:
@@ -373,6 +381,8 @@ class EditorAgent(BaseAgent):
         manifest_path = self.run_dir / "manifest.json"
         if manifest_path.exists():
             manifest["run_kind"] = run_kind
+            if selected_cats_norm and not manifest.get("selected_categories"):
+                manifest["selected_categories"] = selected_cats_norm
             update_stage_status(
                 manifest,
                 "editor",
@@ -727,6 +737,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("action", choices=["prepare", "validate", "approve", "write"], help="Action to execute")
     parser.add_argument("--date", default=date.today().isoformat(), help="Run date (YYYY-MM-DD)")
     parser.add_argument("--provider", default=None, help="Optional LLM provider (gemini, anthropic, openai, ollama)")
+    parser.add_argument("--categories", default=None, help="Optional comma-separated categories (e.g. sports, headlines)")
     parser.add_argument("--auto-approve", action="store_true", help="Automatically approve validated draft if validation passes cleanly")
     return parser.parse_args()
 
@@ -740,7 +751,7 @@ def main() -> int:
 
     manifest_path = run_dir / "manifest.json"
     manifest = load_manifest(manifest_path) if manifest_path.exists() else {"stages": {}}
-    agent = EditorAgent(run_dir)
+    agent = EditorAgent(run_dir, categories=args.categories)
 
     if args.action == "prepare":
         agent.prepare(manifest)
@@ -748,7 +759,7 @@ def main() -> int:
     elif args.action == "write":
         from src.utils.llm_writer import generate_and_validate_draft
 
-        res = generate_and_validate_draft(run_dir, provider=args.provider)
+        res = generate_and_validate_draft(run_dir, provider=args.provider, categories=args.categories)
         if res.get("ok") and args.auto_approve:
             manifest = load_manifest(manifest_path) if manifest_path.exists() else {"stages": {}}
             agent.approve(manifest)

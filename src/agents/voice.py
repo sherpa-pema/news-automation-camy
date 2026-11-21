@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -150,6 +151,8 @@ def _compute_scene_cache_key(
         "pad_before": pad_before,
         "pad_after": pad_after,
         "target_scene_rms_dbfs": target_scene_rms_dbfs,
+        "n_candidates": engine_settings.get("n_candidates"),
+        "f0_anchor": engine_settings.get("f0_anchor"),
         "speed": engine_settings.get("speed"),
         "cfg": engine_settings.get("cfg"),
         "sigma": engine_settings.get("sigma"),
@@ -539,18 +542,52 @@ class VoiceAgent(BaseAgent):
             scene_meta_path = scenes_dir / f"{scene_id}.meta.json"
             force_regen = (only_scene is not None and scene_id == only_scene)
 
+            # Check persistent global cache (data/cache/voice/) for intro scenes across runs
+            persistent_voice_cache_dir = Path("data/cache/voice")
+            is_semantic_intro_hit = False
+            if not force_regen and scene_id == "intro" and (not scene_wav_path.exists() or scene_wav_path.stat().st_size <= 1000):
+                from src.utils.category_intro import get_intro_cache_filenames, identify_category_from_intro
+                cat_key = identify_category_from_intro(scenes[idx], manifest)
+                if cat_key:
+                    sem_wav, sem_meta = get_intro_cache_filenames(cat_key)
+                    p_wav = persistent_voice_cache_dir / sem_wav
+                    p_meta = persistent_voice_cache_dir / sem_meta
+
+                    # Fallback to legacy hashed intro filename if semantic filename is not present
+                    if not (p_wav.exists() and p_meta.exists() and p_wav.stat().st_size > 1000):
+                        p_wav_h = persistent_voice_cache_dir / f"intro_{cache_key}.wav"
+                        p_meta_h = persistent_voice_cache_dir / f"intro_{cache_key}.meta.json"
+                        if p_wav_h.exists() and p_meta_h.exists() and p_wav_h.stat().st_size > 1000:
+                            p_wav, p_meta = p_wav_h, p_meta_h
+
+                    if p_wav.exists() and p_meta.exists() and p_wav.stat().st_size > 1000:
+                        try:
+                            p_meta_data = json.loads(p_meta.read_text(encoding="utf-8"))
+                            if p_meta_data.get("cache_key") == cache_key:
+                                shutil.copyfile(p_wav, scene_wav_path)
+                                shutil.copyfile(p_meta, scene_meta_path)
+                                is_semantic_intro_hit = True
+                                self.logger.info(f"[PERSISTENT CACHE HIT] Reusing cached intro audio across runs: {p_wav.name}")
+                            else:
+                                self.logger.info(f"[PERSISTENT CACHE STALE] Narration or settings changed for {p_wav.name}, re-synthesizing...")
+                        except Exception as exc:
+                            self.logger.warning(f"Failed copying persistent cached intro: {exc}")
+
             if not force_regen and scene_wav_path.exists() and scene_meta_path.exists() and scene_wav_path.stat().st_size > 1000:
                 try:
                     meta_data = json.loads(scene_meta_path.read_text(encoding="utf-8"))
                     info = read_wav_info(scene_wav_path)
+                    passes_consistency = is_semantic_intro_hit or all(m.get("passes_gate", True) for m in meta_data.get("consistency", {}).values())
                     if (
-                        meta_data.get("cache_key") == cache_key
+                        (meta_data.get("cache_key") == cache_key or is_semantic_intro_hit)
                         and info["duration_sec"] > 0.1
-                        and all(m.get("passes_gate", True) for m in meta_data.get("consistency", {}).values())
+                        and passes_consistency
                     ):
                         cached_scenes.add(scene_id)
                         for k_id, k_metrics in meta_data.get("consistency", {}).items():
-                            scene_consistency_map[k_id] = k_metrics
+                            c_copy = dict(k_metrics)
+                            c_copy["cached"] = True
+                            scene_consistency_map[k_id] = c_copy
                         if not reference_f0_hz and meta_data.get("reference_f0_hz"):
                             reference_f0_hz = float(meta_data["reference_f0_hz"])
                         self.logger.info(f"Reusing cached scene audio (hash match): {scene_id}")
@@ -717,6 +754,23 @@ class VoiceAgent(BaseAgent):
                 ),
                 encoding="utf-8",
             )
+
+            # If intro scene, also save persistent copy in data/cache/voice/ for future runs
+            if scene_id == "intro":
+                try:
+                    from src.utils.category_intro import get_intro_cache_filenames, identify_category_from_intro
+                    cat_key = identify_category_from_intro(scenes[idx], manifest)
+                    if cat_key:
+                        sem_wav, sem_meta = get_intro_cache_filenames(cat_key)
+                        persistent_voice_cache_dir = Path("data/cache/voice")
+                        persistent_voice_cache_dir.mkdir(parents=True, exist_ok=True)
+                        p_wav = persistent_voice_cache_dir / sem_wav
+                        p_meta = persistent_voice_cache_dir / sem_meta
+                        shutil.copyfile(scene_wav_path, p_wav)
+                        shutil.copyfile(scene_meta_path, p_meta)
+                        self.logger.info(f"[PERSISTENT CACHE SAVED] Cached intro audio for future runs: {p_wav.name}")
+                except Exception as exc:
+                    self.logger.warning(f"Failed saving persistent cached intro audio: {exc}")
 
             # Create aliases audio/scene_<id>.wav and audio/<id>.wav using hardlinks (fallback to copyfile)
             _create_scene_aliases(scene_id, scene_wav_path, audio_dir)
@@ -1125,6 +1179,8 @@ class VoiceAgent(BaseAgent):
                 metrics_map = spk_data.get("metrics", {})
 
                 for item_id, m in metrics_map.items():
+                    if m.get("cached"):
+                        continue
                     sim = float(m.get("cosine_sim", 1.0))
                     f0 = float(m.get("f0_median_hz", 0.0))
                     passes_gate = m.get("passes_gate", True)
@@ -1167,6 +1223,56 @@ class VoiceAgent(BaseAgent):
 
         return True, None
 
+    def prewarm_intro_cache(self, engine_override: str | None = None, dry_run: bool = False) -> list[str]:
+        """Pre-synthesizes and caches intro voice audio for all canonical categories into data/cache/voice/."""
+        import tempfile
+        from src.utils.category_intro import DEFAULT_CATEGORY_INTROS, resolve_category_intro
+
+        prewarmed: list[str] = []
+        for cat_key in DEFAULT_CATEGORY_INTROS:
+            intro_data = resolve_category_intro(cat_key)
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_run = Path(tmp_dir)
+                (tmp_run / "script").mkdir(parents=True, exist_ok=True)
+                dummy_script = {
+                    "language": "English",
+                    "origin": "fixture",
+                    "date": "2026-11-21",
+                    "scenes": [
+                        {
+                            "id": "intro",
+                            "type": "intro",
+                            "headline": intro_data["headline"],
+                            "narration": intro_data["narration"],
+                            "category": cat_key,
+                            "sensitive": False,
+                            "source": "Nepal News Desk",
+                            "source_urls": [],
+                            "visual_keywords": intro_data["visual_keywords"],
+                            "evidence": [],
+                        }
+                    ],
+                }
+                (tmp_run / "script" / "script.json").write_text(json.dumps(dummy_script), encoding="utf-8")
+                dummy_manifest = {
+                    "run_id": f"prewarm_{cat_key}",
+                    "date": "2026-11-21",
+                    "status": "running",
+                    "selected_categories": [cat_key],
+                    "stages": {"voice": {"status": "pending"}},
+                }
+                tmp_agent = VoiceAgent(run_dir=tmp_run, config=self.config)
+                try:
+                    tmp_agent.run(dummy_manifest, engine_override=engine_override, dry_run=dry_run)
+                    prewarmed.append(cat_key)
+                finally:
+                    # Close file handlers to release Windows lock on run.log before tmp_dir cleanup
+                    for h in list(tmp_agent.logger.handlers):
+                        if isinstance(h, logging.FileHandler):
+                            h.close()
+                            tmp_agent.logger.removeHandler(h)
+        return prewarmed
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Nepal News Bot Voice Agent")
@@ -1174,6 +1280,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Run with FakeTTS engine")
     parser.add_argument("--engine", default=None, help="TTS engine override (e.g. fake, ming)")
     parser.add_argument("--scene", default=None, help="Re-synthesize only a single scene")
+    parser.add_argument("--prewarm-intros", action="store_true", help="Pre-synthesize and cache intro voice audio for all canonical categories")
     args = parser.parse_args()
 
     run_dir = Path("data/runs") / args.date
@@ -1195,6 +1302,11 @@ def main() -> None:
         manifest = create_initial_manifest(f"run_{args.date}", args.date, pipeline_cfg)
 
     agent = VoiceAgent(run_dir=run_dir, config=pipeline_cfg)
+    if args.prewarm_intros:
+        cats = agent.prewarm_intro_cache(engine_override=args.engine, dry_run=args.dry_run)
+        print(f"SUCCESS: Pre-warmed intro voice cache for {len(cats)} categories: {cats}")
+        return
+
     output_files = agent.run(
         manifest,
         only_scene=args.scene,

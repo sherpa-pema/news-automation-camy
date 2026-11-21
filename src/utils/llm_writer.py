@@ -295,6 +295,7 @@ def _build_surgical_repair_prompt(
     structured_errors: list[dict[str, Any]],
     shortlist: list[dict[str, Any]],
     budget: dict[str, Any],
+    intro_info: dict[str, Any] | None = None,
 ) -> str:
     """Builds a targeted prompt containing only failing scene(s), their errors, matched cluster, and remaining budget."""
     locked_words = sum(
@@ -385,7 +386,10 @@ def _build_surgical_repair_prompt(
                     break
 
         lines.append(f"=== FAILING SCENE index={idx}, id='{sc_id}', type='{sc_type}' ===")
-        if sc.get("category"):
+        if (sc_type == "intro" or sc_id == "intro") and intro_info:
+            lines.append(f"CATEGORY INTRO DIRECTIVE: {intro_info.get('prompt_instruction', '')}")
+            lines.append(f"TARGET EVERGREEN INTRO: \"{intro_info.get('narration', '')}\"")
+        elif sc.get("category"):
             lines.append(f"Category: '{sc.get('category')}'")
         elif is_headlines_mode and idx in SLOT_CATEGORIES:
             lines.append(f"Designated Broadcast Slot: '{SLOT_CATEGORIES[idx]}' (category MUST be '{SLOT_CATEGORIES[idx]}')")
@@ -436,9 +440,12 @@ def generate_and_validate_draft(
     *,
     provider: str | None = None,
     max_rounds: int = 5,
+    categories: list[str] | str | None = None,
 ) -> dict[str, Any]:
     """Generates draft_script.json + selection.json via LLM and validates up to max_rounds."""
     from src.agents.editor import EditorAgent
+    from src.utils.category_intro import resolve_category_intro
+    from src.utils.editor_brief import format_spoken_date
     from src.utils.manifest import load_manifest
     from src.utils.office_events import emit_office_event
 
@@ -471,6 +478,18 @@ def generate_and_validate_draft(
         else _compact_brief_for_llm(raw_brief_text)
     )
 
+    eff_categories = (
+        categories
+        or manifest.get("selected_categories")
+        or manifest.get("stages", {}).get("scraper", {}).get("metrics", {}).get("selected_categories")
+    )
+    spoken_date = format_spoken_date(manifest.get("date") or rdir.name)
+    intro_info = resolve_category_intro(
+        categories=eff_categories,
+        spoken_date=spoken_date,
+        custom_templates=editor_agent.editor_cfg.get("intro_templates"),
+    )
+
     if focused_bulletin:
         system_prompt = (
             "You are a broadcast news writer for Nepal News Bot. Read the Editor Brief carefully and "
@@ -479,7 +498,7 @@ def generate_and_validate_draft(
             '  "draft_script": { "language": "English", "origin": "editor", "run_kind": "...", "date": "YYYY-MM-DD", "scenes": [...] },\n'
             '  "selection": { "selected_clusters": [...], "skipped_clusters": [...] }\n'
             "CRITICAL RULES (FOCUSED 7-SCENE TOPIC BULLETIN):\n"
-            "1. Exactly 7 scenes: intro (id='intro', 15-35 words), followed by 5 distinct story scenes (scene_01..scene_05, each from a different shortlisted cluster), and outro (id='outro', 15-35 words).\n"
+            f"1. Exactly 7 scenes: intro (id='intro', 15-35 words, announcing the broadcast category: \"{intro_info['narration']}\"), followed by 5 distinct story scenes (scene_01..scene_05, each from a different shortlisted cluster), and outro (id='outro', 15-35 words).\n"
             "2. STORY NARRATION: Each story scene narration MUST contain 2 to 3 crisp broadcast sentences (44 to 56 words per story scene) summarizing the verified facts from its cluster.\n"
             "3. Total spoken words across all 7 scenes MUST fall inside the allowed range in Section 1.\n"
             "4. Narration MUST contain ZERO digits (0-9), ZERO %, $, &, /, (), [], or non-ASCII characters. Spell all numbers out (e.g. 'forty percent', 'ten million').\n"
@@ -498,7 +517,7 @@ def generate_and_validate_draft(
             '  "draft_script": { "language": "English", "origin": "editor", "run_kind": "...", "date": "YYYY-MM-DD", "scenes": [...] },\n'
             '  "selection": { "selected_clusters": [...], "skipped_clusters": [...] }\n'
             "CRITICAL RULES (HEADLINES-ONLY BULLETIN):\n"
-            "1. Exactly 20 to 26 scenes: intro (12-25 words), followed by 18 to 24 story headline scenes, and outro (12-25 words).\n"
+            f"1. Exactly 20 to 26 scenes: intro (12-25 words, announcing the broadcast category: \"{intro_info['narration']}\"), followed by 18 to 24 story headline scenes, and outro (12-25 words).\n"
             "2. SINGLE-LINE HEADLINES ONLY: Every story scene narration MUST contain strictly ONE single spoken sentence (10 to 22 words, target ~15 words) summarizing the core event. Absolutely NO descriptions, background paragraphs, historical context, or secondary sentences.\n"
             "3. Total spoken words across all scenes MUST fall inside the allowed range in Section 1.\n"
             "4. Narration MUST contain ZERO digits (0-9), ZERO %, $, &, /, (), [], or non-ASCII characters. Spell all numbers out.\n"
@@ -740,6 +759,7 @@ def generate_and_validate_draft(
                 structured_errors=structured_errors,
                 shortlist=shortlist,
                 budget=budget,
+                intro_info=intro_info,
             )
             repair_messages = [{"role": "user", "content": repair_prompt}]
         else:

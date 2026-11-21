@@ -44,4 +44,7 @@ Thumbs.db
 
 data/cache/
 data/state/
+data/*.lock
+graphify-out/cache/
+graphify-out/2026-*/
 
