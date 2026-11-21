@@ -12,8 +12,9 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
+import uuid
 
 from fastapi import (
     FastAPI,
@@ -43,10 +44,12 @@ from src.utils.manifest import (
     is_pid_alive,
     load_manifest,
     reconcile_manifest_status,
+    record_manual_edit,
     release_run_lock,
     save_manifest,
     update_stage_status,
 )
+from src.utils.office_events import emit_office_event
 from web_office.broadcaster import BroadcasterManager
 from web_office.runner import OfficeJobManager, terminate_pid_tree
 from web_office.watcher import (
@@ -98,8 +101,10 @@ def _verify_media_content(path: Path, ext: str) -> bool:
 def _is_host_allowed(host_header: str, allowed_hosts: list[str]) -> bool:
     """Validates Host or Origin against localhost, private LAN ranges, and allowed hosts."""
     if not host_header:
-        return True
+        return False
     host = host_header.split(":")[0].strip().lower()
+    if not host:
+        return False
     if host in ("localhost", "127.0.0.1", "::1", "testserver", "testclient"):
         return True
     if host in allowed_hosts:
@@ -110,6 +115,45 @@ def _is_host_allowed(host_header: str, allowed_hosts: list[str]) -> bool:
             return True
     except ValueError:
         pass
+    return False
+
+
+def _is_ip_private_or_loopback(host_or_ip: str) -> bool:
+    """Checks whether a hostname or IP address resolves to private, loopback, or link-local ranges."""
+    import socket
+    clean_host = host_or_ip.split(":")[0].strip().lower()
+    if not clean_host:
+        return True
+    if clean_host in ("localhost", "testserver", "testclient"):
+        return True
+    try:
+        ip = ipaddress.ip_address(clean_host)
+        return (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+    except ValueError:
+        pass
+    try:
+        addr_info = socket.getaddrinfo(clean_host, None)
+        for _, _, _, _, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            if (
+                ip.is_loopback
+                or ip.is_private
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or ip.is_unspecified
+            ):
+                return True
+    except Exception:
+        return False
     return False
 
 
@@ -169,7 +213,7 @@ class MorningRequest(BaseModel):
 
 
 class DraftAIRequest(BaseModel):
-    provider: str | None = None
+    provider: Literal["zhipu", "bigmodel", "gemini", "anthropic", "openai", "ollama"] | None = None
     auto_approve: bool = False
 
 
@@ -180,12 +224,12 @@ class DraftManualRequest(BaseModel):
 
 class FinishRequest(BaseModel):
     force: bool = False
-    orientation: str | None = None
+    orientation: Literal["landscape", "vertical"] | None = None
 
 
 class PrepareMediaRequest(BaseModel):
     force: bool = False
-    orientation: str | None = None
+    orientation: Literal["landscape", "vertical"] | None = None
 
 
 class ResetStageRequest(BaseModel):
@@ -204,6 +248,33 @@ class ValidateMediaLinkRequest(BaseModel):
 class CleanupRequest(BaseModel):
     dry_run: bool = True
     keep_runs: int = 7
+
+
+def _compute_run_items(runs_dir: Path) -> list[dict[str, Any]]:
+    run_items = []
+    if runs_dir.exists():
+        for d in sorted(runs_dir.iterdir(), reverse=True):
+            if d.is_dir() and DATE_RE.match(d.name):
+                try:
+                    sz = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                except Exception:
+                    sz = 0
+                st_md = d / "manifest.json"
+                st = "pending"
+                if st_md.exists():
+                    try:
+                        st = json.loads(st_md.read_text(encoding="utf-8")).get("status", "pending")
+                    except Exception:
+                        pass
+                run_items.append(
+                    {
+                        "date": d.name,
+                        "size_mb": round(sz / (1024 * 1024), 2),
+                        "status": st,
+                        "has_final_mp4": (d / "render" / "final.mp4").exists(),
+                    }
+                )
+    return run_items
 
 
 def create_app(repo_root: Path | None = None) -> FastAPI:
@@ -262,13 +333,13 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         ]
 
         host = request.headers.get("host", "")
-        if host and not _is_host_allowed(host, allowed_hosts):
+        if not host or not _is_host_allowed(host, allowed_hosts):
             return JSONResponse(status_code=403, content={"detail": f"Host '{host}' is forbidden."})
 
         origin = request.headers.get("origin")
         if origin:
             parsed = urlparse(origin)
-            if parsed.netloc and not _is_host_allowed(parsed.netloc, allowed_hosts):
+            if not parsed.netloc or not _is_host_allowed(parsed.netloc, allowed_hosts):
                 return JSONResponse(status_code=403, content={"detail": f"Origin '{origin}' is forbidden."})
 
         # Token check on /api
@@ -292,7 +363,7 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 key="office_token",
                 value=token_in_query,
                 httponly=True,
-                samesite="lax",
+                samesite="strict",
             )
 
         return response
@@ -303,7 +374,8 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/runs")
     async def api_list_runs() -> dict[str, Any]:
-        return {"runs": list_runs(runs_dir)}
+        runs = await asyncio.to_thread(list_runs, runs_dir)
+        return {"runs": runs}
 
     @app.get("/api/doctor")
     async def api_doctor() -> dict[str, Any]:
@@ -314,29 +386,7 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         doctor_res = await get_cached_doctor()
 
         disk_total, disk_used, disk_free = shutil.disk_usage(root)
-        run_items = []
-        if runs_dir.exists():
-            for d in sorted(runs_dir.iterdir(), reverse=True):
-                if d.is_dir() and DATE_RE.match(d.name):
-                    try:
-                        sz = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
-                    except Exception:
-                        sz = 0
-                    st_md = d / "manifest.json"
-                    st = "pending"
-                    if st_md.exists():
-                        try:
-                            st = json.loads(st_md.read_text(encoding="utf-8")).get("status", "pending")
-                        except Exception:
-                            pass
-                    run_items.append(
-                        {
-                            "date": d.name,
-                            "size_mb": round(sz / (1024 * 1024), 2),
-                            "status": st,
-                            "has_final_mp4": (d / "render" / "final.mp4").exists(),
-                        }
-                    )
+        run_items = await asyncio.to_thread(_compute_run_items, runs_dir)
 
         outputs_cfg = load_outputs_config(config_dir)
         mirror_dir_raw = outputs_cfg.get("mirror_dir")
@@ -362,28 +412,37 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
             [f.name for f in latest_dir.iterdir() if f.is_file()] if latest_dir.exists() else []
         )
 
-        kokoro_ok = False
-        try:
-            import kokoro  # noqa
+        pipeline_cfg_path = config_dir / "pipeline.yaml"
+        daemon_url = "http://127.0.0.1:8766"
+        if pipeline_cfg_path.exists():
+            try:
+                import yaml
+                p_cfg = yaml.safe_load(pipeline_cfg_path.read_text(encoding="utf-8")) or {}
+                for st in p_cfg.get("stages", []):
+                    if st.get("id") == "voice" and st.get("daemon_url"):
+                        daemon_url = st["daemon_url"]
+                        break
+            except Exception:
+                pass
 
-            kokoro_ok = True
-        except Exception:
-            pass
+        def _check_daemon_health(url: str) -> bool:
+            try:
+                import urllib.request
+                target = url.rstrip("/") + "/health"
+                req = urllib.request.Request(target, headers={"User-Agent": "NewsAuto-Office/1.0"})
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    return resp.status == 200
+            except Exception:
+                return False
 
-        edge_tts_ok = False
-        try:
-            import edge_tts  # noqa
-
-            edge_tts_ok = True
-        except Exception:
-            pass
+        tts_daemon_ok = await asyncio.to_thread(_check_daemon_health, daemon_url)
 
         scheduler_status = "unknown"
         if sys.platform == "win32":
             try:
                 res = await asyncio.to_thread(
                     subprocess.run,
-                    ["schtasks", "/query", "/tn", "NepalNewsMorning", "/fo", "csv"],
+                    ["schtasks", "/query", "/tn", "NepalNewsBot-Morning", "/fo", "csv"],
                     capture_output=True,
                     text=True,
                     timeout=3,
@@ -409,8 +468,9 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 },
             },
             "services": {
-                "kokoro_tts": kokoro_ok,
-                "edge_tts": edge_tts_ok,
+                "tts_daemon": tts_daemon_ok,
+                "kokoro_tts": tts_daemon_ok,
+                "edge_tts": tts_daemon_ok,
                 "windows_scheduler": scheduler_status,
             },
         }
@@ -434,6 +494,52 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         result["dry_run"] = body.dry_run
         result["formatted_plan"] = format_cleanup_plan(plan)
         return result
+
+    @app.get("/api/system/tts-daemon/status")
+    async def api_tts_daemon_status() -> dict[str, Any]:
+        def _check_health() -> dict[str, Any]:
+            import urllib.request
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8766/health", timeout=1.5) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        return {"running": True, "status": "online", "details": data}
+            except Exception as e:
+                return {"running": False, "status": "offline", "error": str(e)}
+            return {"running": False, "status": "offline"}
+
+        return await asyncio.to_thread(_check_health)
+
+    @app.post("/api/system/tts-daemon/restart")
+    async def api_tts_daemon_restart() -> dict[str, Any]:
+        def _restart() -> dict[str, Any]:
+            import subprocess
+            import time
+            stop_script = root / "scripts" / "stop_tts_daemon.ps1"
+            start_script = root / "scripts" / "start_tts_daemon.ps1"
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(stop_script)],
+                    capture_output=True,
+                    check=False,
+                )
+                subprocess.run(
+                    ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(start_script)],
+                    capture_output=True,
+                    check=False,
+                )
+            time.sleep(1.0)
+            import urllib.request
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8766/health", timeout=2.0) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        return {"ok": True, "status": "online", "details": data}
+            except Exception as e:
+                return {"ok": False, "status": "offline", "error": str(e)}
+            return {"ok": False, "status": "offline"}
+
+        return await asyncio.to_thread(_restart)
 
     def _serialize_categories() -> list[dict[str, Any]]:
         return [
@@ -468,6 +574,13 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         events = await asyncio.to_thread(build_replay_events, run_dir, manifest)
         return {"date": run_date, "events": events}
 
+    ALLOWED_RUN_FILE_EXTENSIONS = {
+        ".mp4", ".mov", ".mkv", ".webm", ".avi",
+        ".wav", ".mp3", ".ogg",
+        ".jpg", ".jpeg", ".png", ".webp",
+        ".json", ".md", ".txt", ".csv", ".log", ".html", ".srt",
+    }
+
     @app.get("/api/runs/{run_date}/file")
     async def api_run_file(run_date: str, path: str = Query(..., min_length=1)):
         _validate_run_date(run_date)
@@ -479,6 +592,8 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Path outside run directory is forbidden.") from exc
         if not candidate.exists() or not candidate.is_file():
             raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        if candidate.suffix.lower() not in ALLOWED_RUN_FILE_EXTENSIONS:
+            raise HTTPException(status_code=403, detail=f"File extension '{candidate.suffix}' is not permitted.")
         return FileResponse(path=str(candidate))
 
     @app.post("/api/runs/{run_date}/morning")
@@ -610,30 +725,46 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
     @app.post("/api/runs/{run_date}/reset-stage")
     async def api_reset_stage(run_date: str, body: ResetStageRequest) -> dict[str, Any]:
         _validate_run_date(run_date)
+        busy, reason = job_manager.is_busy(run_date)
+        if busy:
+            raise HTTPException(status_code=409, detail=reason)
+
         run_dir = runs_dir / run_date
+        manifest_path = run_dir / "manifest.json"
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail=f"Manifest not found for {run_date}.")
+
+        manifest = load_manifest(manifest_path)
+        if manifest.get("status") == "abandoned":
+            raise HTTPException(status_code=400, detail=f"Cannot reset stages on abandoned run {run_date}.")
+
         stage_order = ("scraper", "editor", "voice", "timeline", "media", "motion", "render", "qa")
         if body.stage not in stage_order:
             raise HTTPException(status_code=400, detail=f"Unknown stage '{body.stage}'.")
 
         stages_to_reset = list(stage_order[stage_order.index(body.stage):]) if body.reset_downstream else [body.stage]
-        manifest_path = run_dir / "manifest.json"
-        if manifest_path.exists():
-            manifest = load_manifest(manifest_path)
-            for st in stages_to_reset:
-                if st in manifest.get("stages", {}):
-                    update_stage_status(manifest, st, "pending", error_message=None)
-                    manifest["stages"][st]["retry_count"] = 0
-                    manifest["stages"][st]["start_time"] = None
-                    manifest["stages"][st]["end_time"] = None
-            if manifest.get("status") in ("failed", "interrupted", "paused"):
-                manifest["status"] = "pending"
-            reconcile_manifest_status(manifest, run_dir=run_dir, active_process=False)
-            save_manifest(manifest, manifest_path)
-            try:
-                from src.orchestrator import write_status_md
-                write_status_md(run_dir, manifest, active_process=False)
-            except Exception:
-                pass
+        for st in stages_to_reset:
+            if st in manifest.get("stages", {}):
+                update_stage_status(manifest, st, "pending", error_message=None)
+                manifest["stages"][st]["retry_count"] = 0
+                manifest["stages"][st]["start_time"] = None
+                manifest["stages"][st]["end_time"] = None
+        if manifest.get("status") in ("failed", "interrupted", "paused"):
+            manifest["status"] = "pending"
+
+        record_manual_edit(
+            manifest,
+            file="manifest.json",
+            what=f"Reset stage '{body.stage}' (downstream={body.reset_downstream})",
+            why="Manual reset via Web Office HQ",
+        )
+        reconcile_manifest_status(manifest, run_dir=run_dir, active_process=False)
+        save_manifest(manifest, manifest_path)
+        try:
+            from src.orchestrator import write_status_md
+            write_status_md(run_dir, manifest, active_process=False)
+        except Exception:
+            pass
         return {"ok": True, "action": "reset-stage", "stage": body.stage, "reset_stages": stages_to_reset}
 
     @app.post("/api/runs/{run_date}/stop")
@@ -657,7 +788,7 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 elif raw:
                     pid = int(raw)
                 if pid and is_pid_alive(pid):
-                    pid_stopped = _terminate_pid_tree(pid)
+                    pid_stopped = await asyncio.to_thread(_terminate_pid_tree, pid)
                 elif pid:
                     pid_stopped = True
             except Exception:
@@ -690,19 +821,12 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 pass
 
         # 4. Record event to office_events.jsonl
-        events_path = run_dir / "office_events.jsonl"
-        try:
-            from datetime import datetime
-            ev_entry = json.dumps({
-                "timestamp": datetime.now().astimezone().isoformat(),
-                "type": "pipeline_stopped",
-                "stage": "orchestrator",
-                "message": "Workflow execution stopped by operator.",
-            }) + "\n"
-            with open(events_path, "a", encoding="utf-8") as f:
-                f.write(ev_entry)
-        except Exception:
-            pass
+        emit_office_event(
+            run_dir,
+            "pipeline_stopped",
+            stage="orchestrator",
+            message="Workflow execution stopped by operator via Web Office HQ.",
+        )
 
         stopped_any = bool(runner_stopped or pid_stopped)
         return {
@@ -718,6 +842,10 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
     @app.post("/api/runs/{run_date}/apply-picks")
     async def api_apply_picks(run_date: str, body: ApplyPicksRequest) -> dict[str, Any]:
         _validate_run_date(run_date)
+        busy, reason = job_manager.is_busy(run_date)
+        if busy:
+            raise HTTPException(status_code=409, detail=reason)
+
         run_dir = runs_dir / run_date
         if not run_dir.exists():
             raise HTTPException(status_code=404, detail=f"Run directory for {run_date} not found.")
@@ -758,8 +886,10 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 pass
 
         safe_shot_id = re.sub(r"[^\w\-]", "_", shot_id)
-        orig_filename = Path(file.filename or "media_file").name
-        ext = Path(orig_filename).suffix.lower()
+        raw_filename = Path(file.filename or "media_file").name
+        ext = Path(raw_filename).suffix.lower()
+        stem = Path(raw_filename).stem[:100]
+        orig_filename = f"{stem}{ext}" if len(raw_filename) > 100 else raw_filename
         allowed_exts = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".jpg", ".jpeg", ".png", ".webp"}
         if ext not in allowed_exts:
             raise HTTPException(
@@ -771,7 +901,7 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         uploads_dir.mkdir(parents=True, exist_ok=True)
         dest_filename = f"{safe_shot_id}_{re.sub(r'[^\w\-.]', '_', orig_filename)}"
         dest_path = uploads_dir / dest_filename
-        temp_dest = uploads_dir / f"{dest_filename}.upload_tmp.{os.getpid()}"
+        temp_dest = uploads_dir / f"{dest_filename}.upload_tmp.{uuid.uuid4().hex}"
 
         total_bytes = 0
         chunk_size = 64 * 1024
@@ -820,28 +950,51 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
 
         is_video = ext in {".mp4", ".mov", ".mkv", ".webm", ".avi"}
         if is_video:
+            async def _run_ffmpeg_thumb(args: list[str]) -> bool:
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *args,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    try:
+                        await asyncio.wait_for(proc.communicate(), timeout=30)
+                        return proc.returncode == 0
+                    except (asyncio.TimeoutError, TimeoutError):
+                        try:
+                            proc.kill()
+                            await proc.wait()
+                        except Exception:
+                            pass
+                        return False
+                except Exception:
+                    return False
+
             cmd = [
                 "ffmpeg", "-y", "-ss", "00:00:00.5", "-i", str(dest_path),
                 "-vframes", "1", "-vf", "scale=480:-1", str(thumb_path)
             ]
-            res = subprocess.run(cmd, capture_output=True)
-            if res.returncode != 0 or not thumb_path.exists():
+            ok = await _run_ffmpeg_thumb(cmd)
+            if not ok or not thumb_path.exists():
                 cmd_fallback = [
                     "ffmpeg", "-y", "-i", str(dest_path),
                     "-vframes", "1", "-vf", "scale=480:-1", str(thumb_path)
                 ]
-                subprocess.run(cmd_fallback, capture_output=True)
+                await _run_ffmpeg_thumb(cmd_fallback)
         else:
-            try:
-                from PIL import Image
-                with Image.open(dest_path) as im:
-                    im = im.convert("RGB")
-                    w, h = im.size
-                    new_h = max(1, int(h * 480 / w))
-                    im_resized = im.resize((480, new_h), Image.Resampling.LANCZOS)
-                    im_resized.save(thumb_path, "JPEG", quality=85)
-            except Exception:
-                pass
+            def _resize_image() -> None:
+                try:
+                    from PIL import Image
+                    with Image.open(dest_path) as im:
+                        im = im.convert("RGB")
+                        w, h = im.size
+                        new_h = max(1, int(h * 480 / w))
+                        im_resized = im.resize((480, new_h), Image.Resampling.LANCZOS)
+                        im_resized.save(thumb_path, "JPEG", quality=85)
+                except Exception:
+                    pass
+
+            await asyncio.to_thread(_resize_image)
 
         rel_file = str(dest_path.relative_to(run_dir).as_posix())
         rel_thumb = f"media/review/thumbs/{thumb_name}"
@@ -875,9 +1028,20 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
 
         from urllib.parse import urlparse
         try:
-            domain = urlparse(url).netloc.lower()
+            parsed = urlparse(url)
+            host = parsed.hostname or parsed.netloc.split(":")[0]
+            domain = parsed.netloc.lower()
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid URL format.")
+
+        if not host:
+            raise HTTPException(status_code=400, detail="Invalid URL: Missing host.")
+
+        if _is_ip_private_or_loopback(host):
+            raise HTTPException(
+                status_code=400,
+                detail=f"URL host '{host}' resolves to a private or loopback IP. Local network addresses are forbidden.",
+            )
 
         if any(b in domain for b in blocklist):
             raise HTTPException(
@@ -893,6 +1057,23 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
             await websocket.close(code=1008)
             return
 
+        allowed_hosts = [
+            h.strip().lower()
+            for h in os.getenv("OFFICE_ALLOWED_HOSTS", "").split(",")
+            if h.strip()
+        ]
+        host = websocket.headers.get("host", "")
+        if not host or not _is_host_allowed(host, allowed_hosts):
+            await websocket.close(code=1008)
+            return
+
+        origin = websocket.headers.get("origin")
+        if origin:
+            parsed = urlparse(origin)
+            if not parsed.netloc or not _is_host_allowed(parsed.netloc, allowed_hosts):
+                await websocket.close(code=1008)
+                return
+
         configured_token = os.getenv("OFFICE_TOKEN", "").strip()
         if configured_token:
             token = websocket.query_params.get("token") or websocket.cookies.get("office_token")
@@ -906,10 +1087,19 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
 
         try:
             while True:
-                data = await websocket.receive_json()
+                try:
+                    data = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    # Keepalive probe: check if client is still responsive
+                    try:
+                        await websocket.send_json({"type": "ping"})
+                        continue
+                    except Exception:
+                        break
                 msg_type = data.get("type")
-                if msg_type == "ping":
-                    await websocket.send_json({"type": "pong"})
+                if msg_type in ("ping", "pong"):
+                    if msg_type == "ping":
+                        await websocket.send_json({"type": "pong"})
                 elif msg_type == "request_sync":
                     await broadcaster.send_current_state(websocket)
         except WebSocketDisconnect:

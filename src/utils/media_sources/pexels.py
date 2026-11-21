@@ -46,7 +46,8 @@ class PexelsSource(BaseMediaSource):
         endpoint = cfg.get("endpoint", "https://api.pexels.com/videos/search")
 
         headers = {"Authorization": api_key}
-        params = {"query": query, "orientation": orientation, "per_page": 15}
+        orientation_param = "portrait" if orientation == "vertical" else orientation
+        params = {"query": query, "orientation": orientation_param, "per_page": 15}
 
         data = self.cache_mgr.get_json(endpoint, params=params, headers=headers, min_interval=0.5, domain_key="pexels.com", offline=offline)
         if not data or "videos" not in data:
@@ -57,7 +58,19 @@ class PexelsSource(BaseMediaSource):
             files = vid.get("video_files", [])
             if not files:
                 continue
-            best_file = files[0]
+            best_file = None
+            for f in files:
+                ftype = f.get("file_type", "")
+                if ftype and ftype != "video/mp4":
+                    continue
+                w = int(f.get("width") or 0)
+                h = int(f.get("height") or 0)
+                q = f.get("quality", "")
+                if q == "hd" or (1280 <= w <= 1920) or (720 <= h <= 1080):
+                    best_file = f
+                    break
+            if not best_file:
+                best_file = files[0]
             cand = Candidate(
                 source="pexels",
                 id=f"pexels_{vid.get('id')}",

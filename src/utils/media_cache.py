@@ -2,6 +2,7 @@
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ class MediaCacheManager:
         cache_dir: str | Path = "data/media_cache",
         user_agent: str = "NepalNewsBot/1.0 (+https://github.com/nepal-news-bot; contact@nepalnewsbot.org)",
         ttl_seconds: int = 86400,  # 24 hours
+        max_total_media_size_mb: float = 500.0,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.requests_dir = self.cache_dir / "requests"
@@ -30,6 +32,7 @@ class MediaCacheManager:
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
         self.user_agent = user_agent
         self.ttl_seconds = ttl_seconds
+        self.max_total_media_size_mb = max_total_media_size_mb
         self._last_request_times: dict[str, float] = {}
 
     def _get_cache_path(self, key: str) -> Path:
@@ -118,6 +121,7 @@ class MediaCacheManager:
         url: str,
         target_filename: str | None = None,
         offline: bool = False,
+        max_size_mb: float | None = None,
     ) -> Path | None:
         """Downloads a media file into the download cache and returns its local Path."""
         hashed = hashlib.sha256(url.encode("utf-8")).hexdigest()
@@ -132,16 +136,24 @@ class MediaCacheManager:
             logger.debug(f"Offline mode: cached download not found for {url}")
             return None
 
+        effective_max_mb = max_size_mb if max_size_mb is not None else self.max_total_media_size_mb
+        max_bytes = int(effective_max_mb * 1024 * 1024) if effective_max_mb and effective_max_mb > 0 else None
+
         headers = {"User-Agent": self.user_agent}
         max_retries = 2
         for attempt in range(max_retries + 1):
+            temp_path = dest_path.with_suffix(f".downloading.{os.getpid()}")
             try:
                 resp = requests.get(url, headers=headers, stream=True, timeout=30)
                 if resp.status_code == 200:
-                    temp_path = dest_path.with_suffix(".downloading")
+                    total_downloaded = 0
                     with open(temp_path, "wb") as f:
                         for chunk in resp.iter_content(chunk_size=65536):
                             if chunk:
+                                total_downloaded += len(chunk)
+                                if max_bytes and total_downloaded > max_bytes:
+                                    logger.warning(f"Download exceeded max size ({max_bytes} bytes): {url}")
+                                    return None
                                 f.write(chunk)
                     temp_path.replace(dest_path)
                     return dest_path
@@ -156,6 +168,12 @@ class MediaCacheManager:
                 logger.warning(f"Download error for {url}: {e} (attempt {attempt+1})")
                 if attempt < max_retries:
                     time.sleep(1.5)
+            finally:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
 
         return None
 
@@ -180,6 +198,17 @@ class MediaCacheManager:
                     with open(manifest_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     for shot in data.get("shots", []):
+                        orig_url = shot.get("origin_url")
+                        if orig_url:
+                            orig_hash = hashlib.sha256(orig_url.encode("utf-8")).hexdigest()
+                            referenced_hashes.add(orig_hash.lower())
+                        cache_key = shot.get("cache_key")
+                        if cache_key:
+                            referenced_hashes.add(str(cache_key).lower())
+                        raw_p = shot.get("raw_path")
+                        if raw_p:
+                            referenced_hashes.add(Path(raw_p).stem.lower())
+                            referenced_hashes.add(Path(raw_p).name.lower())
                         sha = shot.get("sha256")
                         if sha:
                             referenced_hashes.add(sha.lower())
@@ -220,7 +249,8 @@ class MediaCacheManager:
 
             # Check if referenced
             f_stem = f_path.stem.lower()
-            if f_stem in referenced_hashes:
+            f_name = f_path.name.lower()
+            if f_stem in referenced_hashes or f_name in referenced_hashes:
                 continue
 
             if is_stale or is_over_cap:

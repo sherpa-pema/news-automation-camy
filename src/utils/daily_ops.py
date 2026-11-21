@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -82,7 +83,11 @@ def load_outputs_config(config_dir: Path | str = "config") -> dict[str, Any]:
         if "outputs" in data:
             out_cfg = dict(data.get("outputs") or {})
             raw_mirror = out_cfg.get("mirror_dir")
-            out_cfg["mirror_dir"] = str(raw_mirror).strip() if raw_mirror else None
+            if raw_mirror:
+                expanded = Path(os.path.expanduser(os.path.expandvars(str(raw_mirror).strip()))).as_posix()
+                out_cfg["mirror_dir"] = expanded
+            else:
+                out_cfg["mirror_dir"] = None
             return out_cfg
         return defaults
     except Exception:
@@ -175,11 +180,14 @@ def verify_editor_gate(
 
     curr_fp = extract_script_validation_fingerprint(compute_validator_fingerprint())
     app_fp = extract_script_validation_fingerprint(app_data.get("validator_fingerprint"))
-    if app_fp and app_fp != curr_fp:
-        return False, "validator or editor config changed after approval, re-run validate and approve"
+    is_fixture = bool(origin == "fixture" or manifest.get("run_kind") == "fixture")
+    if not is_fixture:
+        if not app_fp or app_fp != curr_fp:
+            return False, "validator or editor config changed after approval, re-run validate and approve"
 
-    rep_file = rdir / "script" / "validation_report.json"
-    if rep_file.exists():
+        rep_file = rdir / "script" / "validation_report.json"
+        if not rep_file.exists():
+            return False, "validation_report.json missing; re-run validate and approve"
         try:
             rep_data = json.loads(rep_file.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -187,8 +195,22 @@ def verify_editor_gate(
         if not rep_data.get("is_valid", True) or len(rep_data.get("errors", [])) > 0:
             return False, "Latest validation report contains errors; re-run validate and approve."
         rep_fp = extract_script_validation_fingerprint(rep_data.get("validator_fingerprint"))
-        if rep_fp and rep_fp != curr_fp:
+        if not rep_fp or rep_fp != curr_fp:
             return False, "validator or editor config changed since validation, re-run validate and approve"
+    else:
+        if app_fp and app_fp != curr_fp:
+            return False, "validator or editor config changed after approval, re-run validate and approve"
+        rep_file = rdir / "script" / "validation_report.json"
+        if rep_file.exists():
+            try:
+                rep_data = json.loads(rep_file.read_text(encoding="utf-8"))
+            except Exception as exc:
+                return False, f"Unable to read validation report: {exc}"
+            if not rep_data.get("is_valid", True) or len(rep_data.get("errors", [])) > 0:
+                return False, "Latest validation report contains errors; re-run validate and approve."
+            rep_fp = extract_script_validation_fingerprint(rep_data.get("validator_fingerprint"))
+            if rep_fp and rep_fp != curr_fp:
+                return False, "validator or editor config changed since validation, re-run validate and approve"
 
     return True, "Editor stage done, script hash verified, validator fingerprint matches."
 
@@ -751,24 +773,44 @@ def write_status_md(
     manifest: dict[str, Any] | None = None,
     active_process: bool | None = None,
 ) -> Path:
-    """Writes data/runs/<D>/STATUS.md and returns its Path."""
+    """Writes data/runs/<D>/STATUS.md atomically and returns its Path."""
     rdir = Path(run_dir)
     rdir.mkdir(parents=True, exist_ok=True)
     content = render_status_markdown(rdir, manifest=manifest, active_process=active_process)
     out_path = rdir / "STATUS.md"
-    out_path.write_text(content, encoding="utf-8")
+    temp_path = out_path.with_suffix(f".tmp.{os.getpid()}.{time.time_ns()}")
+    temp_path.write_text(content, encoding="utf-8")
+    os.replace(temp_path, out_path)
     return out_path
 
 
 def _copy_latest_deliverables_to_dir(src_dir: Path, dst_dir: Path) -> list[str]:
-    """Replaces deliverables inside dst_dir with everything from src_dir."""
+    """Atomically replaces deliverables inside dst_dir with everything from src_dir.
+
+    Writes to temporary files (<name>.tmp) first, then uses os.replace() so that syncing
+    daemons (OneDrive, Dropbox) never lock, upload, or sync half-written video or metadata.
+    """
     dst_dir.mkdir(parents=True, exist_ok=True)
+    # Clean up any leftover temporary files from interrupted syncs
+    for tmp_item in dst_dir.glob("*.tmp"):
+        try:
+            if tmp_item.is_dir():
+                shutil.rmtree(tmp_item, ignore_errors=True)
+            else:
+                tmp_item.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     for old_name in (
         "final.mp4",
         "description.md",
+        "shorts_caption.txt",
         "qa_report.json",
         "storyboard.html",
         "contact_sheet.jpg",
+        "thumb_01.jpg",
+        "thumb_02.jpg",
+        "thumb_03.jpg",
         "STATUS.md",
         "README.txt",
     ):
@@ -781,12 +823,24 @@ def _copy_latest_deliverables_to_dir(src_dir: Path, dst_dir: Path) -> list[str]:
 
     mirrored: list[str] = []
     for item in sorted(src_dir.iterdir(), key=lambda p: p.name):
+        if item.name.endswith(".tmp"):
+            continue
         target = dst_dir / item.name
         if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True)
+            tmp_target = dst_dir / f"{item.name}.tmp"
+            if tmp_target.exists():
+                shutil.rmtree(tmp_target, ignore_errors=True)
+            shutil.copytree(item, tmp_target, dirs_exist_ok=True)
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            os.replace(tmp_target, target)
             mirrored.append(f"{item.name}/")
         elif item.is_file():
-            shutil.copy2(item, target)
+            tmp_target = dst_dir / f"{item.name}.tmp"
+            if tmp_target.exists():
+                tmp_target.unlink(missing_ok=True)
+            shutil.copy2(item, tmp_target)
+            os.replace(tmp_target, target)
             mirrored.append(item.name)
     return mirrored
 
@@ -812,9 +866,13 @@ def publish_to_latest(
     for old_name in (
         "final.mp4",
         "description.md",
+        "shorts_caption.txt",
         "qa_report.json",
         "storyboard.html",
         "contact_sheet.jpg",
+        "thumb_01.jpg",
+        "thumb_02.jpg",
+        "thumb_03.jpg",
         "STATUS.md",
         "README.txt",
     ):
@@ -840,6 +898,12 @@ def publish_to_latest(
         shutil.copy2(src_desc, ldir / "description.md")
         copied.append("description.md")
 
+    # 2b. shorts_caption.txt (for vertical/shorts runs)
+    src_shorts = rdir / "render" / "shorts_caption.txt"
+    if src_shorts.exists():
+        shutil.copy2(src_shorts, ldir / "shorts_caption.txt")
+        copied.append("shorts_caption.txt")
+
     # 3. qa_report.json
     src_qa = rdir / "qa" / "qa_report.json"
     if not src_qa.exists():
@@ -858,11 +922,18 @@ def publish_to_latest(
         shutil.copytree(src_sb_frames, ldir / "storyboard_frames", dirs_exist_ok=True)
         copied.append("storyboard_frames/")
 
-    # 5. contact_sheet.jpg
+    # 5. contact_sheet.jpg + thumbnail candidates
     src_cs = rdir / "qa" / "contact_sheet.jpg"
     if src_cs.exists():
         shutil.copy2(src_cs, ldir / "contact_sheet.jpg")
         copied.append("contact_sheet.jpg")
+
+    for t_idx in (1, 2, 3):
+        thumb_name = f"thumb_{t_idx:02d}.jpg"
+        src_thumb = rdir / "qa" / thumb_name
+        if src_thumb.exists():
+            shutil.copy2(src_thumb, ldir / thumb_name)
+            copied.append(thumb_name)
 
     # 6. STATUS.md
     src_status = rdir / "STATUS.md"
@@ -1067,6 +1138,29 @@ def plan_cleanup(
                 "kind": "dir" if cand.is_dir() else "file",
                 "size_bytes": size_bytes,
             })
+
+    # Evict superseded/stale render/cache/*.mp4 files within kept runs
+    for kept_run in kept_dirs:
+        rcache = kept_run / "render" / "cache"
+        if not rcache.exists():
+            continue
+        scene_files: dict[str, list[Path]] = {}
+        for mp4 in sorted(rcache.glob("scene_*.mp4")):
+            parts = mp4.stem.split("_")
+            prefix = "_".join(parts[:3]) if len(parts) >= 3 else mp4.stem
+            scene_files.setdefault(prefix, []).append(mp4)
+        for prefix, flist in scene_files.items():
+            if len(flist) > 1:
+                flist.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                for stale_mp4 in flist[1:]:
+                    if _is_protected_path(stale_mp4, root, kept_set):
+                        continue
+                    run_delete_targets.append({
+                        "run_date": kept_run.name,
+                        "path": str(stale_mp4),
+                        "kind": "file",
+                        "size_bytes": stale_mp4.stat().st_size,
+                    })
 
     cache_mgr = MediaCacheManager(cache_dir=cache_dir)
     cache_preview = cache_mgr.prune_cache(

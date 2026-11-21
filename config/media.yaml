@@ -113,7 +113,7 @@ sources:
     priority: 9
     api_key_env: "PEXELS_API_KEY"
     requires_key: true
-    endpoint: "https://api.pexels.com/v1"
+    endpoint: "https://api.pexels.com/videos/search"
 
 # yt-dlp Configuration (OFF by default)
 ytdlp:

@@ -105,7 +105,7 @@ class LocalLibrarySource(BaseMediaSource):
                     title=meta.get("title", entry.stem),
                     tags=keywords,
                     attribution_text=f"Footage by {meta.get('author', 'User')}" if meta.get("author") else "User-provided footage",
-                    attribution_required=False,
+                    attribution_required=("by" in str(meta.get("license", "own work")).lower()),
                     people_visible=bool(meta.get("people_visible", False)),
                     extra={"location": meta.get("location", ""), "notes": meta.get("notes", "")},
                     thumb_url=str(entry.resolve()),

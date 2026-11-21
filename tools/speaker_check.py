@@ -47,12 +47,25 @@ def compute_rms_dbfs(waveform: torch.Tensor) -> float:
     return round(20.0 * math.log10(rms), 2)
 
 
+_RESAMPLERS: dict[tuple[int, int], Any] = {}
+
+
+def _get_resampler(orig_sr: int, target_sr: int) -> Any:
+    if orig_sr == target_sr:
+        return None
+    key = (orig_sr, target_sr)
+    if key not in _RESAMPLERS:
+        _RESAMPLERS[key] = torchaudio.transforms.Resample(orig_sr, target_sr)
+    return _RESAMPLERS[key]
+
+
 def extract_embedding(extractor: SpkembExtractor, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
     """Extracts a normalized 192-dim speaker embedding tensor [1, 192]."""
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
     if sample_rate != 16000:
-        waveform = torchaudio.transforms.Resample(sample_rate, 16000)(waveform)
+        resampler = _get_resampler(sample_rate, 16000)
+        waveform = resampler(waveform) if resampler is not None else waveform
 
     # Kaldi fbank expects at least 400 samples (25ms)
     if waveform.shape[-1] < 400:
@@ -69,6 +82,7 @@ def extract_embedding(extractor: SpkembExtractor, waveform: torch.Tensor, sample
 def analyze_segments(
     segments: list[dict[str, Any]],
     extractor_path: str | Path = "models/Ming-3.0-tts-0.5b/campplus.onnx",
+    reference_wav: str | Path | None = None,
 ) -> dict[str, Any]:
     """Analyzes a list of audio segments [{id, scene, text, waveform, sample_rate, start, end}]."""
     extractor = SpkembExtractor(str(extractor_path))
@@ -92,8 +106,6 @@ def analyze_segments(
         return {"status": "empty", "segments": []}
 
     all_embs = torch.cat(embeddings, dim=0)  # [N, 192]
-    # Cosine similarity matrix
-    sim_matrix = torch.mm(all_embs, all_embs.t()).cpu().numpy()
 
     # Centroid
     centroid = all_embs.mean(dim=0, keepdim=True)
@@ -102,10 +114,17 @@ def analyze_segments(
         centroid = centroid / centroid_norm
     sim_to_centroid = torch.mm(all_embs, centroid.t()).squeeze(-1).cpu().numpy()
 
+    ref_sims: list[float] | None = None
+    if reference_wav and Path(reference_wav).exists():
+        ref_wave, ref_sr = torchaudio.load(str(reference_wav))
+        ref_emb = extract_embedding(extractor, ref_wave, ref_sr)
+        ref_sim_arr = torch.mm(all_embs, ref_emb.t()).squeeze(-1).cpu().numpy()
+        ref_sims = [round(float(s), 4) for s in ref_sim_arr]
+
     # Build per-segment output records
     results = []
     for i, seg in enumerate(segments):
-        results.append({
+        rec = {
             "id": seg.get("id", str(i)),
             "scene": seg.get("scene", ""),
             "index": i,
@@ -116,7 +135,10 @@ def analyze_segments(
             "similarity_to_centroid": round(float(sim_to_centroid[i]), 4),
             "median_f0_hz": f0_list[i],
             "rms_dbfs": rms_list[i],
-        })
+        }
+        if ref_sims is not None:
+            rec["similarity_to_reference"] = ref_sims[i]
+        results.append(rec)
 
     # Summary statistics
     sims = [r["similarity_to_centroid"] for r in results]
@@ -143,6 +165,7 @@ def analyze_timeline_narration(
     narration_path: Path | str,
     timeline_path: Path | str,
     extractor_path: Path | str = "models/Ming-3.0-tts-0.5b/campplus.onnx",
+    reference_wav: str | Path | None = None,
 ) -> dict[str, Any]:
     """Cuts narration.wav into sentence segments using timeline.json sentence timestamps."""
     narration_path = Path(narration_path)
@@ -171,10 +194,10 @@ def analyze_timeline_narration(
             start_frame = max(0, int(s_start * sr))
             end_frame = min(waveform.shape[-1], int(s_end * sr))
 
-            if end_frame > start_frame:
-                seg_wave = waveform[:, start_frame:end_frame]
-            else:
-                seg_wave = torch.zeros(1, int(0.2 * sr))
+            if end_frame <= start_frame:
+                continue
+
+            seg_wave = waveform[:, start_frame:end_frame]
 
             segments.append({
                 "id": f"{sc_id}_s{s_idx}",
@@ -188,19 +211,25 @@ def analyze_timeline_narration(
             })
             sent_counter += 1
 
-    return analyze_segments(segments, extractor_path=extractor_path)
+    return analyze_segments(segments, extractor_path=extractor_path, reference_wav=reference_wav)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Speaker embedding and F0 consistency analyzer")
     parser.add_argument("--narration", default=None, help="Path to narration.wav")
     parser.add_argument("--timeline", default=None, help="Path to timeline.json")
+    parser.add_argument("--reference-wav", default=None, help="Optional reference WAV to compute similarity against")
     parser.add_argument("--extractor", default="models/Ming-3.0-tts-0.5b/campplus.onnx", help="Path to campplus.onnx")
     parser.add_argument("--output-json", default=None, help="Optional output JSON path")
     args = parser.parse_args()
 
     if args.narration and args.timeline:
-        report = analyze_timeline_narration(args.narration, args.timeline, extractor_path=args.extractor)
+        report = analyze_timeline_narration(
+            args.narration,
+            args.timeline,
+            extractor_path=args.extractor,
+            reference_wav=args.reference_wav,
+        )
     else:
         print("Usage: python tools/speaker_check.py --narration <path> --timeline <path>")
         return 1

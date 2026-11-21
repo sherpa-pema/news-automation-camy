@@ -1,0 +1,60 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "name": "provenance",
+      "passed": true,
+      "detail": "Script origin editor, approval SHA-256 and validator fingerprint match."
+    },
+    {
+      "name": "final_mp4_streams",
+      "passed": true,
+      "detail": "Duration sync within 50ms (diff: 0.0ms, video: 38.000s, audio: 38.000s)"
+    },
+    {
+      "name": "loudness",
+      "passed": true,
+      "detail": "Integrated loudness -16.0 LUFS (target: -16.0), True peak -1.5 dBTP (<= -1.0 dBTP)"
+    },
+    {
+      "name": "blackdetect",
+      "passed": true,
+      "detail": "No unintended black segments > 0.5s detected"
+    },
+    {
+      "name": "story_lower_thirds",
+      "passed": true,
+      "detail": "All story scenes contain lower-third attribution and required illustrative tags"
+    },
+    {
+      "name": "overlay_safe_zone",
+      "passed": true,
+      "detail": "All overlays within 5% safe margin bounds and do not collide"
+    },
+    {
+      "name": "overlay_layout",
+      "passed": true,
+      "detail": "All overlays reside strictly within safe zones and clear caption bands"
+    },
+    {
+      "name": "captions",
+      "passed": true,
+      "detail": "Caption audit passed cleanly: 0 fatal violations, reading speed within 24.0 CPS"
+    },
+    {
+      "name": "description_md",
+      "passed": true,
+      "detail": "Publish pack description.md complete with valid chapters, disclosures, and credits"
+    }
+  ],
+  "warnings": [],
+  "redo_stage": null,
+  "metrics": {
+    "video_duration_sec": 38.0,
+    "audio_duration_sec": 38.0,
+    "duration_diff_ms": 0.0,
+    "integrated_loudness_lufs": -16.0,
+    "true_peak_db": -1.5
+  },
+  "visual_quality_note": "Visual quality verified via golden regression gate"
+}

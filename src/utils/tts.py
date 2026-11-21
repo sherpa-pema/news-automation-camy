@@ -40,6 +40,22 @@ class TTSEngine(ABC):
         pass
 
 
+def unload_tts_daemon(daemon_url: str = "http://127.0.0.1:8766", timeout_sec: float = 10.0) -> bool:
+    """Sends a POST /unload to persistent TTS daemon to free GPU VRAM."""
+    url = f"{daemon_url.rstrip('/')}/unload"
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 class MingEngine(TTSEngine):
     """Ming-3.0-TTS engine running via persistent daemon or subprocess in .venv-tts."""
 
@@ -112,6 +128,14 @@ class MingEngine(TTSEngine):
                         f"TTS daemon encountered fatal error: {result_data.get('error')}"
                     )
                 return result_data
+        except urllib.error.HTTPError as err:
+            logger = logging.getLogger("MingEngine")
+            logger.error(f"TTS daemon HTTP error {err.code}: {err.reason}. Refusing duplicate cold subprocess spawn.")
+            raise
+        except TimeoutError as err:
+            logger = logging.getLogger("MingEngine")
+            logger.error(f"TTS daemon request timed out after {self.timeout_sec}s. Refusing duplicate cold subprocess spawn.")
+            raise
         except (urllib.error.URLError, ConnectionError, OSError):
             return None
 
@@ -514,17 +538,18 @@ def _read_pcm16_mono_frames(wav_path: Path, expected_sample_rate: int | None = N
 
     if needs_convert:
         target_sr = expected_sample_rate or sr
-        temp_pcm = wav_path.with_suffix(".temp_pcm16.wav")
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(wav_path),
-                "-ac", "1", "-ar", str(target_sr), "-c:a", "pcm_s16le",
-                str(temp_pcm),
-            ],
-            capture_output=True,
-            check=True,
-        )
+        with tempfile.NamedTemporaryFile(dir=wav_path.parent, suffix=".wav", delete=False) as tmp_file:
+            temp_pcm = Path(tmp_file.name)
         try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", str(wav_path),
+                    "-ac", "1", "-ar", str(target_sr), "-c:a", "pcm_s16le",
+                    str(temp_pcm),
+                ],
+                capture_output=True,
+                check=True,
+            )
             with wave.open(str(temp_pcm), "rb") as wf:
                 return wf.readframes(wf.getnframes()), wf.getframerate()
         finally:
@@ -768,9 +793,8 @@ def master_audio_loudnorm(
     if highpass_hz and highpass_hz > 0:
         pre_filters.append(f"highpass=f={highpass_hz}")
     if compressor:
-        # Pre-conditioning: gentle broadcast compressor (2:1, 20ms attack, 250ms release, 2x makeup) + lookahead limiter
-        pre_filters.append("acompressor=threshold=-24dB:ratio=2:attack=20:release=250:makeup=2")
-        pre_filters.append("alimiter=limit=0.4:level=false")
+        # Pre-conditioning: gentle broadcast compressor (2.2:1, 15ms attack, 200ms release, 1x makeup)
+        pre_filters.append("acompressor=threshold=-20dB:ratio=2.2:attack=15:release=200:makeup=1")
 
     pre_filter_str = (",".join(pre_filters) + ",") if pre_filters else ""
 

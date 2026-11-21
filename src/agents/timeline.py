@@ -39,6 +39,7 @@ from src.utils.timeline import (
     generate_timeline_preview_video,
     get_timeline_aligner,
     interpolate_unplaced_words,
+    parse_srt,
     prepare_scene_tokens,
     validate_srt_syntax,
 )
@@ -74,7 +75,10 @@ def compute_scene_alignment_cache_key(
     else:
         audio_sig = f"missing:{job.get('audio_path')}"
 
-    words_repr = json.dumps([w.get("tokens", []) for w in job.get("words", [])], sort_keys=True)
+    words_repr = json.dumps(
+        [(w.get("orig", ""), w.get("tts", ""), w.get("tokens", [])) for w in job.get("words", [])],
+        sort_keys=True,
+    )
     narration_hash = hashlib.sha256(words_repr.encode("utf-8")).hexdigest()
     pron_hash = hashlib.sha256(json.dumps(pronunciations, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -303,7 +307,19 @@ class TimelineAgent(BaseAgent):
                 continue
 
             sc_script = script_scenes_map[sc_id]
-            audio_path = self.run_dir / s_meta["file"]
+            audio_path: Path | None = None
+            mastered_rel = s_meta.get("mastered_16k_path")
+            if mastered_rel:
+                cand = self.run_dir / mastered_rel
+                if cand.exists():
+                    audio_path = cand
+            if not audio_path:
+                cand_conv = self.run_dir / "audio" / "scenes_mastered_16k" / f"{sc_id}.wav"
+                if cand_conv.exists():
+                    audio_path = cand_conv
+                else:
+                    audio_path = self.run_dir / s_meta["file"]
+
             if not audio_path.exists():
                 raise FileNotFoundError(f"Scene audio file not found: {audio_path}")
 
@@ -422,6 +438,11 @@ class TimelineAgent(BaseAgent):
         if use_cache:
             for sc_id, sc_data in newly_aligned.items():
                 if sc_id in uncached_cache_paths:
+                    if not isinstance(sc_data, dict) or "error" in sc_data:
+                        continue
+                    sc_words = sc_data.get("words", [])
+                    if not sc_words or all(w.get("unplaced") for w in sc_words):
+                        continue
                     try:
                         uncached_cache_paths[sc_id].write_text(
                             json.dumps(sc_data, indent=2), encoding="utf-8"
@@ -993,7 +1014,7 @@ class TimelineAgent(BaseAgent):
                 raise FileNotFoundError(
                     f"Neither captions.json nor captions.srt exists in {paths['timeline_dir']}"
                 )
-            captions = []
+            captions = parse_srt(captions_srt_path.read_text(encoding="utf-8"))
 
         stage_cfg = self._get_stage_config()
         caption_audit = audit_captions(
@@ -1191,10 +1212,10 @@ def main() -> int:
             print(f"Audit Passed:        {summary.get('passed')}")
             print(f"Total Captions:      {summary.get('total_captions')}")
             print(f"Total Violations:    {summary.get('violations_count')}")
-            print(f"Late Starts (>50ms): {summary.get('late_starts_count')} (Max late: {summary.get('max_late_ms')} ms)")
-            print(f"Overlaps:            {summary.get('overlaps_count')}")
-            print(f"Reading Speed (CPS): Min {summary.get('min_cps')}, Median {summary.get('median_cps')}, Max {summary.get('max_cps')} (Limit: {summary.get('max_cps_limit')})")
-            print(f"Duration Bounds:     Min {summary.get('min_duration')}s, Max {summary.get('max_duration')}s")
+            print(f"Late Starts (>50ms): {summary.get('late_50ms_count', summary.get('late_starts_count', 0))} (Max late: {summary.get('max_late_ms', 0.0)} ms)")
+            print(f"Overlaps:            {summary.get('overlap_count', summary.get('overlaps_count', 0))}")
+            print(f"Reading Speed (CPS): Median {summary.get('median_cps')}, Max {summary.get('max_cps')}")
+            print(f"Duration Bounds:     Min Violations {summary.get('min_duration_violations', 0)}, Max Violations {summary.get('max_duration_violations', 0)}")
             print(f"Line Violations:     Length {summary.get('line_length_violations')}, Count {summary.get('line_count_violations')}")
 
             per_scene = audit_report.get("per_scene", {})

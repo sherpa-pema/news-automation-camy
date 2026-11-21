@@ -115,6 +115,8 @@ def plan_shots_for_scenes(
 
         last_cut = scene_start
         for ideal in ideal_cuts:
+            if (scene_end - last_cut) < 2 * min_duration:
+                break
             best_snap = None
             min_dist = float("inf")
 
@@ -133,12 +135,22 @@ def plan_shots_for_scenes(
             else:
                 # Keep ideal cut, ensuring min_duration spacing
                 cut = max(last_cut + min_duration, min(scene_end - min_duration, ideal))
+                if (cut - last_cut) < min_duration or (scene_end - cut) < min_duration:
+                    break
                 actual_cuts.append(round(cut, 3))
                 snapped_flags.append(False)
                 last_cut = cut
 
-        # Construct shots tiling the scene exactly
-        boundaries = [scene_start] + actual_cuts + [scene_end]
+        # Construct shots tiling the scene exactly, deduplicating monotonic boundaries
+        boundaries: list[float] = [scene_start]
+        for b in actual_cuts:
+            b_val = round(b, 3)
+            if b_val > boundaries[-1] and (scene_end - b_val) >= min_duration:
+                boundaries.append(b_val)
+        if scene_end > boundaries[-1]:
+            boundaries.append(round(scene_end, 3))
+        elif len(boundaries) == 1:
+            boundaries.append(round(scene_end, 3))
         shots: list[PlannedShot] = []
 
         for i in range(len(boundaries) - 1):

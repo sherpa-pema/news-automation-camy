@@ -255,6 +255,13 @@ class MediaAgent(BaseAgent):
                             self.selector.mark_candidate_bad(cand.id)
                             continue
 
+                        if cand.source == "unsplash":
+                            download_loc = (cand.extra or {}).get("download_location")
+                            if download_loc:
+                                unsplash_src = self.sources.get("unsplash")
+                                if unsplash_src and hasattr(unsplash_src, "track_download"):
+                                    unsplash_src.track_download(download_loc)
+
                         if cand.kind == "video":
                             out_filename = f"shot_{shot.shot_index:02d}.mp4"
                             out_path = scene_shots_dir / out_filename
@@ -267,6 +274,18 @@ class MediaAgent(BaseAgent):
                                     fps=fps,
                                     source_duration=cand.duration,
                                 )
+                                sha = probe.get("sha256")
+                                if self.selector.is_duplicate_or_near_duplicate(out_path, is_video=True, sha256_hash=sha):
+                                    logger.info(f"Rejecting candidate {cand.id} as duplicate or near-duplicate.")
+                                    self.selector.mark_candidate_bad(cand.id)
+                                    if out_path.exists():
+                                        try:
+                                            out_path.unlink()
+                                        except OSError:
+                                            pass
+                                    continue
+
+                                self.selector.register_media_hash(out_path, is_video=True, sha256_hash=sha)
                                 total_download_bytes += raw_path.stat().st_size
                                 self.selector.mark_candidate_used(cand, matched_query, src_name)
                                 manifest_shots.append({
@@ -308,6 +327,18 @@ class MediaAgent(BaseAgent):
                                     dest_path=out_path,
                                     target_resolution=target_res,
                                 )
+                                sha = probe.get("sha256")
+                                if self.selector.is_duplicate_or_near_duplicate(out_path, is_video=False, sha256_hash=sha):
+                                    logger.info(f"Rejecting candidate {cand.id} as duplicate or near-duplicate.")
+                                    self.selector.mark_candidate_bad(cand.id)
+                                    if out_path.exists():
+                                        try:
+                                            out_path.unlink()
+                                        except OSError:
+                                            pass
+                                    continue
+
+                                self.selector.register_media_hash(out_path, is_video=False, sha256_hash=sha)
                                 total_download_bytes += raw_path.stat().st_size
                                 stills_count += 1
                                 self.selector.mark_candidate_used(cand, matched_query, src_name)
@@ -651,7 +682,7 @@ class MediaAgent(BaseAgent):
                 sorted_cands = sorted(
                     pool_cands.values(),
                     key=lambda c: (
-                        0 if c.source == "local_library" else 1,
+                        0 if c.source in ("local_library", "user-provided") else 1,
                         1 if c.id in used_auto_pick_ids else 0,
                         -float(getattr(c, "score", 0.0)),
                     ),
@@ -875,7 +906,7 @@ class MediaAgent(BaseAgent):
                     pick = {"action": "card", "card_text": sc_script.get("headline", sc_id)}
                     is_default_card = True
 
-                action = pick.get("action", "card")
+                action = pick.get("action") or pick.get("type", "card")
                 action_counts[action] = action_counts.get(action, 0) + 1
 
                 if action == "pick":
@@ -1140,7 +1171,17 @@ class MediaAgent(BaseAgent):
                             from src.utils.media_normalizer import probe_media
                             try:
                                 probe_info = probe_media(raw_path)
-                                is_video = bool(probe_info.get("duration", 0) > 0 and probe_info.get("fps", 0) > 0)
+                                codec = str(probe_info.get("codec_name", "")).lower()
+                                dur = float(probe_info.get("duration", 0.0))
+                                fps_val = float(probe_info.get("fps", 0.0))
+                                is_still_codec = codec in ("mjpeg", "png", "webp", "bmp", "gif", "tiff")
+                                ext = raw_path.suffix.lower()
+                                if is_still_codec or ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp") or dur <= 0.2:
+                                    is_video = False
+                                elif ext in (".mp4", ".mov", ".mkv", ".webm", ".avi") or (dur > 0.2 and fps_val > 0):
+                                    is_video = True
+                                else:
+                                    is_video = False
                             except Exception:
                                 is_video = raw_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".avi")
 
@@ -1527,7 +1568,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--library-report", action="store_true", help="Print report of files in data/media_library")
     parser.add_argument("--keywords", help="Comma-separated keywords for local library")
     parser.add_argument("--people-visible", default="false", help="Boolean: whether people are visible in footage")
-    parser.add_argument("--approve", help="Approve yt-dlp candidate ID")
     return parser.parse_args()
 
 
@@ -1656,13 +1696,20 @@ def main() -> int:
             print(f"[WARN] No candidate found for query '{args.query}'")
             return 1
 
+        target_res = tuple(data.get("resolution", [1920, 1080]))
+        target_fps = int(data.get("fps", 30))
         raw_path = agent.cache_mgr.download_file(cand.download_url, offline=args.offline)
+        if not raw_path or not raw_path.exists():
+            print(f"[ERROR] Failed to download candidate media from {cand.download_url}")
+            return 1
+
         out_filename = f"shot_{args.replace:02d}.mp4" if cand.kind == "video" else f"shot_{args.replace:02d}.jpg"
         out_path = run_dir / "media" / "shots" / args.scene / out_filename
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         if cand.kind == "video":
-            probe = normalize_video(raw_path, out_path, target_shot["end"] - target_shot["start"])
+            probe = normalize_video(raw_path, out_path, target_shot["end"] - target_shot["start"], target_resolution=target_res, fps=target_fps)
         else:
-            probe = normalize_image(raw_path, out_path)
+            probe = normalize_image(raw_path, out_path, target_resolution=target_res)
 
         target_shot["file"] = f"media/shots/{args.scene}/{out_filename}"
         target_shot["type"] = cand.kind
@@ -1675,10 +1722,15 @@ def main() -> int:
         target_shot["sha256"] = probe.get("sha256")
         target_shot["query"] = args.query
 
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        for m_p in (run_dir / "media" / "media_manifest.json", run_dir / "media_manifest.json"):
+            if m_p.parent.exists():
+                with open(m_p, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+
         generate_credits_markdown(data["shots"], run_dir / "media" / "credits.md")
         create_contact_sheet_for_scene(args.scene, [s for s in data["shots"] if s["scene_id"] == args.scene], run_dir, run_dir / "media" / "review" / f"{args.scene}.jpg")
+        from src.agents.motion import sync_render_plan_with_media_manifest
+        sync_render_plan_with_media_manifest(run_dir)
         print(f"[OK] Replaced shot {args.scene} #{args.replace} with {cand.source} ({cand.id})")
         return 0
 
@@ -1707,15 +1759,18 @@ def main() -> int:
             print(f"[ERROR] Shot not found: {args.scene} #{shot_idx}")
             return 1
 
+        target_res = tuple(data.get("resolution", [1920, 1080]))
+        target_fps = int(data.get("fps", 30))
         is_video = pin_file.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm")
         out_filename = f"shot_{shot_idx:02d}.mp4" if is_video else f"shot_{shot_idx:02d}.jpg"
         out_path = run_dir / "media" / "shots" / args.scene / out_filename
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
         shot_dur = target_shot["end"] - target_shot["start"]
         if is_video:
-            probe = normalize_video(pin_file, out_path, shot_dur)
+            probe = normalize_video(pin_file, out_path, shot_dur, target_resolution=target_res, fps=target_fps)
         else:
-            probe = normalize_image(pin_file, out_path)
+            probe = normalize_image(pin_file, out_path, target_resolution=target_res)
 
         target_shot["file"] = f"media/shots/{args.scene}/{out_filename}"
         target_shot["type"] = "video" if is_video else "image"
@@ -1728,10 +1783,15 @@ def main() -> int:
         target_shot["sha256"] = probe.get("sha256")
         target_shot["query"] = "pinned"
 
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        for m_p in (run_dir / "media" / "media_manifest.json", run_dir / "media_manifest.json"):
+            if m_p.parent.exists():
+                with open(m_p, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+
         generate_credits_markdown(data["shots"], run_dir / "media" / "credits.md")
         create_contact_sheet_for_scene(args.scene, [s for s in data["shots"] if s["scene_id"] == args.scene], run_dir, run_dir / "media" / "review" / f"{args.scene}.jpg")
+        from src.agents.motion import sync_render_plan_with_media_manifest
+        sync_render_plan_with_media_manifest(run_dir)
         print(f"[OK] Pinned file {pin_file.name} to shot {args.scene} #{shot_idx}")
         return 0
 

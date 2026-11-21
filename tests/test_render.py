@@ -492,3 +492,308 @@ def test_render_agent_vertical_preview(tmp_path: Path) -> None:
     assert v_stream.get("height") == 960
 
 
+def test_render_empty_shots_with_overlay(tmp_path: Path) -> None:
+    """Edge Case (a): Scene with shots: [] falls back to background color and composites overlays."""
+    (tmp_path / "script").mkdir(parents=True)
+    (tmp_path / "script" / "script.json").write_text(json.dumps({
+        "origin": "fixture",
+        "date": "2026-11-08",
+        "scenes": [{"id": "intro", "type": "intro", "headline": "Empty Shots"}],
+    }), encoding="utf-8")
+
+    (tmp_path / "timeline").mkdir(parents=True)
+    (tmp_path / "timeline" / "timeline.json").write_text(json.dumps({
+        "scenes": [{"id": "intro", "type": "intro", "start": 0.0, "end": 1.0}],
+    }), encoding="utf-8")
+
+    (tmp_path / "audio").mkdir(parents=True)
+    create_silence_wav(tmp_path / "audio" / "narration.wav", duration_sec=1.0, sample_rate=48000)
+
+    (tmp_path / "media").mkdir(parents=True)
+    (tmp_path / "media" / "media_manifest.json").write_text(json.dumps({
+        "orientation": "landscape",
+        "resolution": [1920, 1080],
+        "fps": 30,
+        "shots": [],
+    }), encoding="utf-8")
+
+    motion_dir = tmp_path / "motion"
+    motion_dir.mkdir(parents=True)
+    ov_png = motion_dir / "ov_empty.png"
+    Image.new("RGBA", (400, 100), (255, 165, 0, 240)).save(str(ov_png))
+
+    render_plan = {
+        "resolution": "1920x1080",
+        "fps": 30,
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 1.0,
+        "captions_ass": "motion/captions.ass",
+        "scenes": [
+            {
+                "id": "intro",
+                "start": 0.0,
+                "end": 1.0,
+                "duration": 1.0,
+                "shots": [],
+                "overlays": [
+                    {
+                        "type": "lower_third",
+                        "png": "motion/ov_empty.png",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "x": 60,
+                        "y": 800,
+                        "animation": "fade",
+                    }
+                ],
+            }
+        ],
+        "overlays": [],
+    }
+    (motion_dir / "render_plan.json").write_text(json.dumps(render_plan), encoding="utf-8")
+    (motion_dir / "captions.ass").write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name\nStyle: Default\n[Events]\nFormat: Layer, Start, End, Style, Text\n",
+        encoding="utf-8",
+    )
+
+    agent = RenderAgent(run_dir=tmp_path)
+    outputs = agent.run()
+    final_mp4 = tmp_path / "render" / "final.mp4"
+    assert final_mp4.exists()
+    probe = probe_file(final_mp4)
+    v_stream = next(s for s in probe.get("streams", []) if s.get("codec_type") == "video")
+    assert v_stream.get("width") == 1920
+    assert v_stream.get("height") == 1080
+
+
+def test_render_missing_overlay_followed_by_valid_overlay(tmp_path: Path) -> None:
+    """Edge Case (b): Missing overlay PNG followed by valid overlay PNG renders without failure."""
+    (tmp_path / "script").mkdir(parents=True)
+    (tmp_path / "script" / "script.json").write_text(json.dumps({
+        "origin": "fixture",
+        "date": "2026-11-08",
+        "scenes": [{"id": "intro", "type": "intro", "headline": "Missing Ov"}],
+    }), encoding="utf-8")
+
+    (tmp_path / "timeline").mkdir(parents=True)
+    (tmp_path / "timeline" / "timeline.json").write_text(json.dumps({
+        "scenes": [{"id": "intro", "type": "intro", "start": 0.0, "end": 1.0}],
+    }), encoding="utf-8")
+
+    (tmp_path / "audio").mkdir(parents=True)
+    create_silence_wav(tmp_path / "audio" / "narration.wav", duration_sec=1.0, sample_rate=48000)
+
+    shots_dir = tmp_path / "media" / "shots"
+    shots_dir.mkdir(parents=True)
+    Image.new("RGB", (1920, 1080), color=(10, 30, 60)).save(str(shots_dir / "bg.jpg"))
+
+    (tmp_path / "media" / "media_manifest.json").write_text(json.dumps({
+        "orientation": "landscape",
+        "resolution": [1920, 1080],
+        "fps": 30,
+        "shots": [{"scene_id": "intro", "file": "media/shots/bg.jpg", "type": "image", "duration": 1.0}],
+    }), encoding="utf-8")
+
+    motion_dir = tmp_path / "motion"
+    motion_dir.mkdir(parents=True)
+    valid_ov_png = motion_dir / "valid_ov.png"
+    Image.new("RGBA", (300, 80), (0, 200, 100, 240)).save(str(valid_ov_png))
+
+    render_plan = {
+        "resolution": "1920x1080",
+        "fps": 30,
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 1.0,
+        "captions_ass": "motion/captions.ass",
+        "scenes": [
+            {
+                "id": "intro",
+                "start": 0.0,
+                "end": 1.0,
+                "duration": 1.0,
+                "shots": [{"shot_index": 0, "file": "media/shots/bg.jpg", "type": "image", "duration": 1.0}],
+                "overlays": [
+                    {
+                        "type": "lower_third",
+                        "png": "motion/missing_file.png",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "x": 60,
+                        "y": 700,
+                    },
+                    {
+                        "type": "illustrative_tag",
+                        "png": "motion/valid_ov.png",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "x": 60,
+                        "y": 800,
+                    },
+                ],
+            }
+        ],
+        "overlays": [],
+    }
+    (motion_dir / "render_plan.json").write_text(json.dumps(render_plan), encoding="utf-8")
+    (motion_dir / "captions.ass").write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name\nStyle: Default\n[Events]\nFormat: Layer, Start, End, Style, Text\n",
+        encoding="utf-8",
+    )
+
+    agent = RenderAgent(run_dir=tmp_path)
+    outputs = agent.run()
+    assert (tmp_path / "render" / "final.mp4").exists()
+
+
+def test_render_preview_with_overlays_scales_geometry(tmp_path: Path) -> None:
+    """Edge Case (c): --preview with overlays correctly scales dimensions and completes."""
+    (tmp_path / "script").mkdir(parents=True)
+    (tmp_path / "script" / "script.json").write_text(json.dumps({
+        "origin": "fixture",
+        "date": "2026-11-08",
+        "scenes": [{"id": "intro", "type": "intro", "headline": "Preview Overlay"}],
+    }), encoding="utf-8")
+
+    (tmp_path / "timeline").mkdir(parents=True)
+    (tmp_path / "timeline" / "timeline.json").write_text(json.dumps({
+        "scenes": [{"id": "intro", "type": "intro", "start": 0.0, "end": 1.0}],
+    }), encoding="utf-8")
+
+    (tmp_path / "audio").mkdir(parents=True)
+    create_silence_wav(tmp_path / "audio" / "narration.wav", duration_sec=1.0, sample_rate=48000)
+
+    shots_dir = tmp_path / "media" / "shots"
+    shots_dir.mkdir(parents=True)
+    Image.new("RGB", (1920, 1080), color=(10, 30, 60)).save(str(shots_dir / "bg.jpg"))
+
+    (tmp_path / "media" / "media_manifest.json").write_text(json.dumps({
+        "orientation": "landscape",
+        "resolution": [1920, 1080],
+        "fps": 30,
+        "shots": [{"scene_id": "intro", "file": "media/shots/bg.jpg", "type": "image", "duration": 1.0}],
+    }), encoding="utf-8")
+
+    motion_dir = tmp_path / "motion"
+    motion_dir.mkdir(parents=True)
+    ov_png = motion_dir / "ov_preview.png"
+    Image.new("RGBA", (500, 150), (200, 50, 50, 240)).save(str(ov_png))
+
+    render_plan = {
+        "resolution": "1920x1080",
+        "fps": 30,
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 1.0,
+        "captions_ass": "motion/captions.ass",
+        "scenes": [
+            {
+                "id": "intro",
+                "start": 0.0,
+                "end": 1.0,
+                "duration": 1.0,
+                "shots": [{"shot_index": 0, "file": "media/shots/bg.jpg", "type": "image", "duration": 1.0}],
+                "overlays": [
+                    {
+                        "type": "lower_third",
+                        "png": "motion/ov_preview.png",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "x": 100,
+                        "y": 700,
+                    }
+                ],
+            }
+        ],
+        "overlays": [],
+    }
+    (motion_dir / "render_plan.json").write_text(json.dumps(render_plan), encoding="utf-8")
+    (motion_dir / "captions.ass").write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name\nStyle: Default\n[Events]\nFormat: Layer, Start, End, Style, Text\n",
+        encoding="utf-8",
+    )
+
+    agent = RenderAgent(run_dir=tmp_path)
+    outputs = agent.run(preview=True)
+    preview_mp4 = tmp_path / "render" / "final_preview.mp4"
+    assert preview_mp4.exists()
+    probe = probe_file(preview_mp4)
+    v_stream = next(s for s in probe.get("streams", []) if s.get("codec_type") == "video")
+    assert v_stream.get("width") == 960
+    assert v_stream.get("height") == 540
+
+
+def test_render_video_shot_shorter_than_duration(tmp_path: Path) -> None:
+    """Edge Case (d): A video shot whose file is shorter than shot.duration loops cleanly to full duration."""
+    import subprocess
+
+    (tmp_path / "script").mkdir(parents=True)
+    (tmp_path / "script" / "script.json").write_text(json.dumps({
+        "origin": "fixture",
+        "date": "2026-11-08",
+        "scenes": [{"id": "intro", "type": "intro", "headline": "Short Video"}],
+    }), encoding="utf-8")
+
+    (tmp_path / "timeline").mkdir(parents=True)
+    (tmp_path / "timeline" / "timeline.json").write_text(json.dumps({
+        "scenes": [{"id": "intro", "type": "intro", "start": 0.0, "end": 2.0}],
+    }), encoding="utf-8")
+
+    (tmp_path / "audio").mkdir(parents=True)
+    create_silence_wav(tmp_path / "audio" / "narration.wav", duration_sec=2.0, sample_rate=48000)
+
+    shots_dir = tmp_path / "media" / "shots"
+    shots_dir.mkdir(parents=True)
+    short_vid = shots_dir / "short_vid.mp4"
+
+    # Create synthetic 0.5s video file (shorter than 2.0s duration)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "color=c=teal:s=1920x1080:r=30:d=0.5",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        str(short_vid),
+    ]
+    subprocess.run(cmd, capture_output=True, check=True)
+
+    (tmp_path / "media" / "media_manifest.json").write_text(json.dumps({
+        "orientation": "landscape",
+        "resolution": [1920, 1080],
+        "fps": 30,
+        "shots": [{"scene_id": "intro", "file": "media/shots/short_vid.mp4", "type": "video", "duration": 2.0}],
+    }), encoding="utf-8")
+
+    motion_dir = tmp_path / "motion"
+    motion_dir.mkdir(parents=True)
+    render_plan = {
+        "resolution": "1920x1080",
+        "fps": 30,
+        "audio_file": "audio/narration.wav",
+        "duration_sec": 2.0,
+        "captions_ass": "motion/captions.ass",
+        "scenes": [
+            {
+                "id": "intro",
+                "start": 0.0,
+                "end": 2.0,
+                "duration": 2.0,
+                "shots": [{"shot_index": 0, "file": "media/shots/short_vid.mp4", "type": "video", "duration": 2.0}],
+                "overlays": [],
+            }
+        ],
+        "overlays": [],
+    }
+    (motion_dir / "render_plan.json").write_text(json.dumps(render_plan), encoding="utf-8")
+    (motion_dir / "captions.ass").write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name\nStyle: Default\n[Events]\nFormat: Layer, Start, End, Style, Text\n",
+        encoding="utf-8",
+    )
+
+    agent = RenderAgent(run_dir=tmp_path)
+    outputs = agent.run()
+    final_mp4 = tmp_path / "render" / "final.mp4"
+    assert final_mp4.exists()
+    probe = probe_file(final_mp4)
+    v_stream = next(s for s in probe.get("streams", []) if s.get("codec_type") == "video")
+    v_dur = float(v_stream.get("duration") or probe.get("format", {}).get("duration", 0.0))
+    assert abs(v_dur - 2.0) <= 0.1
+
+
+

@@ -88,6 +88,21 @@ sensitive_triggers:
   - "overturned"
   - "drown"
   - "drowned"
+  - "मृत्यु"
+  - "हत्या"
+  - "दुर्घटना"
+  - "पक्राउ"
+  - "बलात्कार"
+  - "बालबालिका"
+
+sensitive_exclusions:
+  - "cardiac arrest"
+  - "minor rain"
+  - "minor damage"
+  - "minor injury"
+  - "minor injuries"
+  - "minor delay"
+  - "minor delays"
 
 categories:
   politics:

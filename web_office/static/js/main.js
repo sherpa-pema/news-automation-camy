@@ -671,8 +671,7 @@ document.getElementById("doctorBtn").addEventListener("click", async () => {
           </div>
           <div style="background:#0b1322; padding:10px; border-radius:6px; font-size:12px;">
             <div style="font-weight:600; color:#cbd5e1; margin-bottom:6px;">⚙️ Services & Daemons</div>
-            <div>Kokoro TTS: ${services.kokoro_tts ? "✅ Installed" : "❌ Fallback to Edge-TTS"}</div>
-            <div style="margin-top:4px;">Edge-TTS: ${services.edge_tts ? "✅ Online" : "❌ Missing"}</div>
+            <div>Ming TTS Daemon: ${services.tts_daemon ? "✅ Online" : "❌ Offline / Not Started"}</div>
             <div style="margin-top:4px;">Win Scheduler: <span class="badge badge-neutral">${services.windows_scheduler || "Unknown"}</span></div>
           </div>
         </section>
@@ -728,7 +727,9 @@ document.getElementById("doctorBtn").addEventListener("click", async () => {
           body: JSON.stringify({ dry_run: false, keep_runs: keepRuns }),
         });
         const cData = await cRes.json();
-        outEl.textContent = `Cleanup Complete!\nDeleted ${cData.deleted_runs_count || 0} run(s), freed ${Math.round((cData.freed_bytes || 0) / (1024 * 1024))} MB.\n` + (cData.formatted_plan || "");
+        const deletedCount = (cData.deleted_paths && Array.isArray(cData.deleted_paths)) ? cData.deleted_paths.length : (cData.deleted_runs_count || 0);
+        const freedMb = cData.freed_run_mb != null ? cData.freed_run_mb : Math.round((cData.freed_bytes || 0) / (1024 * 1024));
+        outEl.textContent = `Cleanup Complete!\nDeleted ${deletedCount} path(s), freed ${freedMb} MB.\n` + (cData.formatted_plan || "");
         showToast("Storage cleanup completed successfully.", "done", 5000);
       } catch (err) {
         outEl.textContent = "Cleanup execution error: " + err.message;

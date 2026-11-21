@@ -6,11 +6,12 @@ import json
 import logging
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 from typing import Any
 import yaml
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 
 from src.agents.base import BaseAgent
 from src.utils.editor_validator import (
@@ -18,7 +19,7 @@ from src.utils.editor_validator import (
     extract_script_validation_fingerprint,
 )
 from src.utils.logging import setup_logger
-from src.utils.manifest import load_manifest
+from src.utils.manifest import load_manifest, save_manifest
 from src.utils.storyboard import generate_storyboard
 from src.utils.overlay_plan import STOCK_SOURCES, validate_layout
 from src.utils.timeline import audit_captions
@@ -42,6 +43,44 @@ def probe_file(file_path: Path) -> dict[str, Any]:
     if res.returncode != 0:
         raise RuntimeError(f"ffprobe failed for {file_path}: {res.stderr}")
     return json.loads(res.stdout)
+
+
+def check_faststart(mp4_path: Path) -> bool:
+    """Verifies that moov atom precedes mdat atom in MP4 file for web streaming."""
+    try:
+        with open(mp4_path, "rb") as f:
+            moov_pos = -1
+            mdat_pos = -1
+            offset = 0
+            file_size = mp4_path.stat().st_size
+            while offset < file_size:
+                f.seek(offset)
+                header = f.read(8)
+                if len(header) < 8:
+                    break
+                size, box_type = struct.unpack(">I4s", header)
+                box_name = box_type.decode("latin1", errors="ignore")
+                if box_name == "moov" and moov_pos == -1:
+                    moov_pos = offset
+                elif box_name == "mdat" and mdat_pos == -1:
+                    mdat_pos = offset
+                if moov_pos != -1 and mdat_pos != -1:
+                    break
+                if size == 1:
+                    ext = f.read(8)
+                    if len(ext) < 8:
+                        break
+                    ext_size = struct.unpack(">Q", ext)[0]
+                    offset += ext_size
+                elif size == 0:
+                    break
+                else:
+                    offset += size
+            if moov_pos != -1 and mdat_pos != -1:
+                return moov_pos < mdat_pos
+            return True
+    except Exception:
+        return True
 
 
 class QAAgent(BaseAgent):
@@ -166,9 +205,87 @@ class QAAgent(BaseAgent):
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def _generate_thumbnail_candidates(
+        self,
+        final_mp4: Path,
+        timeline_scenes: list[dict[str, Any]],
+        qa_dir: Path,
+    ) -> list[str]:
+        """Saves 3 high-res candidate frames (thumb_01.jpg - thumb_03.jpg) from title card and top stories."""
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        if not final_mp4.exists() or not timeline_scenes:
+            return []
+
+        intro_scene = next((sc for sc in timeline_scenes if sc.get("id") == "intro"), timeline_scenes[0])
+        story_scenes = [sc for sc in timeline_scenes if sc.get("type") == "story"]
+
+        timestamps: list[float] = []
+
+        # 1. Title card / intro candidate
+        i_start = float(intro_scene.get("start", 0.0))
+        i_end = float(intro_scene.get("end", i_start + 4.0))
+        t1 = round(i_start + min(1.2, max(0.5, (i_end - i_start) / 2.0)), 2)
+        timestamps.append(t1)
+
+        # 2. Top story 1 candidate
+        if story_scenes:
+            s1 = story_scenes[0]
+            s1_start = float(s1.get("start", 0.0))
+            s1_end = float(s1.get("end", s1_start + 5.0))
+            t2 = round(s1_start + min(2.0, max(0.8, (s1_end - s1_start) / 2.0)), 2)
+            timestamps.append(t2)
+        else:
+            timestamps.append(round(min(i_end + 2.0, i_end + 0.5), 2))
+
+        # 3. Top story 2 (or story 1 alternative) candidate
+        if len(story_scenes) >= 2:
+            s2 = story_scenes[1]
+            s2_start = float(s2.get("start", 0.0))
+            s2_end = float(s2.get("end", s2_start + 5.0))
+            t3 = round(s2_start + min(2.0, max(0.8, (s2_end - s2_start) / 2.0)), 2)
+            timestamps.append(t3)
+        elif story_scenes:
+            s1 = story_scenes[0]
+            s1_start = float(s1.get("start", 0.0))
+            s1_end = float(s1.get("end", s1_start + 5.0))
+            t2_val = timestamps[1] if len(timestamps) > 1 else (s1_start + 1.0)
+            t3 = round(max(t2_val + 1.5, min(s1_end - 0.5, s1_start + 4.0)), 2)
+            timestamps.append(t3)
+        else:
+            timestamps.append(round(t1 + 2.0, 2))
+
+        saved: list[str] = []
+        for idx, t in enumerate(timestamps[:3], start=1):
+            thumb_name = f"thumb_{idx:02d}.jpg"
+            thumb_path = qa_dir / thumb_name
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(t),
+                "-i",
+                str(final_mp4),
+                "-vframes",
+                "1",
+                "-q:v",
+                "2",
+                str(thumb_path),
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=15)
+                if thumb_path.exists():
+                    saved.append(f"qa/{thumb_name}")
+            except Exception:
+                pass
+
+        return saved
+
     def run(self, manifest: dict[str, Any] | None = None) -> list[str]:
         """Runs the deterministic QA check battery on final video and outputs qa_report.json."""
         self.logger.info(f"Starting QA Agent run in: {self.run_dir}")
+        if manifest is None:
+            manifest_file = self.run_dir / "manifest.json"
+            manifest = load_manifest(manifest_file) if manifest_file.exists() else {}
 
         qa_dir = self.run_dir / "qa"
         qa_dir.mkdir(parents=True, exist_ok=True)
@@ -207,14 +324,23 @@ class QAAgent(BaseAgent):
         redo_stage: str | None = None
         metrics: dict[str, Any] = {}
 
+        s_data: dict[str, Any] = {}
+        if script_file.exists():
+            try:
+                with open(script_file, "r", encoding="utf-8") as f:
+                    s_data = json.load(f)
+            except Exception:
+                pass
+
         # ----------------------------------------------------------------------
         # Check 1: Provenance and approval fingerprint
         # ----------------------------------------------------------------------
         provenance_passed = True
         prov_detail = "Script origin editor, approval SHA-256 and validator fingerprint match."
         try:
-            with open(script_file, "r", encoding="utf-8") as f:
-                s_data = json.load(f)
+            if not s_data and script_file.exists():
+                with open(script_file, "r", encoding="utf-8") as f:
+                    s_data = json.load(f)
             if s_data.get("origin") != "fixture":
                 app_file = self.run_dir / "script" / "approval.json"
                 if not app_file.exists():
@@ -244,6 +370,7 @@ class QAAgent(BaseAgent):
         # Check 2: Final MP4 stream metadata and duration sync
         # ----------------------------------------------------------------------
         expected_w, expected_h = 1920, 1080
+        expected_fps = 30
         if render_plan_file.exists():
             try:
                 with open(render_plan_file, "r", encoding="utf-8") as rpf:
@@ -252,6 +379,7 @@ class QAAgent(BaseAgent):
                 if rp_res and isinstance(rp_res, str) and "x" in rp_res:
                     p = [int(x) for x in rp_res.split("x")]
                     expected_w, expected_h = p[0], p[1]
+                expected_fps = int(rp_json.get("fps", 30))
             except Exception:
                 pass
         elif media_file.exists():
@@ -281,12 +409,48 @@ class QAAgent(BaseAgent):
                 codec_v = vs.get("codec_name")
                 w = int(vs.get("width", 0))
                 h = int(vs.get("height", 0))
+                pix_fmt = vs.get("pix_fmt")
+                avg_fr = vs.get("avg_frame_rate", "")
+                r_fr = vs.get("r_frame_rate", "")
+                v_bitrate = int(vs.get("bit_rate") or probe_vid.get("format", {}).get("bit_rate") or 0)
+
                 if codec_v != "h264":
                     stream_passed = False
                     stream_details.append(f"Expected H.264 video, got {codec_v}")
                 if w != expected_w or h != expected_h:
                     stream_passed = False
                     stream_details.append(f"Expected {expected_w}x{expected_h} resolution, got {w}x{h}")
+                if pix_fmt != "yuv420p":
+                    stream_passed = False
+                    stream_details.append(f"Expected yuv420p pixel format, got {pix_fmt}")
+
+                # Check constant frame rate: r_frame_rate specifies nominal stream rate;
+                # avg_frame_rate is nb_frames/duration which can have minor microsecond container rounding.
+                def _parse_fr(fr_str: str) -> float:
+                    if not fr_str:
+                        return 0.0
+                    if "/" in fr_str:
+                        parts = fr_str.split("/")
+                        if len(parts) == 2:
+                            try:
+                                den = float(parts[1])
+                                return float(parts[0]) / den if den > 0 else 0.0
+                            except (ValueError, TypeError):
+                                return 0.0
+                    try:
+                        return float(fr_str)
+                    except (ValueError, TypeError):
+                        return 0.0
+
+                fps_nominal_ok = (r_fr == f"{expected_fps}/1")
+                fps_avg_val = _parse_fr(avg_fr)
+                fps_avg_ok = (avg_fr == f"{expected_fps}/1") or (abs(fps_avg_val - expected_fps) <= 0.05)
+                if not (fps_nominal_ok and fps_avg_ok):
+                    stream_passed = False
+                    stream_details.append(f"Expected constant {expected_fps}/1 frame rate, got r_fr='{r_fr}', avg_fr='{avg_fr}'")
+                if v_bitrate <= 0:
+                    stream_passed = False
+                    stream_details.append(f"Expected non-zero video bitrate, got {v_bitrate}")
 
             if not a_streams:
                 stream_passed = False
@@ -306,19 +470,33 @@ class QAAgent(BaseAgent):
                     stream_passed = False
                     stream_details.append(f"Expected 2 audio channels (stereo), got {ch}")
 
-            vid_dur = float(probe_vid.get("format", {}).get("duration", 0.0))
+            v_dur = float(vs.get("duration") or probe_vid.get("format", {}).get("duration", 0.0)) if v_streams else 0.0
+            a_dur = float(as_.get("duration") or probe_vid.get("format", {}).get("duration", 0.0)) if a_streams else 0.0
             aud_dur = float(probe_aud.get("format", {}).get("duration", 0.0))
-            diff_ms = abs(vid_dur - aud_dur) * 1000.0
 
-            metrics["video_duration_sec"] = round(vid_dur, 3)
-            metrics["audio_duration_sec"] = round(aud_dur, 3)
-            metrics["duration_diff_ms"] = round(diff_ms, 1)
+            av_diff_ms = abs(v_dur - a_dur) * 1000.0
+            narration_diff_ms = abs(v_dur - aud_dur) * 1000.0
 
-            if diff_ms > 50.0:
+            metrics["video_duration_sec"] = round(v_dur, 3)
+            metrics["audio_duration_sec"] = round(a_dur, 3)
+            metrics["duration_diff_ms"] = round(av_diff_ms, 1)
+
+            if av_diff_ms > 50.0:
                 stream_passed = False
-                stream_details.append(f"Duration mismatch: video {vid_dur:.3f}s vs audio {aud_dur:.3f}s (diff: {diff_ms:.1f}ms > 50ms limit)")
+                stream_details.append(
+                    f"A/V stream duration mismatch in final.mp4: video {v_dur:.3f}s vs audio {a_dur:.3f}s (diff: {av_diff_ms:.1f}ms > 50ms limit)"
+                )
+            elif narration_diff_ms > 50.0:
+                stream_passed = False
+                stream_details.append(
+                    f"Duration mismatch: video {v_dur:.3f}s vs narration {aud_dur:.3f}s (diff: {narration_diff_ms:.1f}ms > 50ms limit)"
+                )
             else:
-                stream_details.append(f"Duration sync within 50ms (diff: {diff_ms:.1f}ms, video: {vid_dur:.3f}s, audio: {aud_dur:.3f}s)")
+                stream_details.append(f"Duration sync within 50ms (diff: {av_diff_ms:.1f}ms, video: {v_dur:.3f}s, audio: {a_dur:.3f}s)")
+
+            if not check_faststart(final_mp4):
+                stream_passed = False
+                stream_details.append("MP4 missing +faststart (moov atom does not precede mdat atom)")
 
         except Exception as e:
             stream_passed = False
@@ -333,16 +511,32 @@ class QAAgent(BaseAgent):
             redo_stage = "render"
 
         # ----------------------------------------------------------------------
+        # Single-pass signal inspection: Loudness (EBU R128), Blackdetect, and Freezedetect
+        # ----------------------------------------------------------------------
+        qa_cmd = [
+            "ffmpeg", "-nostats",
+            "-i", str(final_mp4),
+            "-vf", "blackdetect=d=0.5:pic_th=0.98,freezedetect=n=0.003:d=3.0",
+        ]
+        if a_streams:
+            qa_cmd.extend(["-af", "ebur128=peak=true"])
+        qa_cmd.extend(["-f", "null", "-"])
+
+        qa_res_stderr = ""
+        try:
+            qa_res = subprocess.run(qa_cmd, capture_output=True, text=True)
+            qa_res_stderr = qa_res.stderr or ""
+        except Exception as e:
+            warnings.append(f"QA single-pass signal analysis failed to execute: {e}")
+
+        # ----------------------------------------------------------------------
         # Check 3: Audio loudness compliance (EBU R128)
         # ----------------------------------------------------------------------
         loudness_passed = True
         loudness_detail = ""
         try:
-            ebur_cmd = ["ffmpeg", "-i", str(final_mp4), "-af", "ebur128=peak=true", "-f", "null", "-"]
-            ebur_res = subprocess.run(ebur_cmd, capture_output=True, text=True)
-
-            m_i = re.search(r"Integrated loudness:\s+I:\s+([-\d.]+|-\s*inf|\+?\w+)\s+LUFS", ebur_res.stderr)
-            m_tp = re.search(r"True peak:\s+Peak:\s+([-\d.]+|-\s*inf|\+?\w+)\s+dBFS", ebur_res.stderr)
+            m_i = re.search(r"Integrated loudness:\s+I:\s+([-\d.]+|-\s*inf|\+?\w+)\s+LUFS", qa_res_stderr)
+            m_tp = re.search(r"True peak:\s+Peak:\s+([-\d.]+|-\s*inf|\+?\w+)\s+dBFS", qa_res_stderr)
 
             if m_i and m_tp:
                 val_i = m_i.group(1).strip()
@@ -408,10 +602,7 @@ class QAAgent(BaseAgent):
         black_passed = True
         black_detail = ""
         try:
-            b_cmd = ["ffmpeg", "-i", str(final_mp4), "-vf", "blackdetect=d=0.5:pic_th=0.98", "-f", "null", "-"]
-            b_res = subprocess.run(b_cmd, capture_output=True, text=True)
-
-            black_hits = re.findall(r"black_start:([-\d.]+)\s+black_end:([-\d.]+)\s+black_duration:([-\d.]+)", b_res.stderr)
+            black_hits = re.findall(r"black_start:([-\d.]+)\s+black_end:([-\d.]+)\s+black_duration:([-\d.]+)", qa_res_stderr)
             violating_black = []
             vid_end = metrics.get("video_duration_sec", 120.0)
 
@@ -443,11 +634,9 @@ class QAAgent(BaseAgent):
         # ----------------------------------------------------------------------
         freeze_events: list[dict[str, float]] = []
         try:
-            fz_cmd = ["ffmpeg", "-i", str(final_mp4), "-vf", "freezedetect=n=0.003:d=3.0", "-f", "null", "-"]
-            fz_res = subprocess.run(fz_cmd, capture_output=True, text=True)
-            freeze_starts = re.findall(r"lavfi\.freezedetect\.freeze_start:\s+([-\d.]+)", fz_res.stderr)
-            freeze_ends = re.findall(r"lavfi\.freezedetect\.freeze_end:\s+([-\d.]+)", fz_res.stderr)
-            freeze_durs = re.findall(r"lavfi\.freezedetect\.freeze_duration:\s+([-\d.]+)", fz_res.stderr)
+            freeze_starts = re.findall(r"lavfi\.freezedetect\.freeze_start:\s+([-\d.]+)", qa_res_stderr)
+            freeze_ends = re.findall(r"lavfi\.freezedetect\.freeze_end:\s+([-\d.]+)", qa_res_stderr)
+            freeze_durs = re.findall(r"lavfi\.freezedetect\.freeze_duration:\s+([-\d.]+)", qa_res_stderr)
             vid_dur_val = float(metrics.get("video_duration_sec", 0.0))
             for i, f_start_s in enumerate(freeze_starts):
                 f_start = float(f_start_s)
@@ -566,14 +755,6 @@ class QAAgent(BaseAgent):
             layout_details.append(f"Overlay layout check error: {e}")
 
         checks.append({
-            "name": "overlay_safe_zone",
-            "passed": layout_passed,
-            "detail": "; ".join(layout_details) if layout_details else "All overlays within 5% safe margin bounds and do not collide",
-        })
-        if not layout_passed and not redo_stage:
-            redo_stage = "motion"
-
-        checks.append({
             "name": "overlay_layout",
             "passed": layout_passed,
             "detail": "; ".join(layout_details) if layout_details else "All overlays reside strictly within safe zones and clear caption bands",
@@ -618,6 +799,57 @@ class QAAgent(BaseAgent):
                         captions_passed = False
                         cap_details.append(f"Caption '{cap.get('id')}' ends past video duration ({cap.get('end')}s > {vid_dur}s)")
                         break
+
+            # Visual subtitle burn-in check: sample 2-3 frames inside caption_band during active captions
+            if captions_passed and json_caps and final_mp4.exists():
+                cb = self.style_config.get("layout_rectangles", {}).get(
+                    "caption_band", {"x": 120, "y": 860, "w": 1680, "h": 160}
+                )
+                sample_caps = [c for c in json_caps if float(c.get("end", 0)) - float(c.get("start", 0)) >= 0.3][:3]
+                if not sample_caps:
+                    sample_caps = json_caps[:2]
+                burn_variances: list[float] = []
+                for sc_cap in sample_caps:
+                    mid_t = (float(sc_cap.get("start", 0)) + float(sc_cap.get("end", 0))) / 2.0
+                    cmd_f = [
+                        "ffmpeg", "-nostats", "-y",
+                        "-ss", f"{mid_t:.3f}",
+                        "-i", str(final_mp4),
+                        "-frames:v", "1",
+                        "-f", "image2pipe",
+                        "-vcodec", "png",
+                        "-",
+                    ]
+                    try:
+                        p_f = subprocess.run(cmd_f, capture_output=True, check=True)
+                        if p_f.stdout:
+                            import io
+                            f_img = Image.open(io.BytesIO(p_f.stdout)).convert("L")
+                            img_w, img_h = f_img.size
+                            cx = min(max(0, cb.get("x", 120)), img_w - 1)
+                            cy = min(max(0, cb.get("y", 860)), img_h - 1)
+                            cw = min(cb.get("w", 1680), img_w - cx)
+                            ch = min(cb.get("h", 160), img_h - cy)
+                            crop_band = f_img.crop((cx, cy, cx + cw, cy + ch))
+                            st = ImageStat.Stat(crop_band)
+                            stddev = st.stddev[0] if st.stddev else 0.0
+                            burn_variances.append(stddev)
+                    except Exception as e:
+                        self.logger.warning(f"Could not sample subtitle frame at {mid_t}s: {e}")
+
+                if burn_variances:
+                    avg_var = sum(burn_variances) / len(burn_variances)
+                    metrics["subtitle_burn_stddev"] = round(avg_var, 2)
+                    is_fixture = bool(
+                        (manifest and (manifest.get("run_kind") == "fixture" or manifest.get("origin") == "fixture"))
+                        or s_data.get("origin") == "fixture"
+                        or s_data.get("run_kind") == "fixture"
+                    )
+                    if avg_var < 0.5 and not is_fixture:
+                        captions_passed = False
+                        cap_details.append(
+                            f"Visual subtitle burn-in check failed: caption band pixel stddev is near-zero ({avg_var:.2f} < 0.5); subtitles failed to burn into final.mp4"
+                        )
 
             # Caption Audit & Sync validation
             if caption_audit_file.exists():
@@ -730,7 +962,8 @@ class QAAgent(BaseAgent):
                 # Test banner
                 with open(script_file, "r", encoding="utf-8") as sf:
                     s_data = json.load(sf)
-                if s_data.get("run_kind") == "test":
+                effective_run_kind = manifest.get("run_kind") or s_data.get("run_kind")
+                if effective_run_kind == "test":
                     if "TEST RUN - DO NOT PUBLISH" not in desc_text:
                         desc_passed = False
                         desc_details.append("Missing 'TEST RUN - DO NOT PUBLISH' banner in test run description")
@@ -752,13 +985,16 @@ class QAAgent(BaseAgent):
                 # CC attribution completeness
                 with open(media_file, "r", encoding="utf-8") as mf:
                     m_data = json.load(mf)
+                missing_authors: list[str] = []
                 for shot in m_data.get("shots", []):
                     if shot.get("attribution_required"):
                         auth = shot.get("author", "")
                         if auth and auth not in desc_text:
-                            desc_passed = False
-                            desc_details.append(f"Required attribution author '{auth}' missing in description.md")
-                            break
+                            if auth not in missing_authors:
+                                missing_authors.append(auth)
+                if missing_authors:
+                    desc_passed = False
+                    desc_details.append(f"Required attribution author(s) missing in description.md: {', '.join(missing_authors)}")
 
         except Exception as e:
             desc_passed = False
@@ -782,6 +1018,7 @@ class QAAgent(BaseAgent):
                 tl_data_loaded = json.load(tf)
         tl_scenes = tl_data_loaded.get("scenes", [])
         self._generate_contact_sheet(final_mp4, tl_scenes, contact_sheet_path)
+        thumb_candidates = self._generate_thumbnail_candidates(final_mp4, tl_scenes, qa_dir)
 
         # ----------------------------------------------------------------------
         # Summary & Report
@@ -834,6 +1071,7 @@ class QAAgent(BaseAgent):
             "qa/storyboard.html",
             "qa_report.json",
         ]
+        outputs.extend(thumb_candidates)
 
         # Update manifest metrics
         if manifest:
@@ -869,6 +1107,8 @@ def main() -> None:
     manifest = load_manifest(manifest_path) if manifest_path.exists() else {}
 
     outputs = agent.run(manifest)
+    if manifest:
+        save_manifest(manifest, manifest_path)
     print(f"QA Agent completed successfully. Passed. Outputs: {outputs}")
 
 

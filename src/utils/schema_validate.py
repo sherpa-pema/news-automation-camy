@@ -1,23 +1,26 @@
 """JSON Schema validation utility stub."""
+import functools
 import json
 from pathlib import Path
 from typing import Any
 import jsonschema
 
 
-def load_schema(schema_path: str | Path) -> dict[str, Any]:
-    """Loads a JSON schema from disk.
+@functools.lru_cache(maxsize=32)
+def _load_schema_cached(resolved_path: str) -> dict[str, Any]:
+    with open(resolved_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    TODO: Cache loaded schemas in memory.
-    """
+
+def load_schema(schema_path: str | Path) -> dict[str, Any]:
+    """Loads a JSON schema from disk with in-memory caching."""
     path = Path(schema_path)
     if not path.is_absolute():
         # Resolve relative to repo root
         repo_root = Path(__file__).resolve().parent.parent.parent
         path = repo_root / path
 
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return _load_schema_cached(str(path.resolve()))
 
 
 def validate_contract(data: Any, schema_path: str | Path) -> tuple[bool, str | None]:

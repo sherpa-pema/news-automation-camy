@@ -1,4 +1,5 @@
 """BaseAgent abstract class defining the contract for all specialist agents."""
+import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -53,13 +54,28 @@ class BaseAgent(ABC):
             abs_path = self.run_dir / rel_path
             if not abs_path.exists():
                 return False, f"Expected output file not found on disk: {rel_path}"
+            if rel_path.endswith(".json"):
+                try:
+                    with open(abs_path, "r", encoding="utf-8") as jf:
+                        json.load(jf)
+                except Exception as e:
+                    return False, f"Invalid JSON syntax in {rel_path}: {e}"
 
         # If this agent produces a schema-governed JSON file, validate it
         if self.schema_contract_path and output_files:
-            primary_json = next((f for f in output_files if f.endswith(".json")), None)
-            if primary_json:
-                is_valid, err = validate_file(self.run_dir / primary_json, self.schema_contract_path)
-                if not is_valid:
-                    return False, f"Schema validation failed for {primary_json}: {err}"
+            # Find the primary JSON matching the schema, or validate candidate JSONs
+            candidate_jsons = [f for f in output_files if f.endswith(".json")]
+            matched = False
+            last_err = None
+            for cj in candidate_jsons:
+                is_valid, err = validate_file(self.run_dir / cj, self.schema_contract_path)
+                if is_valid:
+                    matched = True
+                    break
+                else:
+                    last_err = (cj, err)
+            if not matched and candidate_jsons:
+                cj, err = last_err or (candidate_jsons[0], "Unknown schema validation failure")
+                return False, f"Schema validation failed for {cj}: {err}"
 
         return True, None

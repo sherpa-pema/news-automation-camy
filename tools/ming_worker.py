@@ -13,10 +13,12 @@ so repeated scene edits or pipeline retries avoid cold model reload overhead.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -87,6 +89,28 @@ def measure_audio_health_array(data: np.ndarray, sr: int) -> dict[str, Any]:
             "rms_db": rms_db,
         }
 
+    # Silence gap check (20ms frames, -45 dBFS threshold)
+    frame_ms = 20
+    frame_len = int(sr * (frame_ms / 1000.0))
+    threshold_amp = 10.0 ** (-45.0 / 20.0)
+    max_silence_frames = 0
+    curr_silence_frames = 0
+    if len(data) >= frame_len and frame_len > 0:
+        n_sub = len(data) // frame_len
+        sub = data[: n_sub * frame_len].reshape(n_sub, frame_len)
+        sub_rms = np.sqrt(np.mean(sub ** 2, axis=1))
+        for rms_val in sub_rms:
+            if rms_val < threshold_amp:
+                curr_silence_frames += 1
+                if curr_silence_frames > max_silence_frames:
+                    max_silence_frames = curr_silence_frames
+            else:
+                curr_silence_frames = 0
+
+    max_silence_sec = round(max_silence_frames * (frame_ms / 1000.0), 2)
+    has_excess_silence = max_silence_sec > 1.5
+    clipping_margin_db = max(0.0, -peak_db)
+
     return {
         "healthy": True,
         "duration_sec": duration_sec,
@@ -94,6 +118,9 @@ def measure_audio_health_array(data: np.ndarray, sr: int) -> dict[str, Any]:
         "peak_db": peak_db,
         "rms_db": rms_db,
         "is_clipped": peak_db >= -0.05,
+        "clipping_margin_db": clipping_margin_db,
+        "has_excess_silence": has_excess_silence,
+        "max_intra_scene_silence_sec": max_silence_sec,
     }
 
 
@@ -224,26 +251,49 @@ class MingWorkerRuntime:
         device: str | None = None,
         dtype: str = "bfloat16",
         text_normalization: bool = False,
+        profile: bool = False,
+        lazy_load: bool = False,
     ) -> None:
         self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model_path = model_path
+        self.campplus_path = campplus_path
         self.dtype = dtype
         self.text_normalization = text_normalization
+        self.profile = profile
         self._lock = threading.Lock()
-        self._ref_cache: dict[str, tuple[torch.Tensor | None, float, str | None]] = {}
+        self._ref_cache: dict[tuple[Any, ...], tuple[torch.Tensor | None, float, str | None]] = {}
         self.timer = ModelStageTimer()
+        self.model: Any = None
+        self.extractor: Any = None
+        self.sample_rate: int = 44100
+        self._resampler_16k: Any = None
+        self._resamplers: dict[tuple[int, int], Any] = {}
+        self.model_load_time_sec: float = 0.0
 
+        if not lazy_load:
+            self._load_model()
+
+    def _get_resampler(self, orig_sr: int, target_sr: int) -> Any:
+        if orig_sr == target_sr:
+            return None
+        key = (orig_sr, target_sr)
+        if key not in self._resamplers:
+            self._resamplers[key] = torchaudio.transforms.Resample(orig_sr, target_sr)
+        return self._resamplers[key]
+
+    def _load_model(self) -> None:
         t_load_start = time.time()
         print(f"[ming_worker] Initializing MingTTS on device={self.device} dtype={self.dtype}...")
         self.model = MingTTS(
-            model_path=model_path,
+            model_path=self.model_path,
             device=self.device,
-            text_normalization=text_normalization,
+            text_normalization=self.text_normalization,
             torch_dtype=self.dtype,
         )
-        instrument_ming_model(self.model, self.timer)
+        if self.profile:
+            instrument_ming_model(self.model, self.timer)
         # Reuse MingTTS's already-initialized SpkembExtractor instead of loading ONNX twice
-        self.extractor = getattr(self.model, "spkemb_extractor", None) or SpkembExtractor(campplus_path)
+        self.extractor = getattr(self.model, "spkemb_extractor", None) or SpkembExtractor(self.campplus_path)
         self.sample_rate = int(getattr(self.model, "sample_rate", 44100))
         self._resampler_16k = (
             torchaudio.transforms.Resample(self.sample_rate, 16000)
@@ -253,8 +303,32 @@ class MingWorkerRuntime:
         self.model_load_time_sec = time.time() - t_load_start
         print(f"[ming_worker] Model loaded in {self.model_load_time_sec:.2f}s (sr={self.sample_rate}Hz)")
 
+    def unload_model(self) -> dict[str, Any]:
+        """Unloads model weights and ONNX extractor from memory, clearing GPU VRAM."""
+        with self._lock:
+            if self.model is not None:
+                del self.model
+                self.model = None
+            if self.extractor is not None:
+                del self.extractor
+                self.extractor = None
+            self._resampler_16k = None
+            self._ref_cache.clear()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("[ming_worker] Model unloaded and GPU VRAM freed.")
+            return {"status": "unloaded", "model_loaded": False}
+
     def _get_reference(self, reference_wav: str, reference_txt: str) -> tuple[torch.Tensor | None, float, str | None]:
-        cache_key = f"{reference_wav}|{reference_txt}"
+        ref_path = Path(reference_wav)
+        ref_txt_path = Path(reference_txt)
+        wav_mtime = ref_path.stat().st_mtime_ns if ref_path.exists() else 0
+        wav_size = ref_path.stat().st_size if ref_path.exists() else 0
+        txt_mtime = ref_txt_path.stat().st_mtime_ns if ref_txt_path.exists() else 0
+        txt_size = ref_txt_path.stat().st_size if ref_txt_path.exists() else 0
+
+        cache_key = (str(ref_path), wav_mtime, wav_size, str(ref_txt_path), txt_mtime, txt_size)
         if cache_key in self._ref_cache:
             return self._ref_cache[cache_key]
 
@@ -262,21 +336,16 @@ class MingWorkerRuntime:
         ref_f0 = 0.0
         ref_prompt_text: str | None = None
 
-        ref_path = Path(reference_wav)
         if ref_path.exists():
             ref_audio, ref_sr = torchaudio.load(str(ref_path))
             if ref_audio.shape[0] > 1:
                 ref_audio = ref_audio.mean(dim=0, keepdim=True)
             ref_f0 = compute_f0(ref_audio, ref_sr)
-            ref_audio_16k = (
-                torchaudio.transforms.Resample(ref_sr, 16000)(ref_audio)
-                if ref_sr != 16000
-                else ref_audio
-            )
+            resampler = self._get_resampler(ref_sr, 16000)
+            ref_audio_16k = resampler(ref_audio) if resampler is not None else ref_audio
             ref_emb = self.extractor(ref_audio_16k)
             ref_emb_norm = ref_emb / torch.norm(ref_emb, p=2, dim=-1, keepdim=True)
 
-            ref_txt_path = Path(reference_txt)
             if ref_txt_path.exists():
                 with open(ref_txt_path, "r", encoding="utf-8") as f:
                     ref_prompt_text = f.read().strip()
@@ -291,6 +360,8 @@ class MingWorkerRuntime:
 
     def process_job(self, job: dict[str, Any], include_load_time: bool = True) -> dict[str, Any]:
         with self._lock:
+            if self.model is None:
+                self._load_model()
             task = job.get("task", "TTS")
             voice = job.get("voice", "US_Emma")
             raw_lang = job.get("language_id", "en")
@@ -308,7 +379,7 @@ class MingWorkerRuntime:
             reference_wav = job.get("reference_wav", "config/voice/reference.wav")
             reference_txt = job.get("reference_txt", "config/voice/reference.txt")
             similarity_threshold = float(job.get("similarity_threshold", 0.72))
-            f0_tolerance_pct = float(job.get("f0_tolerance_pct", 0.10))
+            f0_tolerance_pct = float(job.get("f0_tolerance_pct", 0.15))
             n_candidates = int(job.get("n_candidates", 1))
             f0_anchor = str(job.get("f0_anchor", "running_median")).strip().lower()
             ranker_weights = job.get("ranker_weights", {"cosine": 1.0, "f0": 0.6, "duration": 0.2, "artifacts": 0.2})
@@ -439,8 +510,9 @@ class MingWorkerRuntime:
 
                         sim_ok = sim >= similarity_threshold
                         f0_ok = True
-                        if ref_f0 > 0 and cand_f0 > 0:
-                            f0_diff = abs(cand_f0 - ref_f0) / ref_f0
+                        anchor_f0 = target_f0 if f0_anchor == "running_median" else ref_f0
+                        if anchor_f0 > 0 and cand_f0 > 0:
+                            f0_diff = abs(cand_f0 - anchor_f0) / anchor_f0
                             if f0_diff > f0_tolerance_pct:
                                 f0_ok = False
 
@@ -479,7 +551,8 @@ class MingWorkerRuntime:
                                 f"(gate={ref_f0:.1f}Hz +-{int(f0_tolerance_pct*100)}%). Retrying..."
                             )
                     except Exception as e:
-                        print(f"[ming_worker] {item_id} attempt {attempt + 1} error: {e}")
+                        print(f"[ming_worker] {item_id} attempt {attempt + 1} error: {e}", flush=True)
+                        traceback.print_exc()
 
                 seconds_taken = time.time() - t_synth_start
 
@@ -594,6 +667,7 @@ def serve_worker(
     dtype: str,
     text_normalization: bool,
     idle_ttl_sec: int = 1800,
+    profile: bool = False,
 ) -> int:
     import os
 
@@ -603,6 +677,8 @@ def serve_worker(
         device=device,
         dtype=dtype,
         text_normalization=text_normalization,
+        profile=profile,
+        lazy_load=False,
     )
 
     last_active_time = time.time()
@@ -625,11 +701,12 @@ def serve_worker(
                     idle_sec = round(time.time() - last_active_time, 1)
                 self._send_json(200, {
                     "status": "ok",
+                    "model_loaded": (runtime.model is not None),
                     "model_path": runtime.model_path,
                     "device": runtime.device,
                     "dtype": runtime.dtype,
                     "text_normalization": runtime.text_normalization,
-                    "sample_rate": runtime.sample_rate,
+                    "sample_rate": getattr(runtime, "sample_rate", 44100),
                     "idle_seconds": idle_sec,
                     "pid": os.getpid(),
                 })
@@ -643,6 +720,13 @@ def serve_worker(
                 print("[ming_worker] Received shutdown request via /shutdown")
                 shutdown_event.set()
                 threading.Thread(target=server.shutdown).start()
+                return
+
+            if self.path == "/unload":
+                res = runtime.unload_model()
+                with active_lock:
+                    last_active_time = time.time()
+                self._send_json(200, res)
                 return
 
             if self.path != "/synthesize":
@@ -678,6 +762,11 @@ def serve_worker(
     def idle_checker() -> None:
         while not shutdown_event.is_set():
             time.sleep(5)
+            # Never shut down if active synthesis job is holding the lock
+            if runtime._lock.locked():
+                with active_lock:
+                    last_active_time = time.time()
+                continue
             if idle_ttl_sec > 0:
                 with active_lock:
                     idle = time.time() - last_active_time
@@ -712,6 +801,7 @@ def main() -> int:
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--text-normalization", action="store_true")
+    parser.add_argument("--profile", action="store_true", help="Enable CUDA stage profiling synchronization")
     parser.add_argument("--idle-ttl-sec", type=int, default=1800, help="Idle timeout before auto-exit (sec)")
     args = parser.parse_args()
 
@@ -725,6 +815,7 @@ def main() -> int:
             dtype=args.dtype,
             text_normalization=args.text_normalization,
             idle_ttl_sec=args.idle_ttl_sec,
+            profile=args.profile,
         )
 
     if not args.job_file or not args.result_file:

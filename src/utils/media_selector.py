@@ -1,13 +1,20 @@
 """Media selection logic: license filtering, query ladders, duplicate prevention, and source prioritization."""
 import logging
+from pathlib import Path
+import re
 from typing import Any, Generator
 from urllib.parse import urlparse
 from src.utils.media_models import Candidate, PlannedShot
 from src.utils.media_sources import build_media_sources
 from src.utils.media_cache import MediaCacheManager
+from src.utils.media_normalizer import compute_perceptual_hash, compute_sha256
 import imagehash
 
 logger = logging.getLogger("media.selector")
+
+SA_PATTERN = re.compile(r"(?:^|[\s\-_/])(sa|sharealike)(?:$|[\s\-_/0-9])")
+NC_PATTERN = re.compile(r"(?:^|[\s\-_/])(nc|noncommercial)(?:$|[\s\-_/0-9])")
+ND_PATTERN = re.compile(r"(?:^|[\s\-_/])(nd|noderivs)(?:$|[\s\-_/0-9])")
 
 NEPAL_MARKERS = {
     "nepal",
@@ -315,11 +322,11 @@ class MediaSelector:
         if not lic_clean:
             return False
 
-        if "sa" in lic_clean or "sharealike" in lic_clean:
+        if SA_PATTERN.search(lic_clean):
             if not self.allow_cc_by_sa:
                 return False
 
-        if "nc" in lic_clean or "noncommercial" in lic_clean or "nd" in lic_clean or "noderivs" in lic_clean:
+        if NC_PATTERN.search(lic_clean) or ND_PATTERN.search(lic_clean):
             return False
 
         if "all rights reserved" in lic_clean or "unknown" in lic_clean:
@@ -332,6 +339,38 @@ class MediaSelector:
 
         # Match against configured allowed licenses
         return any(allowed in lic_clean or lic_clean in allowed for allowed in self.allowed_licenses)
+
+    def is_duplicate_or_near_duplicate(
+        self,
+        file_path: Path,
+        is_video: bool = False,
+        sha256_hash: str | None = None,
+    ) -> bool:
+        """Checks exact sha256 match or perceptual hash similarity (Hamming distance <= 6)."""
+        sha = sha256_hash or compute_sha256(file_path)
+        if sha in self.used_sha256s:
+            self.rejected_near_duplicates_count += 1
+            return True
+
+        phash = compute_perceptual_hash(file_path, is_video=is_video)
+        for existing_phash in self.used_phashes:
+            if abs(phash - existing_phash) <= 6:
+                self.rejected_near_duplicates_count += 1
+                return True
+
+        return False
+
+    def register_media_hash(
+        self,
+        file_path: Path,
+        is_video: bool = False,
+        sha256_hash: str | None = None,
+    ) -> None:
+        """Registers the sha256 and perceptual hash of a chosen visual asset."""
+        sha = sha256_hash or compute_sha256(file_path)
+        self.used_sha256s.add(sha)
+        phash = compute_perceptual_hash(file_path, is_video=is_video)
+        self.used_phashes.append(phash)
 
     def is_candidate_acceptable(
         self,

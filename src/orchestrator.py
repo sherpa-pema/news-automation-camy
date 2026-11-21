@@ -1,4 +1,5 @@
 """Orchestrator implementation for Nepal News Bot."""
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
 import hashlib
 import json
@@ -29,10 +30,12 @@ from src.utils.editor_validator import (
     extract_script_validation_fingerprint,
 )
 from src.utils.logging import setup_logger
+from src.utils.notifier import Notifier
 from src.utils.manifest import (
     PAUSE_STATES,
     compute_manifest_status,
     create_initial_manifest,
+    global_pipeline_lock,
     load_manifest,
     reconcile_manifest_status,
     run_process_lock,
@@ -96,6 +99,7 @@ class Orchestrator:
         self.config_dir = Path(config_dir)
         self.runs_dir = Path(runs_dir)
         self.run_dir = self.runs_dir / self.run_date
+        self.repo_root = self.runs_dir.resolve().parent.parent
         self.manifest_path = self.run_dir / "manifest.json"
         self.allow_fixture = allow_fixture
         self.backfill = backfill
@@ -109,11 +113,18 @@ class Orchestrator:
         self._manifest_lock = threading.Lock()
 
         # Setup logger
-        self.logger = setup_logger("orchestrator", self.run_dir / "run.log")
+        self.logger = setup_logger(f"orchestrator.{self.run_date}", self.run_dir / "run.log")
 
         # Load configs
         self.pipeline_config = self._load_yaml(self.config_dir / "pipeline.yaml")
         self.sources_config = self._load_yaml(self.config_dir / "sources.yaml")
+
+        notify_cfg = self.pipeline_config.get("notifications", {})
+        self.notifier = Notifier(
+            timeout_seconds=float(notify_cfg.get("timeout_seconds", 5.0)),
+            enabled=bool(notify_cfg.get("enabled", True)),
+            web_office_url=notify_cfg.get("default_web_office_url"),
+        )
 
         if self.manifest_path.exists():
             try:
@@ -204,10 +215,10 @@ class Orchestrator:
             "why": reason or f"Reset stage '{stage_id}' via --reset-stage CLI",
             "timestamp": datetime.now().astimezone().isoformat(),
         }
-        manifest.setdefault("manual_edits", []).append(entry)
-
-        save_manifest(manifest, self.manifest_path)
-        write_status_md(self.run_dir, manifest)
+        with self._manifest_lock:
+            manifest.setdefault("manual_edits", []).append(entry)
+            save_manifest(manifest, self.manifest_path)
+            write_status_md(self.run_dir, manifest)
         self.logger.info(f"Stage '{stage_id}' successfully reset to pending. Logged to manual_edits.")
         return True
 
@@ -300,19 +311,35 @@ class Orchestrator:
                 if app_data.get("script_sha256") != curr_hash:
                     raise ValueError("script changed after approval, re-run validate and approve")
 
+                is_fixture = bool(origin == "fixture" or manifest.get("run_kind") == "fixture")
                 # Verify validator fingerprint hasn't changed
                 curr_fp = extract_script_validation_fingerprint(compute_validator_fingerprint())
                 app_fp = extract_script_validation_fingerprint(app_data.get("validator_fingerprint"))
-                if app_fp and app_fp != curr_fp:
-                    raise ValueError("validator or editor config changed after approval, re-run validate and approve")
+                if not is_fixture:
+                    if not app_fp or app_fp != curr_fp:
+                        raise ValueError("validator or editor config changed after approval, re-run validate and approve")
 
-                rep_file = self.run_dir / "script" / "validation_report.json"
-                if rep_file.exists():
+                    rep_file = self.run_dir / "script" / "validation_report.json"
+                    if not rep_file.exists():
+                        raise ValueError("validation_report.json missing; re-run validate and approve")
                     with open(rep_file, "r", encoding="utf-8") as f:
                         rep_data = json.load(f)
+                    if not rep_data.get("is_valid", True) or len(rep_data.get("errors", [])) > 0:
+                        raise ValueError("Latest validation report contains errors; re-run validate and approve")
                     rep_fp = extract_script_validation_fingerprint(rep_data.get("validator_fingerprint"))
-                    if rep_fp and rep_fp != curr_fp:
+                    if not rep_fp or rep_fp != curr_fp:
                         raise ValueError("validator or editor config changed since validation, re-run validate and approve")
+                else:
+                    if app_fp and app_fp != curr_fp:
+                        raise ValueError("validator or editor config changed after approval, re-run validate and approve")
+
+                    rep_file = self.run_dir / "script" / "validation_report.json"
+                    if rep_file.exists():
+                        with open(rep_file, "r", encoding="utf-8") as f:
+                            rep_data = json.load(f)
+                        rep_fp = extract_script_validation_fingerprint(rep_data.get("validator_fingerprint"))
+                        if rep_fp and rep_fp != curr_fp:
+                            raise ValueError("validator or editor config changed since validation, re-run validate and approve")
 
         if stage_id == "scraper":
             scraper_kwargs: dict[str, Any] = {
@@ -345,6 +372,15 @@ class Orchestrator:
             )
         else:
             agent = agent_cls(self.run_dir, config=self.pipeline_config)
+        timeout_sec = 3600.0
+        stages_cfg = self.pipeline_config.get("stages")
+        if isinstance(stages_cfg, dict):
+            timeout_sec = float(stages_cfg.get(stage_id, {}).get("timeout_seconds") or 3600.0)
+        elif isinstance(stages_cfg, list):
+            s_match = next((s for s in stages_cfg if isinstance(s, dict) and s.get("id") == stage_id), None)
+            if s_match:
+                timeout_sec = float(s_match.get("timeout_seconds") or 3600.0)
+
         max_retries = stage_meta.get("max_retries", 2)
 
         while stage_meta["retry_count"] <= max_retries:
@@ -363,11 +399,22 @@ class Orchestrator:
             )
 
             try:
-                # Execute agent
-                try:
-                    output_files = agent.run(manifest, save_manifest_to_disk=False)
-                except TypeError:
-                    output_files = agent.run(manifest)
+                # Execute agent with stage timeout
+                def _invoke_agent() -> list[str]:
+                    try:
+                        return agent.run(manifest, save_manifest_to_disk=False)
+                    except TypeError:
+                        return agent.run(manifest)
+
+                if timeout_sec > 0:
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        fut = pool.submit(_invoke_agent)
+                        try:
+                            output_files = fut.result(timeout=timeout_sec)
+                        except FutureTimeoutError:
+                            raise TimeoutError(f"Stage '{stage_id}' exceeded timeout limit of {timeout_sec}s")
+                else:
+                    output_files = _invoke_agent()
 
                 # Check if agent entered a pause state (prepared, needs_revision, awaiting_approval)
                 current_stage_status = manifest.get("stages", {}).get(stage_id, {}).get("status")
@@ -401,6 +448,8 @@ class Orchestrator:
                             f"Next action: Review data/runs/{self.run_date}/script/script_preview.md and run:\n"
                             f"  python -m src.agents.editor approve --date {self.run_date}"
                         )
+                        if stage_id == "editor":
+                            self._notify_morning_ready(manifest)
                     raise PipelinePausedException(current_stage_status, next_act)
 
                 # Validate outputs against contract schema
@@ -468,23 +517,30 @@ class Orchestrator:
             except NotImplementedError as e:
                 # Expected in Step 1 stubs
                 self.logger.warning(f"Stage '{stage_id}' stub invoked: {e}")
-                update_stage_status(manifest, stage_id, "pending", error_message=str(e))
-                save_manifest(manifest, self.manifest_path)
-                write_status_md(self.run_dir, manifest)
+                with self._manifest_lock:
+                    update_stage_status(manifest, stage_id, "pending", error_message=str(e))
+                    save_manifest(manifest, self.manifest_path)
+                    write_status_md(self.run_dir, manifest)
                 return False
 
             except Exception as e:
                 self.logger.error(f"Error in stage '{stage_id}' attempt {attempt}: {e}")
                 stage_meta["retry_count"] += 1
-                if stage_meta["retry_count"] > max_retries:
-                    update_stage_status(
-                        manifest,
-                        stage_id,
-                        "failed",
-                        error_message=f"Exhausted {max_retries} retries: {str(e)}",
-                    )
+                stage_meta["error_message"] = str(e)
+                with self._manifest_lock:
                     save_manifest(manifest, self.manifest_path)
                     write_status_md(self.run_dir, manifest)
+
+                if stage_meta["retry_count"] > max_retries:
+                    with self._manifest_lock:
+                        update_stage_status(
+                            manifest,
+                            stage_id,
+                            "failed",
+                            error_message=f"Exhausted {max_retries} retries: {str(e)}",
+                        )
+                        save_manifest(manifest, self.manifest_path)
+                        write_status_md(self.run_dir, manifest)
                     emit_office_event(
                         self.run_dir,
                         "stage_status",
@@ -505,7 +561,9 @@ class Orchestrator:
                         )
                     return False
                 else:
-                    self.logger.info(f"Retrying stage '{stage_id}'...")
+                    backoff_sec = 5.0 if stage_meta["retry_count"] == 1 else 15.0
+                    self.logger.info(f"Retrying stage '{stage_id}' after {backoff_sec}s backoff...")
+                    time.sleep(backoff_sec)
 
         return False
 
@@ -516,9 +574,9 @@ class Orchestrator:
             self.logger.error(f"Run '{self.run_date}' is abandoned. No stage may run on it.")
             raise RuntimeError(f"Run '{self.run_date}' is abandoned. No stage may run on it.")
 
-        with run_process_lock(self.run_dir):
+        with global_pipeline_lock(self.repo_root, self.run_date), run_process_lock(self.run_dir):
             manifest["status"] = "running"
-            save_manifest(manifest, self.manifest_path)
+            self._save_manifest_locked(manifest)
 
             try:
                 if only_stage:
@@ -551,6 +609,7 @@ class Orchestrator:
                 reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
                 save_manifest(manifest, self.manifest_path)
                 write_status_md(self.run_dir, manifest, active_process=False)
+                self._notify_publish_complete(manifest)
                 self.logger.info("Pipeline execution completed successfully!")
                 return True
 
@@ -558,6 +617,10 @@ class Orchestrator:
                 reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
                 save_manifest(manifest, self.manifest_path)
                 write_status_md(self.run_dir, manifest, active_process=False)
+                raise
+
+            except KeyboardInterrupt:
+                self._mark_run_failed(manifest, "Pipeline interrupted by user (KeyboardInterrupt)")
                 raise
 
             except Exception:
@@ -658,44 +721,46 @@ class Orchestrator:
                     manifest["stages"][st_reset]["error_message"] = None
         save_manifest(manifest, self.manifest_path)
 
-        with run_process_lock(self.run_dir):
+        with global_pipeline_lock(self.repo_root, self.run_date), run_process_lock(self.run_dir):
             manifest["status"] = "running"
-            save_manifest(manifest, self.manifest_path)
+            self._save_manifest_locked(manifest)
 
             scraper_meta = manifest["stages"]["scraper"]
             if force or scraper_meta.get("status") != "done":
                 orig_max_retries = scraper_meta.get("max_retries", 2)
-                # Attempt 1 (single pass so failure immediately triggers 5-min wait + single retry)
-                scraper_meta["retry_count"] = 0
-                scraper_meta["max_retries"] = 0
-                scraper_meta["error_message"] = None
                 ok_scrape = False
                 try:
-                    ok_scrape = self.execute_stage("scraper", manifest, force=force)
-                except Exception as exc:
-                    update_stage_status(manifest, "scraper", "failed", error_message=str(exc))
-                    ok_scrape = False
-
-                if not ok_scrape:
-                    self.logger.warning(
-                        f"Scraper attempt 1 failed ({scraper_meta.get('error_message')}). "
-                        f"Waiting {retry_delay_sec:.0f}s before retrying once..."
-                    )
-                    print(
-                        f"[WARN] Scraper failed; waiting {int(retry_delay_sec)}s before retrying once..."
-                    )
-                    sleep_fn(retry_delay_sec)
-                    scraper_meta["status"] = "pending"
+                    # Attempt 1 (single pass so failure immediately triggers 5-min wait + single retry)
                     scraper_meta["retry_count"] = 0
                     scraper_meta["max_retries"] = 0
                     scraper_meta["error_message"] = None
                     try:
-                        ok_scrape = self.execute_stage("scraper", manifest, force=False)
+                        ok_scrape = self.execute_stage("scraper", manifest, force=force)
                     except Exception as exc:
                         update_stage_status(manifest, "scraper", "failed", error_message=str(exc))
                         ok_scrape = False
 
-                scraper_meta["max_retries"] = orig_max_retries
+                    if not ok_scrape:
+                        self.logger.warning(
+                            f"Scraper attempt 1 failed ({scraper_meta.get('error_message')}). "
+                            f"Waiting {retry_delay_sec:.0f}s before retrying once..."
+                        )
+                        print(
+                            f"[WARN] Scraper failed; waiting {int(retry_delay_sec)}s before retrying once..."
+                        )
+                        sleep_fn(retry_delay_sec)
+                        scraper_meta["status"] = "pending"
+                        scraper_meta["retry_count"] = 0
+                        scraper_meta["max_retries"] = 0
+                        scraper_meta["error_message"] = None
+                        try:
+                            ok_scrape = self.execute_stage("scraper", manifest, force=False)
+                        except Exception as exc:
+                            update_stage_status(manifest, "scraper", "failed", error_message=str(exc))
+                            ok_scrape = False
+                finally:
+                    scraper_meta["max_retries"] = orig_max_retries
+
                 if not ok_scrape:
                     err_detail = scraper_meta.get("error_message") or "Scraper failed after retry."
                     update_stage_status(manifest, "scraper", "failed", error_message=err_detail)
@@ -719,9 +784,13 @@ class Orchestrator:
             except PipelinePausedException as pause_exc:
                 paused_status = pause_exc.status
 
-            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
-            save_manifest(manifest, self.manifest_path)
-            status_path = write_status_md(self.run_dir, manifest, active_process=False)
+            with self._manifest_lock:
+                reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
+                save_manifest(manifest, self.manifest_path)
+                status_path = write_status_md(self.run_dir, manifest, active_process=False)
+
+            if paused_status == "awaiting_approval":
+                self._notify_morning_ready(manifest)
 
         next_action = get_next_action_text(self.run_dir, manifest, active_process=False)
         total_articles, per_source_stats, shortlist_count, brief_path = self._collect_morning_metrics(manifest)
@@ -787,7 +856,7 @@ class Orchestrator:
         prev_media_auto = self.media_auto
         self.media_auto = True
         try:
-            with run_process_lock(self.run_dir):
+            with global_pipeline_lock(self.repo_root, self.run_date), run_process_lock(self.run_dir):
                 manifest["status"] = "running"
                 self._save_manifest_locked(manifest)
 
@@ -838,6 +907,7 @@ class Orchestrator:
                 "mirror_dir": str(latest_info.get("mirror_dir", "")),
             },
         )
+        self._notify_publish_complete(manifest)
         next_action = get_next_action_text(self.run_dir, manifest, active_process=False)
         return {
             "ok": True,
@@ -882,9 +952,10 @@ class Orchestrator:
             and picker_path.exists()
             and candidates_path.exists()
         ):
-            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
-            save_manifest(manifest, self.manifest_path)
-            status_path = write_status_md(self.run_dir, manifest, active_process=False)
+            with self._manifest_lock:
+                reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
+                save_manifest(manifest, self.manifest_path)
+                status_path = write_status_md(self.run_dir, manifest, active_process=False)
             c_data = json.loads(candidates_path.read_text(encoding="utf-8"))
             shots = c_data.get("shots", [])
             clips_cnt = sum(1 for sh in shots if sh.get("auto_pick_type") == "clip")
@@ -904,7 +975,7 @@ class Orchestrator:
                 "next_action": get_next_action_text(self.run_dir, manifest, active_process=False),
             }
 
-        with run_process_lock(self.run_dir):
+        with global_pipeline_lock(self.repo_root, self.run_date), run_process_lock(self.run_dir):
             manifest["status"] = "running"
             self._save_manifest_locked(manifest)
 
@@ -1037,9 +1108,10 @@ class Orchestrator:
                 "auto_cards_count": cards_cnt,
                 "min_relevance": candidates_data.get("min_relevance"),
             }
-            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
-            save_manifest(manifest, self.manifest_path)
-            status_path = write_status_md(self.run_dir, manifest, active_process=False)
+            with self._manifest_lock:
+                reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
+                save_manifest(manifest, self.manifest_path)
+                status_path = write_status_md(self.run_dir, manifest, active_process=False)
 
             emit_office_event(
                 self.run_dir,
@@ -1096,9 +1168,9 @@ class Orchestrator:
         if not gate_ok:
             return {"ok": False, "refused": True, "reason": gate_reason}
 
-        with run_process_lock(self.run_dir):
+        with global_pipeline_lock(self.repo_root, self.run_date), run_process_lock(self.run_dir):
             manifest["status"] = "running"
-            save_manifest(manifest, self.manifest_path)
+            self._save_manifest_locked(manifest)
 
             for st_id in ("voice", "timeline"):
                 if not self.execute_stage(st_id, manifest, force=False):
@@ -1113,8 +1185,9 @@ class Orchestrator:
                         "status_path": str(status_path),
                     }
 
-            update_stage_status(manifest, "media", "running", error_message=None)
-            save_manifest(manifest, self.manifest_path)
+            with self._manifest_lock:
+                update_stage_status(manifest, "media", "running", error_message=None)
+                save_manifest(manifest, self.manifest_path)
             emit_office_event(
                 self.run_dir,
                 "stage_status",
@@ -1137,9 +1210,10 @@ class Orchestrator:
                 if not is_valid:
                     raise ValueError(f"Media contract validation failed after apply_picks: {val_err}")
             except Exception as exc:
-                update_stage_status(manifest, "media", "failed", error_message=str(exc))
-                self._mark_run_failed(manifest, f"Applying visual picks failed: {exc}")
-                status_path = write_status_md(self.run_dir, manifest, active_process=False)
+                with self._manifest_lock:
+                    update_stage_status(manifest, "media", "failed", error_message=str(exc))
+                    self._mark_run_failed(manifest, f"Applying visual picks failed: {exc}")
+                    status_path = write_status_md(self.run_dir, manifest, active_process=False)
                 emit_office_event(
                     self.run_dir,
                     "stage_status",
@@ -1178,9 +1252,10 @@ class Orchestrator:
                 except Exception:
                     pass
 
-            update_stage_status(manifest, "media", "done", output_files=all_media_outputs)
-            manifest["stages"]["media"]["metrics"] = media_metrics
-            save_manifest(manifest, self.manifest_path)
+            with self._manifest_lock:
+                update_stage_status(manifest, "media", "done", output_files=all_media_outputs)
+                manifest["stages"]["media"]["metrics"] = media_metrics
+                save_manifest(manifest, self.manifest_path)
             emit_office_event(
                 self.run_dir,
                 "stage_status",
@@ -1211,9 +1286,10 @@ class Orchestrator:
                         "status_path": str(status_path),
                     }
 
-            reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
-            save_manifest(manifest, self.manifest_path)
-            status_path = write_status_md(self.run_dir, manifest, active_process=False)
+            with self._manifest_lock:
+                reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
+                save_manifest(manifest, self.manifest_path)
+                status_path = write_status_md(self.run_dir, manifest, active_process=False)
 
         latest_info = publish_to_latest(
             self.run_dir,
@@ -1241,6 +1317,7 @@ class Orchestrator:
                 "mirror_dir": str(latest_info.get("mirror_dir", "")),
             },
         )
+        self._notify_publish_complete(manifest)
         return {
             "ok": True,
             "refused": False,
@@ -1254,9 +1331,81 @@ class Orchestrator:
             "latest": latest_info,
         }
 
-    def _mark_run_failed(self, manifest: dict[str, Any], reason: str) -> None:
+    def _notify_morning_ready(self, manifest: dict[str, Any]) -> None:
+        """Dispatches non-fatal morning approval alert."""
+        try:
+            script_path = self.run_dir / "script" / "script.json"
+            if not script_path.exists():
+                script_path = self.run_dir / "script" / "draft_script.json"
+            story_count = 0
+            est_dur = 150.0
+            if script_path.exists():
+                try:
+                    sdata = json.loads(script_path.read_text(encoding="utf-8"))
+                    scenes = sdata.get("scenes", [])
+                    story_count = sum(1 for sc in scenes if sc.get("type") == "story")
+                    if story_count == 0:
+                        story_count = len(scenes)
+                    est_dur = float(sdata.get("total_estimated_duration_sec", 150.0))
+                except Exception:
+                    pass
+            self.notifier.notify_morning_ready(
+                run_date=self.run_date,
+                story_count=story_count,
+                estimated_duration_sec=est_dur,
+            )
+        except Exception as exc:
+            self.logger.warning(f"Failed to dispatch morning notification: {exc}")
+
+    def _notify_publish_complete(self, manifest: dict[str, Any]) -> None:
+        """Dispatches non-fatal publish complete notification with duration and loudness."""
+        try:
+            qa_path = self.run_dir / "qa" / "qa_report.json"
+            final_dur = 150.0
+            lufs_str = "N/A"
+            if qa_path.exists():
+                try:
+                    qdata = json.loads(qa_path.read_text(encoding="utf-8"))
+                    metrics = qdata.get("metrics", {})
+                    final_dur = float(metrics.get("video_duration_sec", 150.0))
+                    lufs = metrics.get("integrated_loudness_lufs")
+                    tp = metrics.get("true_peak_db")
+                    if lufs is not None and tp is not None:
+                        lufs_str = f"{lufs:.1f} LUFS, {tp:.1f} dBTP"
+                    elif lufs is not None:
+                        lufs_str = f"{lufs:.1f} LUFS"
+                except Exception:
+                    pass
+            final_mp4 = str(self.run_dir / "render" / "final.mp4")
+            self.notifier.notify_publish_complete(
+                run_date=self.run_date,
+                final_duration_sec=final_dur,
+                lufs_summary=lufs_str,
+                output_path=final_mp4,
+            )
+        except Exception as exc:
+            self.logger.warning(f"Failed to dispatch publish complete notification: {exc}")
+
+    def _mark_run_failed(self, manifest: dict[str, Any], reason: str, failing_stage: str | None = None) -> None:
         self.logger.error(f"Run failed: {reason}")
         manifest["status"] = "failed"
         reconcile_manifest_status(manifest, run_dir=self.run_dir, active_process=False)
         save_manifest(manifest, self.manifest_path)
         write_status_md(self.run_dir, manifest, active_process=False)
+        try:
+            st = failing_stage
+            if not st:
+                for st_name, st_meta in manifest.get("stages", {}).items():
+                    if st_meta.get("status") == "failed":
+                        st = st_name
+                        break
+            st = st or "pipeline"
+            hint = f"python run_daily.py --date {self.run_date} --reset-stage {st}"
+            self.notifier.notify_failure(
+                run_date=self.run_date,
+                failing_stage=st,
+                error_snippet=reason,
+                redo_hint=hint,
+            )
+        except Exception as exc:
+            self.logger.warning(f"Failed to dispatch failure notification: {exc}")

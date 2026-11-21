@@ -23,24 +23,30 @@ def compute_sha256(file_path: Path) -> str:
 def compute_perceptual_hash(file_path: Path, is_video: bool = False) -> imagehash.ImageHash:
     """Computes perceptual hash for image or first frame of video."""
     if is_video:
-        # Extract frame at 0.5s via ffmpeg to stdout pipe
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-ss", "0.5",
-            "-i", str(file_path),
-            "-frames:v", "1",
-            "-f", "image2pipe",
-            "-vcodec", "png",
-            "-",
-        ]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
-        if proc.returncode == 0 and proc.stdout:
-            import io
-            img = Image.open(io.BytesIO(proc.stdout))
-            return imagehash.phash(img)
+        # Extract frame at 0.5s or retry 0.0s for short videos via ffmpeg to stdout pipe
+        import io
+        for ss in ("0.5", "0.0"):
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss", ss,
+                "-i", str(file_path),
+                "-frames:v", "1",
+                "-f", "image2pipe",
+                "-vcodec", "png",
+                "-",
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+            if proc.returncode == 0 and proc.stdout:
+                try:
+                    img = Image.open(io.BytesIO(proc.stdout))
+                    return imagehash.phash(img)
+                except Exception:
+                    pass
+        # Video extraction failed: return fallback zero hash
+        return imagehash.hex_to_hash("0" * 16)
 
-    # For images or video fallback
+    # For images
     with Image.open(file_path) as img:
         return imagehash.phash(img)
 
@@ -63,6 +69,7 @@ def probe_media(file_path: Path) -> dict[str, Any]:
 
     width = int(video_stream.get("width", 0)) if video_stream else 0
     height = int(video_stream.get("height", 0)) if video_stream else 0
+    codec_name = str(video_stream.get("codec_name", "")).lower() if video_stream else ""
 
     # Parse fps
     fps = 0.0
@@ -86,6 +93,7 @@ def probe_media(file_path: Path) -> dict[str, Any]:
         "height": height,
         "fps": fps,
         "duration": duration,
+        "codec_name": codec_name,
         "has_audio": audio_stream is not None,
     }
 
@@ -113,6 +121,7 @@ def normalize_video(
         "ffmpeg",
         "-y",
         "-ss", str(start_sec),
+        "-stream_loop", "-1",
         "-i", str(src_path),
         "-t", str(target_duration),
         "-vf", vf,

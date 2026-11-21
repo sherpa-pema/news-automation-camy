@@ -1,14 +1,68 @@
 """Motion graphics generation utilities: Pillow overlay generation and ASS subtitle creation."""
 from datetime import datetime
+import logging
 from pathlib import Path
 import re
 from typing import Any
 from PIL import Image, ImageDraw, ImageFont
+import PIL.features
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# Check Raqm / HarfBuzz text shaping feature at startup
+try:
+    if not PIL.features.check("raqm"):
+        logger.warning(
+            "Pillow 'raqm' (HarfBuzz text shaping) is not available; "
+            "Devanagari text and complex conjuncts will be rendered with basic freetype without advanced shaping."
+        )
+except Exception as _e:
+    logger.warning("Could not check Pillow 'raqm' feature: %s", _e)
+
+DEFAULT_PRIMARY_FONTS = [
+    "C:\\Windows\\Fonts\\NirmalaB.ttf",
+    "C:\\Windows\\Fonts\\Nirmala.ttc",
+    "C:\\Windows\\Fonts\\segoeuib.ttf",
+    "C:\\Windows\\Fonts\\arialbd.ttf",
+]
+DEFAULT_REGULAR_FONTS = [
+    "C:\\Windows\\Fonts\\Nirmala.ttf",
+    "C:\\Windows\\Fonts\\Nirmala.ttc",
+    "C:\\Windows\\Fonts\\segoeui.ttf",
+    "C:\\Windows\\Fonts\\arial.ttf",
+]
 
 
-def get_font(font_path_candidates: list[str], size: int) -> ImageFont.FreeTypeFont:
+def get_font_candidates(regular: bool = False) -> list[str]:
+    """Loads font candidates from config/style.yaml or returns defaults with Nirmala UI Devanagari support."""
+    try:
+        style_path = Path("config/style.yaml")
+        if style_path.exists():
+            cfg = yaml.safe_load(style_path.read_text(encoding="utf-8")) or {}
+            key = "regular_candidates" if regular else "primary_candidates"
+            fonts_cfg = cfg.get("fonts", {}).get(key)
+            if fonts_cfg and isinstance(fonts_cfg, list):
+                return [str(c) for c in fonts_cfg]
+    except Exception:
+        pass
+    return DEFAULT_REGULAR_FONTS if regular else DEFAULT_PRIMARY_FONTS
+
+
+def get_font_path(font_path_candidates: list[str] | None = None, regular: bool = False) -> str | None:
+    """Finds the first existing font file path from candidates or config/style.yaml."""
+    candidates = font_path_candidates or get_font_candidates(regular=regular)
+    for path_str in candidates:
+        p = Path(path_str)
+        if p.exists():
+            return str(p)
+    return None
+
+
+def get_font(font_path_candidates: list[str] | None, size: int) -> ImageFont.FreeTypeFont:
     """Attempts to load the first available font candidate, falling back to default."""
-    for path_str in font_path_candidates:
+    candidates = font_path_candidates or get_font_candidates(regular=False)
+    for path_str in candidates:
         p = Path(path_str)
         if p.exists():
             try:
@@ -105,10 +159,12 @@ def draw_title_card(
     # Accent top strip
     draw.rounded_rectangle((24, 16, width - 24, 24), radius=4, fill=(245, 166, 35, 255))
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
-    font_channel = get_font(fonts, 50)
-    font_title = get_font(fonts, 40)
-    font_date = get_font(fonts, 32)
+    fonts = font_candidates or get_font_candidates(regular=False)
+    font_channel = get_font(fonts, 50 if width >= 1100 else 40)
+    font_title = get_font(fonts, 40 if width >= 1100 else 32)
+    font_date = get_font(fonts, 32 if width >= 1100 else 26)
+    font_note = get_font(fonts, 24 if width >= 1100 else 20)
+    max_w = width - 120
 
     # Format date into plain words (e.g. Sunday, November 8, 2026)
     try:
@@ -119,7 +175,8 @@ def draw_title_card(
 
     # Texts
     # 1. Channel name (Amber accent)
-    draw.text((60, 60), channel_name.upper(), font=font_channel, fill=(245, 166, 35, 255))
+    chan_lines = wrap_text(channel_name.upper(), font_channel, max_width=max_w, max_lines=1)
+    draw.text((60, 60), chan_lines[0] if chan_lines else channel_name.upper(), font=font_channel, fill=(245, 166, 35, 255))
 
     # 2. Headline Tagline
     draw.text((60, 155), "TODAY'S TOP STORIES", font=font_title, fill=(255, 255, 255, 255))
@@ -128,11 +185,16 @@ def draw_title_card(
     draw.line((60, 235, width - 60, 235), fill=(255, 255, 255, 60), width=2)
 
     # 4. Date in plain words
-    draw.text((60, 275), date_display, font=font_date, fill=(220, 230, 242, 255))
+    date_lines = wrap_text(date_display, font_date, max_width=max_w, max_lines=1)
+    draw.text((60, 275), date_lines[0] if date_lines else date_display, font=font_date, fill=(220, 230, 242, 255))
 
     # 5. Briefing note
-    font_note = get_font(fonts, 24)
-    draw.text((60, 360), "Independent daily coverage powered by verified news sources.", font=font_note, fill=(180, 195, 215, 220))
+    note_text = "Independent daily coverage powered by verified news sources."
+    note_lines = wrap_text(note_text, font_note, max_width=max_w, max_lines=2)
+    y_note = 360 if len(note_lines) == 1 else 345
+    for n_line in note_lines:
+        draw.text((60, y_note), n_line, font=font_note, fill=(180, 195, 215, 220))
+        y_note += 28
 
     img.save(str(output_path), "PNG")
 
@@ -158,7 +220,7 @@ def draw_lower_third(
     accent_bar = (0, 0, 12, height)
     draw.rounded_rectangle(accent_bar, radius=6, fill=(245, 166, 35, 255))
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    fonts = font_candidates or get_font_candidates(regular=False)
     font_headline = get_font(fonts, 34)
     font_source = get_font(fonts, 23)
 
@@ -174,7 +236,9 @@ def draw_lower_third(
 
     # Render Source credit
     credit_line = source_text if source_text.lower().startswith("source:") else f"Source: {source_text}"
-    draw.text((36, height - 38), credit_line, font=font_source, fill=(245, 166, 35, 255))
+    wrapped_credit = wrap_text(credit_line, font_source, max_width=max_text_w, max_lines=1)
+    credit_display = wrapped_credit[0] if wrapped_credit else credit_line
+    draw.text((36, height - 38), credit_display, font=font_source, fill=(245, 166, 35, 255))
 
     img.save(str(output_path), "PNG")
 
@@ -193,7 +257,7 @@ def draw_illustrative_tag(
     bg_color = (11, 31, 58, 220)
     draw_rounded_panel(draw, (0, 0, width, height), radius=10, fill=bg_color)
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    fonts = font_candidates or get_font_candidates(regular=False)
     font = get_font(fonts, 20)
 
     # Dot
@@ -219,7 +283,7 @@ def draw_test_run_tag(
     bg_color = (217, 83, 79, 235)
     draw_rounded_panel(draw, (0, 0, width, height), radius=10, fill=bg_color)
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    fonts = font_candidates or get_font_candidates(regular=False)
     font = get_font(fonts, 22)
 
     bbox = font.getbbox("TEST RUN")
@@ -252,28 +316,34 @@ def draw_outro_card(
     # Accent top strip
     draw.rounded_rectangle((24, 16, width - 24, 24), radius=4, fill=(245, 166, 35, 255))
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
-    font_channel = get_font(fonts, 50)
-    font_title = get_font(fonts, 40)
-    font_desc = get_font(fonts, 24)
+    fonts = font_candidates or get_font_candidates(regular=False)
+    font_channel = get_font(fonts, 50 if width >= 1100 else 40)
+    font_title = get_font(fonts, 40 if width >= 1100 else 32)
+    font_desc = get_font(fonts, 24 if width >= 1100 else 20)
+    max_w = width - 120
 
     # Channel name
-    draw.text((60, 60), channel_name.upper(), font=font_channel, fill=(245, 166, 35, 255))
+    chan_lines = wrap_text(channel_name.upper(), font_channel, max_width=max_w, max_lines=1)
+    draw.text((60, 60), chan_lines[0] if chan_lines else channel_name.upper(), font=font_channel, fill=(245, 166, 35, 255))
 
     # Thanks for watching
     draw.text((60, 155), "THANKS FOR WATCHING", font=font_title, fill=(255, 255, 255, 255))
 
     draw.line((60, 235, width - 60, 235), fill=(255, 255, 255, 60), width=2)
 
-    # Disclosure lines
+    # Disclosure lines wrapped to max_w
     if disclose_synthetic_voice:
         line1 = "Narration: AI-generated voice. Footage: stock and archive, illustrative."
         line2 = "See description for full journalist credits and source article links."
-        draw.text((60, 275), line1, font=font_desc, fill=(220, 230, 242, 255))
-        draw.text((60, 320), line2, font=font_desc, fill=(220, 230, 242, 220))
+        all_desc_lines = wrap_text(line1, font_desc, max_width=max_w, max_lines=2) + wrap_text(line2, font_desc, max_width=max_w, max_lines=2)
     else:
         line = "See description for full journalist credits and source article links."
-        draw.text((60, 280), line, font=font_desc, fill=(220, 230, 242, 255))
+        all_desc_lines = wrap_text(line, font_desc, max_width=max_w, max_lines=2)
+
+    y_desc = 275
+    for d_line in all_desc_lines[:3]:
+        draw.text((60, y_desc), d_line, font=font_desc, fill=(220, 230, 242, 235))
+        y_desc += 34
 
     img.save(str(output_path), "PNG")
 
@@ -310,6 +380,7 @@ def generate_ass_subtitles(
     font_name: str = "Arial",
     highlight_color: str = "#F5A623",
     box_rgba: list[int] | None = None,
+    border_style: int = 1,
 ) -> None:
     """Generates an Advanced SubStation Alpha (.ass) subtitle file positioned in the caption band."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,6 +391,11 @@ def generate_ass_subtitles(
         r, g, b, a = box_rgba[:4]
         ass_a = max(0, min(255, 255 - int(a)))
         back_colour = f"&H{ass_a:02X}{int(b):02X}{int(g):02X}{int(r):02X}"
+
+    sec_colour = "&H000000FF"
+    if highlight_color and highlight_color.startswith("#") and len(highlight_color) == 7:
+        hr, hg, hb = highlight_color[1:3], highlight_color[3:5], highlight_color[5:7]
+        sec_colour = f"&H00{hb}{hg}{hr}".upper()
 
     header = f"""[Script Info]
 Title: Nepal Daily Briefing Captions
@@ -332,7 +408,7 @@ PlayResY: {ry}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,{back_colour},-1,0,0,0,100,100,0,0,1,3.5,1.0,2,40,40,{margin_v},1
+Style: Default,{font_name},{font_size},&H00FFFFFF,{sec_colour},&H00000000,{back_colour},-1,0,0,0,100,100,0,0,{border_style},3.5,1.0,2,40,40,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -384,41 +460,52 @@ def draw_stat_callout(
     # Accent top strip
     draw.rounded_rectangle((24, 16, width - 24, 24), radius=4, fill=(245, 166, 35, 255))
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
-    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
-    font_val = get_font(fonts, 80)
-    font_delta = get_font(fonts, 32)
-    font_label = get_font(fonts, 38)
-    font_credit = get_font(regular_fonts, 24)
+    fonts = font_candidates or get_font_candidates(regular=False)
+    regular_fonts = get_font_candidates(regular=True)
+    font_val = get_font(fonts, 80 if width >= 1100 else 64)
+    font_delta = get_font(fonts, 32 if width >= 1100 else 26)
+    font_label = get_font(fonts, 38 if width >= 1100 else 30)
+    font_credit = get_font(regular_fonts, 24 if width >= 1100 else 20)
 
-    # Giant stat value
-    draw.text((64, 60), stat_value, font=font_val, fill=(255, 255, 255, 255))
-
-    # Delta badge (e.g. +14.2% or RECORD HIGH) if present
-    curr_x = 64
     val_bbox = font_val.getbbox(stat_value)
     val_w = val_bbox[2] - val_bbox[0]
-    badge_x = min(width - 340, 64 + val_w + 32)
-    if stat_delta:
-        # Green tint for positive, amber for neutral
-        delta_bg = (40, 167, 69, 220) if ("+" in stat_delta or "▲" in stat_delta) else (245, 166, 35, 220)
-        draw.rounded_rectangle((badge_x, 90, badge_x + 240, 142), radius=12, fill=delta_bg)
-        draw.text((badge_x + 18, 98), stat_delta, font=font_delta, fill=(255, 255, 255, 255))
+
+    # Check if delta badge fits on the right or needs to be stacked below
+    is_stacked = (width < 1100) or (64 + val_w + 32 + 240 > width - 64)
+    if not is_stacked:
+        draw.text((64, 60), stat_value, font=font_val, fill=(255, 255, 255, 255))
+        badge_x = min(width - 340, 64 + val_w + 32)
+        if stat_delta:
+            delta_bg = (40, 167, 69, 220) if ("+" in stat_delta or "▲" in stat_delta) else (245, 166, 35, 220)
+            draw.rounded_rectangle((badge_x, 90, badge_x + 240, 142), radius=12, fill=delta_bg)
+            draw.text((badge_x + 18, 98), stat_delta, font=font_delta, fill=(255, 255, 255, 255))
+        y_div = 175
+    else:
+        draw.text((64, 50), stat_value, font=font_val, fill=(255, 255, 255, 255))
+        if stat_delta:
+            delta_bg = (40, 167, 69, 220) if ("+" in stat_delta or "▲" in stat_delta) else (245, 166, 35, 220)
+            badge_w = min(240, width - 128)
+            draw.rounded_rectangle((64, 130, 64 + badge_w, 175), radius=10, fill=delta_bg)
+            draw.text((78, 137), stat_delta, font=font_delta, fill=(255, 255, 255, 255))
+            y_div = 195
+        else:
+            y_div = 150
 
     # Divider line
-    draw.line((64, 175, width - 64, 175), fill=(255, 255, 255, 50), width=2)
+    draw.line((64, y_div, width - 64, y_div), fill=(255, 255, 255, 50), width=2)
 
     # Clean label text (up to 2 lines, vertically balanced)
     cleaned_label = clean_stat_label(stat_label, stat_value)
     label_lines = wrap_text(cleaned_label.upper(), font_label, max_width=width - 128, max_lines=2)
-    y_text = 230 if len(label_lines) == 1 else 205
+    y_text = y_div + 20
     for line in label_lines:
         draw.text((64, y_text), line, font=font_label, fill=(245, 166, 35, 255))
-        y_text += 50
+        y_text += 42
 
     # Source credit at bottom
     credit_str = source_credit if source_credit.lower().startswith("source:") else f"Source: {source_credit}"
-    draw.text((64, height - 58), credit_str, font=font_credit, fill=(180, 200, 220, 240))
+    credit_wrapped = wrap_text(credit_str, font_credit, max_width=width - 128, max_lines=1)
+    draw.text((64, height - 50), credit_wrapped[0] if credit_wrapped else credit_str, font=font_credit, fill=(180, 200, 220, 240))
 
     img.save(str(output_path), "PNG")
 
@@ -446,8 +533,8 @@ def draw_headline_split(
     # Left accent indicator bar
     draw.rounded_rectangle((16, 24, 24, height - 24), radius=4, fill=(245, 166, 35, 255))
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
-    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
+    fonts = font_candidates or get_font_candidates(regular=False)
+    regular_fonts = get_font_candidates(regular=True)
     font_kicker = get_font(fonts, 28)
     font_hl = get_font(fonts, 38)
     font_bullet = get_font(regular_fonts, 26)
@@ -508,8 +595,8 @@ def draw_quote_card(
     # Top accent bar
     draw.rounded_rectangle((24, 16, width - 24, 24), radius=4, fill=(70, 130, 180, 255))
 
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
-    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
+    fonts = font_candidates or get_font_candidates(regular=False)
+    regular_fonts = get_font_candidates(regular=True)
     font_glyph = get_font(fonts, 100)
     font_quote = get_font(regular_fonts, 36)
     font_speaker = get_font(fonts, 34)
@@ -562,8 +649,8 @@ def draw_news_ticker(
 
     # Amber tag on left
     draw.rectangle((0, 0, 180, height), fill=(245, 166, 35, 255))
-    fonts = font_candidates or ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
-    regular_fonts = ["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]
+    fonts = font_candidates or get_font_candidates(regular=False)
+    regular_fonts = get_font_candidates(regular=True)
     font_tag = get_font(fonts, 22)
     font_txt = get_font(regular_fonts, 24)
 

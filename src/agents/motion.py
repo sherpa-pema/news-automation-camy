@@ -239,6 +239,7 @@ class MotionAgent(BaseAgent):
 
         # 7. Assemble Scene Records for render_plan.json
         planned_scenes: list[dict[str, Any]] = []
+        prev_sc_script: dict[str, Any] | None = None
 
         for sc in timeline_data.get("scenes", []):
             sc_id = sc["id"]
@@ -278,9 +279,28 @@ class MotionAgent(BaseAgent):
             scene_overlays = scene_overlays_map.get(sc_id, [])
 
             credit_label = sanitize_credit(sc_script, channel_name=channel_name)
-            prev_sc_dict = planned_scenes[-1] if planned_scenes else None
-            transition_data = resolve_transitions(sc_script, prev_sc_dict, self.style_config)
+            transition_data = resolve_transitions(sc_script, prev_sc_script, self.style_config)
             caption_style_obj = resolve_style(resolution=res, style_config=self.style_config)
+
+            t_type = transition_data.get("type", "cut")
+            t_dur = float(transition_data.get("duration_sec", 0.0))
+            t_fin = float(transition_data.get("fade_in_sec", t_dur / 2.0))
+            t_fout = float(transition_data.get("fade_out_sec", t_dur / 2.0))
+
+            trans_in = {
+                "type": t_type,
+                "duration_sec": t_fin if t_type != "cut" else 0.0,
+            }
+            trans_out = {
+                "type": "cut",
+                "duration_sec": 0.0,
+            }
+
+            if planned_scenes and t_type != "cut":
+                planned_scenes[-1]["transition_out"] = {
+                    "type": t_type,
+                    "duration_sec": t_fout,
+                }
 
             sc_dict: dict[str, Any] = {
                 "id": sc_id,
@@ -298,6 +318,8 @@ class MotionAgent(BaseAgent):
                 },
                 "caption_style": caption_style_obj.to_plan_dict(),
                 "transition": transition_data,
+                "transition_in": trans_in,
+                "transition_out": trans_out,
             }
             if sc_type == "story":
                 if shot_recipe == "stat_callout":
@@ -308,6 +330,7 @@ class MotionAgent(BaseAgent):
                     sc_dict["split_data"] = recipe_data
 
             planned_scenes.append(sc_dict)
+            prev_sc_script = sc_script
 
         # 8. Render Plan Payload & ASS Subtitles
         ass_path = motion_dir / "captions.ass"

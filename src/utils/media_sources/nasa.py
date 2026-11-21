@@ -88,6 +88,23 @@ class NasaSource(BaseMediaSource):
             item_type = entry.get("media_type", "image")
             cand_kind = "video" if item_type == "video" else "image"
 
+            download_url = preview_href
+            if cand_kind == "video":
+                collection_href = item.get("href")
+                if collection_href:
+                    manifest_data = self.cache_mgr.get_json(collection_href, min_interval=0.2, domain_key="nasa.gov", offline=offline)
+                    if manifest_data and isinstance(manifest_data, list):
+                        mp4s = [u for u in manifest_data if isinstance(u, str) and u.lower().endswith(".mp4")]
+                        best_mp4 = None
+                        for u in mp4s:
+                            if "~medium.mp4" in u or "~orig.mp4" in u:
+                                best_mp4 = u
+                                break
+                        if not best_mp4 and mp4s:
+                            best_mp4 = mp4s[0]
+                        if best_mp4:
+                            download_url = best_mp4
+
             tags = [k.lower() for k in entry.get("keywords", [])]
 
             if is_sensitive:
@@ -101,7 +118,7 @@ class NasaSource(BaseMediaSource):
                 id=f"nasa_{nasa_id}",
                 kind=cand_kind,
                 page_url=f"https://images.nasa.gov/details/{nasa_id}",
-                download_url=preview_href,  # preview image or asset manifest
+                download_url=download_url,
                 width=1920,
                 height=1080,
                 duration=None,

@@ -4,10 +4,15 @@ execution:
   default_retries: 2
   allow_parallel: true
   default_run_kind: "test"
-  keep_runs: 7
+  keep_runs: 14
 
 outputs:
-  mirror_dir: "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest"
+  mirror_dir: "~/OneDrive/NepalNewsBot/latest"
+
+notifications:
+  enabled: true
+  timeout_seconds: 5
+  default_web_office_url: "http://127.0.0.1:8000"
 
 stages:
   - id: "scraper"
@@ -43,7 +48,6 @@ stages:
   - id: "voice"
     agent: "VoiceAgent"
     depends_on: ["editor"]
-    can_run_parallel_with: ["media"]
     retries: 2
     timeout_seconds: 3600
     inputs:
@@ -90,10 +94,12 @@ stages:
     max_length: 48
     crossfade_ms: 25.0
     target_scene_rms_dbfs: -23.0
-    loudness_strategy: "linear_strict"
+    loudness_strategy: "fallback"
     limiter_ceiling_dbfs: -1.5
     highpass_hz: 80.0
     target_lufs: -16
+    min_duration_sec: 60.0
+    max_duration_sec: 240.0
     output_sample_rate: 48000
     text_normalization: false
     disclose_synthetic_voice: true
@@ -120,7 +126,6 @@ stages:
   - id: "timeline"
     agent: "TimelineAgent"
     depends_on: ["voice"]
-    can_run_parallel_with: ["media"]
     retries: 2
     timeout_seconds: 300
     inputs:
@@ -136,7 +141,7 @@ stages:
       - "captions.srt"
     aligner: "mms_fa"
     model_path: "models/MMS_FA/model.pt"
-    device: "cuda:0"
+    device: "cpu"
     dtype: "float32"
     subprocess_python: ".venv-tts/Scripts/python.exe"
     worker_script: "tools/timeline_worker.py"

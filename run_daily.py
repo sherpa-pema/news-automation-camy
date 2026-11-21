@@ -9,6 +9,8 @@ Starts and manages daily automated news runs:
   --doctor  : verify tools, venv, CUDA, models, disk space, env keys, feeds, permissions, timezone
 """
 import argparse
+from datetime import datetime
+import re
 import sys
 
 from src.orchestrator import Orchestrator, PipelinePausedException
@@ -26,6 +28,16 @@ from src.utils.daily_ops import (
 from src.utils.manifest import load_manifest, reconcile_manifest_status, save_manifest
 
 
+def _valid_date(val: str) -> str:
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+        raise argparse.ArgumentTypeError(f"Invalid date format: '{val}'. Expected YYYY-MM-DD.")
+    try:
+        datetime.strptime(val, "%Y-%m-%d")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid calendar date: '{val}'.") from exc
+    return val
+
+
 def build_parser() -> argparse.ArgumentParser:
     exec_cfg = load_execution_config()
     default_rk = exec_cfg.get("default_run_kind", "test")
@@ -33,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--date",
         dest="run_date",
+        type=_valid_date,
         default=get_kathmandu_today(),
         help="Date of the run in YYYY-MM-DD format (default: today in Asia/Kathmandu).",
     )
@@ -88,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--cleanup",
         action="store_true",
         help="Remove temporary media/audio/render caches from runs older than retention window and prune media cache.",
+    )
+    parser.add_argument(
+        "--keep-runs",
+        type=int,
+        default=None,
+        help="Number of recent dated runs to keep intact during --cleanup (overrides execution.keep_runs in config/pipeline.yaml).",
     )
     parser.add_argument(
         "--dry-run",
@@ -169,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2. --cleanup [--dry-run]
     if args.cleanup:
-        plan = plan_cleanup()
+        plan = plan_cleanup(keep_runs=args.keep_runs)
         print("=== Cleanup Preview (will be deleted) ===")
         print(format_cleanup_plan(plan))
         if args.dry_run:

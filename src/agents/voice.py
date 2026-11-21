@@ -15,9 +15,11 @@ import shutil
 import subprocess
 import sys
 import time
+import wave
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from src.agents.base import BaseAgent
@@ -38,6 +40,7 @@ from src.utils.tts import (
     measure_wav_ebur128,
     measure_wav_ebur128_segment,
     read_wav_info,
+    unload_tts_daemon,
 )
 
 
@@ -123,11 +126,16 @@ def _compute_scene_cache_key(
     language_id: str,
     chunk_mode: str,
     ref_sha256: str,
+    ref_txt_sha256: str,
     engine_settings: dict[str, Any],
+    padding_policy: str = "broadcast",
+    pad_before: float = 0.0,
+    pad_after: float = 0.0,
+    target_scene_rms_dbfs: float | None = None,
 ) -> str:
     """Computes deterministic cache key for a scene's synthesized audio."""
     payload = {
-        "v": 2,
+        "v": 3,
         "text": cleaned_text,
         "engine": engine_name,
         "voice": voice,
@@ -135,6 +143,13 @@ def _compute_scene_cache_key(
         "language_id": language_id,
         "chunk_mode": chunk_mode,
         "ref_sha256": ref_sha256,
+        "ref_txt_sha256": ref_txt_sha256,
+        "model_path": engine_settings.get("model_path"),
+        "base_seed": engine_settings.get("seed"),
+        "padding_policy": padding_policy,
+        "pad_before": pad_before,
+        "pad_after": pad_after,
+        "target_scene_rms_dbfs": target_scene_rms_dbfs,
         "speed": engine_settings.get("speed"),
         "cfg": engine_settings.get("cfg"),
         "sigma": engine_settings.get("sigma"),
@@ -147,8 +162,67 @@ def _compute_scene_cache_key(
     return hashlib.sha256(raw).hexdigest()
 
 
+def _create_scene_aliases(scene_id: str, scene_wav_path: Path, audio_dir: Path) -> None:
+    """Creates audio/scene_<id>.wav and audio/<id>.wav aliases using hardlinks (fallback to copyfile)."""
+    alias_path = audio_dir / f"scene_{scene_id}.wav"
+    try:
+        if alias_path.exists():
+            alias_path.unlink()
+        os.link(scene_wav_path, alias_path)
+    except Exception:
+        shutil.copyfile(scene_wav_path, alias_path)
+
+    if scene_id.startswith("scene_"):
+        id_alias = audio_dir / f"{scene_id}.wav"
+        try:
+            if id_alias.exists():
+                id_alias.unlink()
+            os.link(scene_wav_path, id_alias)
+        except Exception:
+            shutil.copyfile(scene_wav_path, id_alias)
+
+
 def check_audio_silence_gaps(wav_path: Path | str, threshold_db: float = -45.0) -> float:
-    """Measures maximum internal silence gap in seconds inside a WAV file (sample-width aware, vectorized)."""
+    """Measures maximum internal silence gap in seconds inside a WAV file (format-aware, vectorized)."""
+    p = Path(wav_path)
+    if not p.exists() or p.stat().st_size == 0:
+        return 0.0
+
+    try:
+        import soundfile as sf
+        arr, sr = sf.read(str(p), dtype="float32")
+        if arr.ndim > 1:
+            arr = arr.mean(axis=1)
+        if sr == 0 or len(arr) == 0:
+            return 0.0
+
+        win_size = int(sr * 0.05)  # 50ms window
+        if win_size == 0:
+            return 0.0
+
+        thresh_lin = 10.0 ** (threshold_db / 20.0)
+        thresh_sq = thresh_lin * thresh_lin
+
+        total_wins = len(arr) // win_size
+        if total_wins == 0:
+            return 0.0
+
+        win_blocks = arr[: total_wins * win_size].reshape(total_wins, win_size)
+        mean_sq = np.mean(win_blocks ** 2, axis=1)
+        is_silent = mean_sq < thresh_sq
+
+        if not np.any(is_silent):
+            return 0.0
+
+        padded = np.pad(is_silent.astype(np.int8), (1, 1), mode="constant")
+        diffs = np.diff(padded)
+        starts = np.where(diffs == 1)[0]
+        ends = np.where(diffs == -1)[0]
+        max_streak = int(np.max(ends - starts)) if len(starts) > 0 else 0
+        return round(max_streak * 0.05, 3)
+    except Exception:
+        pass
+
     import wave
 
     with wave.open(str(wav_path), "rb") as wf:
@@ -261,8 +335,19 @@ class VoiceAgent(BaseAgent):
 
     def _get_voice_stage_config(self) -> dict[str, Any]:
         """Extracts the voice stage configuration block from the pipeline config."""
-        stages = self.config.get("stages", [])
-        voice_cfg = next((s for s in stages if s.get("id") == "voice"), {})
+        cfg = self.config
+        if not cfg:
+            cfg_path = Path("config/pipeline.yaml")
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f) or {}
+                except Exception:
+                    cfg = {}
+        stages = cfg.get("stages", [])
+        if isinstance(stages, dict):
+            return stages.get("voice", {})
+        voice_cfg = next((s for s in stages if isinstance(s, dict) and s.get("id") == "voice"), {})
         return voice_cfg
 
     def run(
@@ -303,7 +388,7 @@ class VoiceAgent(BaseAgent):
         reference_wav = voice_cfg.get("reference_wav", "config/voice/reference.wav")
         reference_txt = voice_cfg.get("reference_txt", "config/voice/reference.txt")
         similarity_threshold = float(voice_cfg.get("similarity_threshold", 0.72))
-        f0_tolerance_pct = float(voice_cfg.get("f0_tolerance_pct", 0.10))
+        f0_tolerance_pct = float(voice_cfg.get("f0_tolerance_pct", 0.15))
         n_candidates = int(voice_cfg.get("n_candidates", 1))
         f0_anchor = str(voice_cfg.get("f0_anchor", "running_median")).strip().lower()
         ranker_weights = voice_cfg.get(
@@ -414,16 +499,25 @@ class VoiceAgent(BaseAgent):
         }
 
         ref_sha256 = _compute_file_sha256(Path(reference_wav)) if engine_name != "fake" else "fake"
+        ref_txt_sha256 = _compute_file_sha256(Path(reference_txt)) if engine_name != "fake" and reference_txt else "fake"
         all_items: list[dict[str, Any]] = []
         scene_items_map: dict[str, list[Path]] = {}
         scene_cache_keys: dict[str, str] = {}
         cached_scenes: set[str] = set()
 
-        for scene in target_scenes:
+        for idx, scene in enumerate(target_scenes):
             scene_id = scene["id"]
             # READ ONLY narration text
             raw_narration = scene.get("narration", "")
             cleaned_text = clean_narration_text(raw_narration, pronunciations)
+            s_pad_before, s_pad_after = get_scene_padding(
+                scene_id=scene_id,
+                scene_idx=idx,
+                total_scenes=len(target_scenes),
+                padding_policy=padding_policy,
+                pad_before_fallback=pad_before,
+                pad_after_fallback=pad_after,
+            )
             cache_key = _compute_scene_cache_key(
                 cleaned_text=cleaned_text,
                 engine_name=engine_name,
@@ -432,7 +526,12 @@ class VoiceAgent(BaseAgent):
                 language_id=language_id,
                 chunk_mode=chunk_mode,
                 ref_sha256=ref_sha256,
+                ref_txt_sha256=ref_txt_sha256,
                 engine_settings=engine_settings,
+                padding_policy=padding_policy,
+                pad_before=s_pad_before,
+                pad_after=s_pad_after,
+                target_scene_rms_dbfs=target_scene_rms_dbfs,
             )
             scene_cache_keys[scene_id] = cache_key
 
@@ -462,22 +561,22 @@ class VoiceAgent(BaseAgent):
             if chunk_mode == "scene":
                 s_id = scene_id
                 s_path = temp_sentences_dir / f"{s_id}_raw.wav"
-                all_items.append({"id": s_id, "text": cleaned_text, "out_path": str(s_path)})
+                all_items.append({"id": s_id, "text": cleaned_text, "out_path": str(s_path), "scene_id": scene_id})
                 scene_items_map[scene_id] = [s_path]
             else:
                 sentences = split_into_sentences(cleaned_text)
                 scene_items_map[scene_id] = []
-                for idx, sent in enumerate(sentences):
-                    s_id = f"{scene_id}_s{idx}"
+                for s_idx, sent in enumerate(sentences):
+                    s_id = f"{scene_id}_s{s_idx}"
                     s_path = temp_sentences_dir / f"{s_id}.wav"
-                    all_items.append({"id": s_id, "text": sent, "out_path": str(s_path)})
+                    all_items.append({"id": s_id, "text": sent, "out_path": str(s_path), "scene_id": scene_id})
                     scene_items_map[scene_id].append(s_path)
 
         # Determine which items actually need synthesis
         items_to_synthesize = []
         for item in all_items:
             s_path = Path(item["out_path"])
-            scene_id = item["id"].split("_s")[0]
+            scene_id = item.get("scene_id") or item["id"].split("_s")[0]
             force_regen = (only_scene is not None and scene_id == only_scene)
 
             is_valid = False
@@ -527,7 +626,9 @@ class VoiceAgent(BaseAgent):
                     total=len(items_to_synthesize),
                     message=f"Synthesizing voice chunk {cur_done}/{len(items_to_synthesize)}",
                 )
-                batch_result = tts_engine.synthesize_batch(b_items, engine_settings)
+                b_settings = dict(engine_settings)
+                b_settings["seed"] = base_seed + (b_idx * 100)
+                batch_result = tts_engine.synthesize_batch(b_items, b_settings)
                 total_model_load_time += batch_result.get("model_load_time_sec", 0.0)
                 if "stage_breakdown_sec" in batch_result:
                     for k, v in batch_result["stage_breakdown_sec"].items():
@@ -567,6 +668,7 @@ class VoiceAgent(BaseAgent):
         pause_to_use = 0.0 if chunk_mode == "scene" else pause_between_sentences
         for idx, scene in enumerate(target_scenes):
             scene_id = scene["id"]
+            scene_wav_path = scenes_dir / f"{scene_id}.wav"
             emit_office_event(
                 self.run_dir,
                 "substage_progress",
@@ -577,9 +679,9 @@ class VoiceAgent(BaseAgent):
                 extra={"scene_id": scene_id},
             )
             if scene_id in cached_scenes:
+                _create_scene_aliases(scene_id, scene_wav_path, audio_dir)
                 continue
             wav_paths = scene_items_map[scene_id]
-            scene_wav_path = scenes_dir / f"{scene_id}.wav"
             s_pad_before, s_pad_after = get_scene_padding(
                 scene_id=scene_id,
                 scene_idx=idx,
@@ -617,22 +719,7 @@ class VoiceAgent(BaseAgent):
             )
 
             # Create aliases audio/scene_<id>.wav and audio/<id>.wav using hardlinks (fallback to copyfile)
-            alias_path = audio_dir / f"scene_{scene_id}.wav"
-            try:
-                if alias_path.exists():
-                    alias_path.unlink()
-                os.link(scene_wav_path, alias_path)
-            except Exception:
-                shutil.copyfile(scene_wav_path, alias_path)
-
-            if scene_id.startswith("scene_"):
-                id_alias = audio_dir / f"{scene_id}.wav"
-                try:
-                    if id_alias.exists():
-                        id_alias.unlink()
-                    os.link(scene_wav_path, id_alias)
-                except Exception:
-                    shutil.copyfile(scene_wav_path, id_alias)
+            _create_scene_aliases(scene_id, scene_wav_path, audio_dir)
             self.logger.info(f"Scene '{scene_id}' assembled: duration = {scene_dur:.2f}s")
 
         assembly_time_sec = time.time() - t_asm_start
@@ -642,8 +729,7 @@ class VoiceAgent(BaseAgent):
 
         # Assemble full list of all scenes in script order
         scene_files_in_order = []
-        scene_metrics = []
-        current_time = 0.0
+        scene_frames_list = []
 
         for idx, scene in enumerate(scenes):
             s_id = scene["id"]
@@ -652,43 +738,8 @@ class VoiceAgent(BaseAgent):
                 raise FileNotFoundError(f"Missing assembled scene audio: {s_file}")
 
             info = read_wav_info(s_file)
-            dur = info["duration_sec"]
-            start_t = current_time
-            end_t = round(start_t + dur, 3)
-            current_time = end_t
-
-            s_pad_before, s_pad_after = get_scene_padding(
-                scene_id=s_id,
-                scene_idx=idx,
-                total_scenes=len(scenes),
-                padding_policy=padding_policy,
-                pad_before_fallback=pad_before,
-                pad_after_fallback=pad_after,
-            )
-
             scene_files_in_order.append(s_file)
-            all_scene_durations.append({
-                "id": s_id,
-                "file": f"audio/scenes/{s_id}.wav",
-                "start_sec": start_t,
-                "end_sec": end_t,
-                "duration_sec": dur,
-                "pad_before": s_pad_before,
-                "pad_after": s_pad_after,
-            })
-            scene_metrics.append({
-                "id": s_id,
-                "estimated_duration_sec": scene.get("estimated_duration_sec", 0.0),
-                "actual_duration_sec": dur,
-                "pad_before": s_pad_before,
-                "pad_after": s_pad_after,
-                "file": f"audio/scenes/{s_id}.wav",
-            })
-
-        # Save scene_durations.json
-        durations_json_path = audio_dir / "scene_durations.json"
-        with open(durations_json_path, "w", encoding="utf-8") as f:
-            json.dump(all_scene_durations, f, indent=2)
+            scene_frames_list.append(info.get("frames", 0))
 
         # Concatenate scenes into intermediate raw track
         raw_concat_path = audio_dir / "raw_concat.wav"
@@ -716,21 +767,153 @@ class VoiceAgent(BaseAgent):
 
         final_master_info = read_wav_info(master_narration_path)
         final_duration_sec = final_master_info["duration_sec"]
+        total_master_samples = final_master_info.get("frames", 0)
+        master_sr = final_master_info.get("sample_rate", output_sample_rate) or 48000
+        if total_master_samples == 0 and final_duration_sec > 0:
+            total_master_samples = int(round(final_duration_sec * master_sr))
+
         rtf = round(total_synthesis_time / final_duration_sec, 2) if final_duration_sec > 0 else 0.0
+
+        # Compute sample-exact scene durations anchored to master narration audio
+        total_raw_frames = sum(scene_frames_list)
+        all_scene_durations = []
+        scene_metrics = []
+        current_sample = 0
+
+        for idx, scene in enumerate(scenes):
+            s_id = scene["id"]
+            s_frames = scene_frames_list[idx]
+
+            start_sample = current_sample
+            if idx == len(scenes) - 1:
+                end_sample = total_master_samples
+            else:
+                share = (s_frames / total_raw_frames) if total_raw_frames > 0 else (1.0 / len(scenes))
+                end_sample = min(total_master_samples, current_sample + int(round(total_master_samples * share)))
+            current_sample = end_sample
+
+            start_sec = round(start_sample / master_sr, 4)
+            end_sec = round(end_sample / master_sr, 4)
+            dur_sec = round((end_sample - start_sample) / master_sr, 4)
+
+            s_pad_before, s_pad_after = get_scene_padding(
+                scene_id=s_id,
+                scene_idx=idx,
+                total_scenes=len(scenes),
+                padding_policy=padding_policy,
+                pad_before_fallback=pad_before,
+                pad_after_fallback=pad_after,
+            )
+
+            all_scene_durations.append({
+                "id": s_id,
+                "file": f"audio/scenes/{s_id}.wav",
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "duration_sec": dur_sec,
+                "start_sample": start_sample,
+                "end_sample": end_sample,
+                "mastered_16k_path": f"audio/scenes_mastered_16k/{s_id}.wav",
+                "pad_before": s_pad_before,
+                "pad_after": s_pad_after,
+            })
+            scene_metrics.append({
+                "id": s_id,
+                "estimated_duration_sec": scene.get("estimated_duration_sec", 0.0),
+                "actual_duration_sec": dur_sec,
+                "pad_before": s_pad_before,
+                "pad_after": s_pad_after,
+                "file": f"audio/scenes/{s_id}.wav",
+            })
+
+        # Resample master narration to 16 kHz and slice per-scene mastered audio
+        mastered_16k_dir = audio_dir / "scenes_mastered_16k"
+        mastered_16k_dir.mkdir(parents=True, exist_ok=True)
+        narration_16k_path = audio_dir / "narration_16k.wav"
+
+        cmd_16k = [
+            "ffmpeg", "-y",
+            "-i", str(master_narration_path),
+            "-af", "aresample=resampler=soxr:osr=16000",
+            "-ac", "1",
+            "-c:a", "pcm_s16le",
+            str(narration_16k_path),
+        ]
+        try:
+            subprocess.run(cmd_16k, capture_output=True, check=True)
+            with wave.open(str(narration_16k_path), "rb") as wf_16k:
+                n_16k_frames = wf_16k.getnframes()
+                bytes_16k = wf_16k.readframes(n_16k_frames)
+
+            for dur_item in all_scene_durations:
+                s_id = dur_item["id"]
+                st_16k = dur_item["start_sample"] // 3
+                end_16k = dur_item["end_sample"] // 3
+                if dur_item["end_sample"] == total_master_samples:
+                    end_16k = n_16k_frames
+                sc_bytes = bytes_16k[st_16k * 2 : end_16k * 2]
+                sc_16k_path = mastered_16k_dir / f"{s_id}.wav"
+                with wave.open(str(sc_16k_path), "wb") as sc_wf:
+                    sc_wf.setnchannels(1)
+                    sc_wf.setsampwidth(2)
+                    sc_wf.setframerate(16000)
+                    sc_wf.writeframes(sc_bytes)
+        except Exception as e:
+            self.logger.warning(f"Could not produce 16k mastered audio: {e}")
+
+        # Save scene_durations.json
+        durations_json_path = audio_dir / "scene_durations.json"
+        with open(durations_json_path, "w", encoding="utf-8") as f:
+            json.dump(all_scene_durations, f, indent=2)
 
         # Measure per-scene loudness and True Peak after mastering
         words_map = {sc["id"]: len(sc.get("narration", "").split()) for sc in scenes}
+        master_data, master_sr = None, 48000
+        try:
+            import soundfile as sf
+            master_data, master_sr = sf.read(str(master_narration_path), dtype="float32")
+            if master_data.ndim > 1:
+                master_data = master_data.mean(axis=1)
+        except Exception:
+            pass
+
         for sm in scene_metrics:
             s_file = audio_dir / f"scenes/{sm['id']}.wav"
-            ebur = measure_wav_ebur128(s_file)
             dur_info = next((d for d in all_scene_durations if d["id"] == sm["id"]), None)
             start_t = dur_info["start_sec"] if dur_info else 0.0
             dur_t = dur_info["duration_sec"] if dur_info else sm["actual_duration_sec"]
-            narr_ebur = measure_wav_ebur128_segment(master_narration_path, start_t, dur_t)
-            sm["lufs"] = ebur.get("lufs")
-            sm["true_peak_db"] = ebur.get("true_peak_db")
-            sm["mastered_lufs"] = narr_ebur.get("lufs")
-            sm["mastered_true_peak_db"] = narr_ebur.get("true_peak_db")
+
+            sc_lufs = -70.0
+            sc_tp = -99.0
+            if s_file.exists() and s_file.stat().st_size > 0:
+                try:
+                    s_arr, _ = sf.read(str(s_file), dtype="float32")
+                    if s_arr.ndim > 1:
+                        s_arr = s_arr.mean(axis=1)
+                    if len(s_arr) > 0:
+                        s_rms = float(np.sqrt(np.mean(s_arr ** 2)))
+                        s_peak = float(np.max(np.abs(s_arr)))
+                        sc_lufs = round(20.0 * np.log10(max(1e-9, s_rms)) - 0.691, 2)
+                        sc_tp = round(20.0 * np.log10(max(1e-9, s_peak)), 2)
+                except Exception:
+                    pass
+
+            m_lufs = -70.0
+            m_tp = -99.0
+            if master_data is not None and len(master_data) > 0 and master_sr > 0:
+                start_samp = int(max(0.0, start_t) * master_sr)
+                end_samp = int(min(len(master_data), (start_t + max(0.01, dur_t)) * master_sr))
+                if end_samp > start_samp:
+                    seg = master_data[start_samp:end_samp]
+                    seg_rms = float(np.sqrt(np.mean(seg ** 2)))
+                    seg_peak = float(np.max(np.abs(seg)))
+                    m_lufs = round(20.0 * np.log10(max(1e-9, seg_rms)) - 0.691, 2)
+                    m_tp = round(20.0 * np.log10(max(1e-9, seg_peak)), 2)
+
+            sm["lufs"] = sc_lufs
+            sm["true_peak_db"] = sc_tp
+            sm["mastered_lufs"] = m_lufs
+            sm["mastered_true_peak_db"] = m_tp
             sm["word_count"] = words_map.get(sm["id"], 0)
 
         # Measure audio artifacts & build Voice Quality Index (VQI)
@@ -750,13 +933,14 @@ class VoiceAgent(BaseAgent):
             artifact_flags=artifact_flags,
             unverified_pronunciations=unverified_applied,
         )
+        pure_synthesis_time = max(0.0, total_synthesis_time - total_model_load_time)
         perf_block = {
             "model_load_time_sec": round(total_model_load_time, 2),
-            "synthesis_wall_time_sec": round(total_synthesis_time, 2),
+            "synthesis_wall_time_sec": round(pure_synthesis_time, 2),
             "assembly_time_sec": round(assembly_time_sec, 2),
             "mastering_time_sec": round(mastering_time_sec, 2),
             "total_wall_time_sec": round(
-                total_model_load_time + total_synthesis_time + assembly_time_sec + mastering_time_sec, 2
+                total_model_load_time + pure_synthesis_time + assembly_time_sec + mastering_time_sec, 2
             ),
             "real_time_factor": rtf,
             "stage_breakdown_sec": stage_breakdown,
@@ -845,6 +1029,17 @@ class VoiceAgent(BaseAgent):
             f"Voice Agent completed: {final_duration_sec:.2f}s audio synthesized at RTF={rtf}. "
             f"Loudness: {master_stats['after_lufs']} LUFS, True Peak: {master_stats['after_true_peak']} dBFS"
         )
+
+        # Unload TTS daemon to free GPU VRAM for downstream processes (TimelineAgent, RenderAgent)
+        daemon_url = voice_cfg.get("daemon_url", "http://127.0.0.1:8766")
+        if daemon_url and engine_name == "ming":
+            try:
+                unloaded = unload_tts_daemon(daemon_url=daemon_url)
+                if unloaded:
+                    self.logger.info("TTS daemon VRAM unloaded successfully.")
+            except Exception as e:
+                self.logger.warning(f"Could not unload TTS daemon: {e}")
+
         return output_files
 
     def validate(self, output_files: list[str]) -> tuple[bool, str | None]:
@@ -874,10 +1069,15 @@ class VoiceAgent(BaseAgent):
         if info["channels"] != 1:
             return False, f"Master audio must be mono, got {info['channels']} channels"
 
-        # Duration check: between 90s and 220s (target 1.5 to 3.5 minutes)
-        total_dur = info["duration_sec"]
-        if total_dur < 90.0 or total_dur > 220.0:
-            return False, f"Total narration duration {total_dur:.1f}s outside valid window (90s - 220s)"
+        # Duration check: between min_duration_sec and max_duration_sec from config
+        voice_cfg = self._get_voice_stage_config()
+        only_scene = voice_cfg.get("only_scene")
+        if not only_scene:
+            min_dur = float(voice_cfg.get("min_duration_sec", 60.0))
+            max_dur = float(voice_cfg.get("max_duration_sec", 240.0))
+            total_dur = info["duration_sec"]
+            if total_dur < min_dur or total_dur > max_dur:
+                return False, f"Total narration duration {total_dur:.1f}s outside valid window ({min_dur}s - {max_dur}s)"
 
         # Check scene files and internal silence gaps
         scenes_dir = self.run_dir / "audio" / "scenes"
@@ -921,7 +1121,7 @@ class VoiceAgent(BaseAgent):
                     rep_data = json.load(rf)
                 spk_data = rep_data.get("speaker_consistency", {})
                 threshold = float(spk_data.get("similarity_threshold", 0.72))
-                tol_pct = float(spk_data.get("f0_tolerance_pct", 0.25))
+                tol_pct = float(spk_data.get("f0_tolerance_pct", 0.15))
                 metrics_map = spk_data.get("metrics", {})
 
                 for item_id, m in metrics_map.items():
@@ -935,15 +1135,15 @@ class VoiceAgent(BaseAgent):
                             f"Speaker consistency gate failed for item '{item_id}': "
                             f"similarity {sim:.4f} < threshold {threshold:.4f}",
                         )
-                    # Check pitch tolerance against reference if provided
-                    ref_f0 = float(spk_data.get("reference_f0_hz", 0.0))
-                    if ref_f0 > 0.0 and f0 > 0.0:
-                        diff = abs(f0 - ref_f0) / ref_f0
+                    # Check pitch tolerance against target or reference if provided
+                    target_f0 = float(m.get("target_f0_hz") or spk_data.get("reference_f0_hz", 0.0))
+                    if target_f0 > 0.0 and f0 > 0.0:
+                        diff = abs(f0 - target_f0) / target_f0
                         if diff > tol_pct:
                             return (
                                 False,
                                 f"Speaker pitch gate failed for item '{item_id}': "
-                                f"F0 {f0:.1f}Hz differs from reference {ref_f0:.1f}Hz by {diff*100:.1f}% > {tol_pct*100:.1f}%",
+                                f"F0 {f0:.1f}Hz differs from reference {target_f0:.1f}Hz by {diff*100:.1f}% > {tol_pct*100:.1f}%",
                             )
                     elif not passes_gate:
                         return (

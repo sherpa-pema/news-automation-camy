@@ -29,6 +29,19 @@ def test_sync_render_plan_persists_to_disk_and_matches_in_memory(tmp_path: Path)
     (tmp_path / "audio").mkdir(parents=True, exist_ok=True)
     shutil.copy(src_run / "audio" / "narration.wav", tmp_path / "audio" / "narration.wav")
 
+    app_file = tmp_path / "script" / "approval.json"
+    if app_file.exists():
+        from src.utils.editor_validator import compute_validator_fingerprint
+        app_data = json.loads(app_file.read_text(encoding="utf-8"))
+        app_data["validator_fingerprint"] = compute_validator_fingerprint()
+        app_file.write_text(json.dumps(app_data), encoding="utf-8")
+    rep_file = tmp_path / "script" / "validation_report.json"
+    if rep_file.exists():
+        from src.utils.editor_validator import compute_validator_fingerprint
+        rep_data = json.loads(rep_file.read_text(encoding="utf-8"))
+        rep_data["validator_fingerprint"] = compute_validator_fingerprint()
+        rep_file.write_text(json.dumps(rep_data), encoding="utf-8")
+
     agent = MotionAgent(run_dir=tmp_path)
     agent.run()
 

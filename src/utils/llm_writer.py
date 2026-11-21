@@ -26,7 +26,8 @@ import requests
 def detect_configured_provider(preferred: str | None = None) -> tuple[str | None, str | None]:
     """Detects an available LLM provider and model from env/.env."""
     load_dotenv(override=False)
-    order = [preferred] if preferred else ["zhipu", "gemini", "anthropic", "openai", "ollama"]
+    pref = preferred.strip().lower() if preferred else None
+    order = [pref] if pref else ["zhipu", "gemini", "anthropic", "openai", "ollama"]
     for p in order:
         if p in ("zhipu", "bigmodel") and (os.getenv("ZHIPU_API_KEY") or os.getenv("BIGMODEL_API_KEY")):
             return "zhipu", os.getenv("ZHIPU_MODEL", "glm-5.3-flash")
@@ -47,136 +48,189 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
     if fence_match:
         cleaned = fence_match.group(1).strip()
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
     start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        cleaned = cleaned[start : end + 1]
+    if start != -1:
+        decoder = json.JSONDecoder()
+        try:
+            obj, _ = decoder.raw_decode(cleaned[start:])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        end = cleaned.rfind("}")
+        if end != -1 and end > start:
+            parsed = json.loads(cleaned[start : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+
     return json.loads(cleaned)
 
 
 def _call_llm(provider: str, model: str, messages: list[dict[str, str]], timeout: int = 180) -> str:
-    """Calls the configured LLM provider via standard HTTPS REST API."""
-    if provider == "zhipu":
-        api_key = os.getenv("ZHIPU_API_KEY") or os.environ["BIGMODEL_API_KEY"]
-        base_url = os.getenv("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
-        thinking_type = os.getenv("ZHIPU_THINKING", "enabled")
-        reasoning_effort = os.getenv("ZHIPU_REASONING_EFFORT", "low")
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.2,
-            "max_tokens": 16384,
-            "thinking": {"type": thinking_type},
-            "reasoning_effort": reasoning_effort,
-        }
-        resp = requests.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout,
-        )
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Zhipu API error {resp.status_code}: {resp.text}")
-        data = resp.json()
-        choice = data["choices"][0]
-        msg = choice["message"]
-        content = msg.get("content") or ""
-        if isinstance(content, list):
-            content = "".join(
-                part.get("text", "") for part in content if isinstance(part, dict)
-            )
-        text = str(content).strip()
-        if not text:
-            raise RuntimeError(
-                f"Zhipu returned empty content (finish_reason={choice.get('finish_reason')}, "
-                f"usage={data.get('usage')})"
-            )
-        return text
+    """Calls the configured LLM provider via standard HTTPS REST API with exponential backoff retries."""
+    max_retries = 3
+    base_backoff = 2.0
+    last_err: Exception | None = None
 
-    if provider == "gemini":
-        api_key = os.environ["GEMINI_API_KEY"]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        contents = []
-        for msg in messages:
-            role = "user" if msg["role"] == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-        resp = requests.post(
-            url,
-            json={
-                "contents": contents,
-                "generationConfig": {
+    for attempt in range(max_retries):
+        try:
+            if provider == "zhipu":
+                api_key = os.getenv("ZHIPU_API_KEY") or os.environ["BIGMODEL_API_KEY"]
+                base_url = os.getenv("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
+                thinking_type = os.getenv("ZHIPU_THINKING", "enabled")
+                reasoning_effort = os.getenv("ZHIPU_REASONING_EFFORT", "low")
+                payload: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
                     "temperature": 0.2,
-                    "responseMimeType": "application/json",
-                },
-            },
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+                    "max_tokens": 16384,
+                    "thinking": {"type": thinking_type},
+                    "reasoning_effort": reasoning_effort,
+                }
+                resp = requests.post(
+                    f"{base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=timeout,
+                )
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    time.sleep(base_backoff * (2 ** attempt))
+                    continue
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Zhipu API error {resp.status_code}: {resp.text}")
+                data = resp.json()
+                choice = data["choices"][0]
+                msg = choice["message"]
+                content = msg.get("content") or ""
+                if isinstance(content, list):
+                    content = "".join(
+                        part.get("text", "") for part in content if isinstance(part, dict)
+                    )
+                text = str(content).strip()
+                if not text:
+                    raise RuntimeError(
+                        f"Zhipu returned empty content (finish_reason={choice.get('finish_reason')}, "
+                        f"usage={data.get('usage')})"
+                    )
+                return text
 
-    if provider == "anthropic":
-        api_key = os.environ["ANTHROPIC_API_KEY"]
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 4096,
-                "temperature": 0.2,
-                "messages": messages,
-            },
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return "".join(block.get("text", "") for block in data.get("content", []))
+            if provider == "gemini":
+                api_key = os.environ["GEMINI_API_KEY"]
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+                contents = []
+                for msg in messages:
+                    role = "user" if msg["role"] == "user" else "model"
+                    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+                resp = requests.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "contents": contents,
+                        "generationConfig": {
+                            "temperature": 0.2,
+                            "responseMimeType": "application/json",
+                        },
+                    },
+                    timeout=timeout,
+                )
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    time.sleep(base_backoff * (2 ** attempt))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
 
-    if provider == "openai":
-        api_key = os.environ["OPENAI_API_KEY"]
-        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        resp = requests.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "temperature": 0.2,
-                "response_format": {"type": "json_object"},
-                "messages": messages,
-            },
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+            if provider == "anthropic":
+                api_key = os.environ["ANTHROPIC_API_KEY"]
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 16384,
+                        "temperature": 0.2,
+                        "messages": messages,
+                    },
+                    timeout=timeout,
+                )
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    time.sleep(base_backoff * (2 ** attempt))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return "".join(block.get("text", "") for block in data.get("content", []))
 
-    if provider == "ollama":
-        base_url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-        resp = requests.post(
-            f"{base_url}/api/chat",
-            json={
-                "model": model,
-                "format": "json",
-                "stream": False,
-                "messages": messages,
-            },
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["message"]["content"]
+            if provider == "openai":
+                api_key = os.environ["OPENAI_API_KEY"]
+                base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+                resp = requests.post(
+                    f"{base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "temperature": 0.2,
+                        "response_format": {"type": "json_object"},
+                        "messages": messages,
+                    },
+                    timeout=timeout,
+                )
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    time.sleep(base_backoff * (2 ** attempt))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
 
-    raise ValueError(f"Unsupported LLM provider: {provider}")
+            if provider == "ollama":
+                base_url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+                resp = requests.post(
+                    f"{base_url}/api/chat",
+                    json={
+                        "model": model,
+                        "format": "json",
+                        "stream": False,
+                        "messages": messages,
+                    },
+                    timeout=timeout,
+                )
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    time.sleep(base_backoff * (2 ** attempt))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return data["message"]["content"]
+
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+        except (requests.RequestException, RuntimeError) as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                time.sleep(base_backoff * (2 ** attempt))
+                continue
+            raise
+
+    if last_err:
+        raise last_err
+    raise RuntimeError("Failed to call LLM after retries")
 
 
 def _load_json_if_exists(path: Path, default: Any) -> Any:
@@ -333,7 +387,7 @@ def _build_surgical_repair_prompt(
         lines.append(f"=== FAILING SCENE index={idx}, id='{sc_id}', type='{sc_type}' ===")
         if sc.get("category"):
             lines.append(f"Category: '{sc.get('category')}'")
-        elif idx in SLOT_CATEGORIES:
+        elif is_headlines_mode and idx in SLOT_CATEGORIES:
             lines.append(f"Designated Broadcast Slot: '{SLOT_CATEGORIES[idx]}' (category MUST be '{SLOT_CATEGORIES[idx]}')")
         lines.append(f"Allowed word count for this scene: {sc_min}-{sc_max} words (currently {len(sc.get('narration', '').split())} words).")
         lines.append("Validation errors to fix:")
@@ -407,7 +461,7 @@ def generate_and_validate_draft(
     raw_brief_text = brief_path.read_text(encoding="utf-8")
     manifest_path = rdir / "manifest.json"
     manifest = load_manifest(manifest_path) if manifest_path.exists() else {"stages": {}}
-    editor_agent = EditorAgent(rdir)
+    editor_agent = EditorAgent(rdir, editor_mode="llm_writer")
     shortlist = _load_json_if_exists(script_dir / "shortlist.json", [])
     budget = _load_json_if_exists(script_dir / "budget.json", {})
     focused_bulletin = 0 < len(shortlist) < 12
@@ -485,57 +539,68 @@ def generate_and_validate_draft(
             message=f"AI Writer ({chosen_provider}:{chosen_model}) round {round_idx}/{max_rounds} ({mode})...",
         )
 
-        if mode == "surgical" and repair_messages and current_draft_obj.get("scenes"):
-            surgical_rounds += 1
-            raw_reply = _call_llm(chosen_provider, chosen_model, repair_messages)
-            parsed = _extract_json_object(raw_reply)
-            repaired_scenes = _extract_repaired_scenes(parsed)
-            scenes_list = list(current_draft_obj["scenes"])
-            id_to_f_idx = {
-                scenes_list[idx].get("id"): idx
-                for idx in failing_indices
-                if 0 <= idx < len(scenes_list) and scenes_list[idx].get("id")
-            }
-            for pos, rep_sc in enumerate(repaired_scenes):
-                rep_id = rep_sc.get("id")
-                target_idx: int | None = None
-                if rep_id in id_to_f_idx:
-                    target_idx = id_to_f_idx[rep_id]
-                elif len(repaired_scenes) == len(failing_indices):
-                    target_idx = failing_indices[pos]
-                if target_idx is not None and 0 <= target_idx < len(scenes_list):
-                    orig_sc = scenes_list[target_idx]
-                    merged_sc = dict(rep_sc)
-                    merged_sc.setdefault("id", orig_sc.get("id"))
-                    merged_sc.setdefault("type", orig_sc.get("type"))
-                    target_errs = [
-                        e.get("message", "")
-                        for e in structured_errors
-                        if e.get("scene_index") == target_idx
-                    ]
-                    if any("sensitive is false" in e.lower() for e in target_errs):
-                        merged_sc["sensitive"] = True
-                    scenes_list[target_idx] = merged_sc
+        try:
+            if mode == "surgical" and repair_messages and current_draft_obj.get("scenes"):
+                surgical_rounds += 1
+                raw_reply = _call_llm(chosen_provider, chosen_model, repair_messages)
+                parsed = _extract_json_object(raw_reply)
+                repaired_scenes = _extract_repaired_scenes(parsed)
+                scenes_list = list(current_draft_obj["scenes"])
+                id_to_f_idx = {
+                    scenes_list[idx].get("id"): idx
+                    for idx in failing_indices
+                    if 0 <= idx < len(scenes_list) and scenes_list[idx].get("id")
+                }
+                for pos, rep_sc in enumerate(repaired_scenes):
+                    rep_id = rep_sc.get("id")
+                    target_idx: int | None = None
+                    if rep_id in id_to_f_idx:
+                        target_idx = id_to_f_idx[rep_id]
+                    elif len(repaired_scenes) == len(failing_indices):
+                        target_idx = failing_indices[pos]
+                    if target_idx is not None and 0 <= target_idx < len(scenes_list):
+                        orig_sc = scenes_list[target_idx]
+                        merged_sc = dict(rep_sc)
+                        merged_sc.setdefault("id", orig_sc.get("id"))
+                        merged_sc.setdefault("type", orig_sc.get("type"))
+                        target_errs = [
+                            e.get("message", "")
+                            for e in structured_errors
+                            if e.get("scene_index") == target_idx
+                        ]
+                        if any("sensitive is false" in e.lower() for e in target_errs):
+                            merged_sc["sensitive"] = True
+                        scenes_list[target_idx] = merged_sc
 
-            current_draft_obj["scenes"] = scenes_list
-            (script_dir / "draft_script.json").write_text(
-                json.dumps(current_draft_obj, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        else:
-            raw_reply = _call_llm(chosen_provider, chosen_model, full_messages)
-            parsed = _extract_json_object(raw_reply)
-            current_draft_obj = parsed.get("draft_script") or parsed
-            selection_obj = parsed.get("selection") or {"selected_clusters": [], "skipped_clusters": []}
+                current_draft_obj["scenes"] = scenes_list
+                (script_dir / "draft_script.json").write_text(
+                    json.dumps(current_draft_obj, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            else:
+                raw_reply = _call_llm(chosen_provider, chosen_model, full_messages)
+                parsed = _extract_json_object(raw_reply)
+                current_draft_obj = parsed.get("draft_script") or parsed
+                selection_obj = parsed.get("selection") or {"selected_clusters": [], "skipped_clusters": []}
 
-            (script_dir / "draft_script.json").write_text(
-                json.dumps(current_draft_obj, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            (script_dir / "selection.json").write_text(
-                json.dumps(selection_obj, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+                (script_dir / "draft_script.json").write_text(
+                    json.dumps(current_draft_obj, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                (script_dir / "selection.json").write_text(
+                    json.dumps(selection_obj, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except Exception as e:
+            logger.warning(f"Round {round_idx} LLM call or JSON extraction failed: {e}")
+            if round_idx < max_rounds:
+                retry_msg = f"Your previous response caused an error: {e}. Please respond strictly with a SINGLE valid JSON object."
+                if mode == "surgical":
+                    repair_messages.append({"role": "user", "content": retry_msg})
+                else:
+                    full_messages.append({"role": "user", "content": retry_msg})
+                continue
+            raise
 
         # Reload manifest before validate
         manifest = load_manifest(manifest_path) if manifest_path.exists() else {"stages": {}}
@@ -588,6 +653,21 @@ def generate_and_validate_draft(
             structured_errors = rep.get("structured_errors") or []
 
         last_errors = rep.get("errors", ["Unknown validation failure"])
+        round_diag = {
+            "round": round_idx,
+            "mode": mode,
+            "provider": chosen_provider,
+            "model": chosen_model,
+            "is_valid": rep.get("is_valid", False),
+            "errors": rep.get("errors", []),
+            "structured_errors": rep.get("structured_errors", []),
+            "warnings": rep.get("warnings", []),
+            "metrics": rep.get("metrics", {}),
+        }
+        (script_dir / f"retry_round_{round_idx}.json").write_text(
+            json.dumps(round_diag, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         if round_idx == max_rounds:
             break
 

@@ -26,11 +26,19 @@ logger = logging.getLogger("web_office.broadcaster")
 class RunBroadcaster:
     """Manages all active WebSocket connections for a single run_date."""
 
-    def __init__(self, run_date: str, runs_dir: Path, config_dir: Path, job_manager: Any) -> None:
+    def __init__(
+        self,
+        run_date: str,
+        runs_dir: Path,
+        config_dir: Path,
+        job_manager: Any,
+        on_idle: Any | None = None,
+    ) -> None:
         self.run_date = run_date
         self.runs_dir = runs_dir
         self.config_dir = config_dir
         self.job_manager = job_manager
+        self.on_idle = on_idle
         self.run_dir = runs_dir / run_date
         self.subscribers: set[WebSocket] = set()
 
@@ -40,6 +48,8 @@ class RunBroadcaster:
 
         self.last_manifest_mtime = -1.0
         self.last_active: bool | None = None
+        self.last_fingerprint: tuple | None = None
+        self.last_job_status: str | None = None
         self.events_offset = 0
         self.log_offset = 0
         self._last_ping_ts = 0.0
@@ -48,6 +58,23 @@ class RunBroadcaster:
     def subscriber_count(self) -> int:
         return len(self.subscribers)
 
+    def _get_watched_mtimes_fingerprint(self) -> tuple:
+        paths = (
+            self.run_dir / "manifest.json",
+            self.run_dir / ".pipeline.pid",
+            self.run_dir / "STATUS.md",
+            self.run_dir / "script" / "script.json",
+            self.run_dir / "script" / "draft_script.json",
+            self.run_dir / "script" / "script_preview.md",
+            self.run_dir / "script" / "validation_report.json",
+            self.run_dir / "script" / "approval.json",
+            self.run_dir / "media" / "review" / "candidates.json",
+            self.run_dir / "qa" / "qa_report.json",
+            self.run_dir / "render" / "description.md",
+            self.run_dir / "render" / "final.mp4",
+        )
+        return tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in paths)
+
     async def subscribe(self, websocket: WebSocket) -> None:
         async with self._lock:
             self.subscribers.add(websocket)
@@ -55,6 +82,9 @@ class RunBroadcaster:
             try:
                 initial_state = await asyncio.to_thread(read_run_state, self.run_dir, self.config_dir)
                 initial_state["active_job"] = self.job_manager.get_active_job(self.run_date)
+                self.last_fingerprint = self._get_watched_mtimes_fingerprint()
+                self.last_job_status = (initial_state["active_job"] or {}).get("status")
+                self.last_active = initial_state.get("active_process")
                 await websocket.send_json({"type": "state_snapshot", "data": initial_state})
             except Exception as exc:
                 logger.debug(f"Failed sending initial snapshot to client: {exc}")
@@ -75,6 +105,8 @@ class RunBroadcaster:
                 self._stopped = True
                 self._task.cancel()
                 self._task = None
+        if self.subscriber_count == 0 and self.on_idle:
+            self.on_idle(self.run_date)
 
     async def send_current_state(self, websocket: WebSocket) -> None:
         """Sends a fresh state snapshot directly to a specific socket (e.g. after sync request)."""
@@ -99,6 +131,12 @@ class RunBroadcaster:
             async with self._lock:
                 for ws in dead:
                     self.subscribers.discard(ws)
+                if not self.subscribers and self._task and not self._task.done():
+                    self._stopped = True
+                    self._task.cancel()
+                    self._task = None
+            if self.subscriber_count == 0 and self.on_idle:
+                self.on_idle(self.run_date)
 
     def on_job_output(self, action: str, line: str) -> None:
         """Called synchronously by JobManager when stdout line is emitted."""
@@ -119,55 +157,63 @@ class RunBroadcaster:
 
     async def _run_loop(self) -> None:
         """Single background polling loop per run."""
-        manifest_path = self.run_dir / "manifest.json"
         events_path = self.run_dir / "office_events.jsonl"
         log_path = self.run_dir / "run.log"
 
-        while not self._stopped and self.subscribers:
-            try:
-                await asyncio.sleep(0.35)
-                now_ts = asyncio.get_event_loop().time()
+        try:
+            while not self._stopped and self.subscribers:
+                try:
+                    await asyncio.sleep(0.35)
+                    now_ts = asyncio.get_event_loop().time()
 
-                # 1. State change check (using fast mtime)
-                cur_mtime = manifest_path.stat().st_mtime if manifest_path.exists() else -1.0
-                state_now = await asyncio.to_thread(read_run_state, self.run_dir, self.config_dir)
-                cur_active = state_now["active_process"] or bool(
-                    (self.job_manager.get_active_job(self.run_date) or {}).get("status") == "running"
-                )
+                    # 1. State change check (skip read_run_state / deepcopy when mtimes and job status unchanged)
+                    cur_fp = self._get_watched_mtimes_fingerprint()
+                    active_job = self.job_manager.get_active_job(self.run_date)
+                    cur_job_status = (active_job or {}).get("status")
+                    pid_active = (self.run_dir / ".pipeline.pid").exists()
 
-                if cur_mtime != self.last_manifest_mtime or cur_active != self.last_active:
-                    self.last_manifest_mtime = cur_mtime
-                    self.last_active = cur_active
-                    state_now["active_job"] = self.job_manager.get_active_job(self.run_date)
-                    await self.broadcast({"type": "state_snapshot", "data": state_now})
+                    if (
+                        cur_fp != self.last_fingerprint
+                        or cur_job_status != self.last_job_status
+                        or pid_active != self.last_active
+                    ):
+                        state_now = await asyncio.to_thread(read_run_state, self.run_dir, self.config_dir)
+                        state_now["active_job"] = active_job
+                        self.last_fingerprint = cur_fp
+                        self.last_job_status = cur_job_status
+                        self.last_active = state_now["active_process"] or bool(cur_job_status == "running")
+                        await self.broadcast({"type": "state_snapshot", "data": state_now})
 
-                # 2. Tail office events (single read for all clients)
-                new_ev_lines, self.events_offset = tail_new_lines(events_path, self.events_offset)
-                for raw_line in new_ev_lines:
-                    if not raw_line.strip():
-                        continue
-                    try:
-                        ev_obj = json.loads(raw_line)
-                        capped_ev = _cap_event_payload(ev_obj)
-                        await self.broadcast({"type": "office_event", "data": capped_ev})
-                    except Exception:
-                        pass
+                    # 2. Tail office events (single read for all clients)
+                    new_ev_lines, self.events_offset = tail_new_lines(events_path, self.events_offset)
+                    for raw_line in new_ev_lines:
+                        if not raw_line.strip():
+                            continue
+                        try:
+                            ev_obj = json.loads(raw_line)
+                            capped_ev = _cap_event_payload(ev_obj)
+                            await self.broadcast({"type": "office_event", "data": capped_ev})
+                        except Exception:
+                            pass
 
-                # 3. Tail run logs (single read for all clients)
-                new_log_lines, self.log_offset = tail_new_lines(log_path, self.log_offset)
-                if new_log_lines:
-                    await self.broadcast({"type": "log_lines", "data": new_log_lines})
+                    # 3. Tail run logs (single read for all clients)
+                    new_log_lines, self.log_offset = tail_new_lines(log_path, self.log_offset)
+                    if new_log_lines:
+                        await self.broadcast({"type": "log_lines", "data": new_log_lines})
 
-                # 4. Periodic heartbeat ping (every 10s)
-                if now_ts - self._last_ping_ts >= 10.0:
-                    self._last_ping_ts = now_ts
-                    await self.broadcast({"type": "ping", "ts": datetime.now().astimezone().isoformat()})
+                    # 4. Periodic heartbeat ping (every 10s)
+                    if now_ts - self._last_ping_ts >= 10.0:
+                        self._last_ping_ts = now_ts
+                        await self.broadcast({"type": "ping", "ts": datetime.now().astimezone().isoformat()})
 
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.debug(f"Broadcaster loop exception for {self.run_date}: {exc}")
-                await asyncio.sleep(0.5)
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    logger.debug(f"Broadcaster loop exception for {self.run_date}: {exc}")
+                    await asyncio.sleep(0.5)
+        finally:
+            if self.subscriber_count == 0 and self.on_idle:
+                self.on_idle(self.run_date)
 
     async def close(self) -> None:
         self._stopped = True
@@ -194,6 +240,11 @@ class BroadcasterManager:
         # Connect JobManager stdout to broadaster
         self.job_manager.register_output_callback(self.on_job_output)
 
+    def evict_idle(self, run_date: str) -> None:
+        b = self.broadcasters.get(run_date)
+        if b and b.subscriber_count == 0:
+            self.broadcasters.pop(run_date, None)
+
     def get_broadcaster(self, run_date: str) -> RunBroadcaster:
         if run_date not in self.broadcasters:
             self.broadcasters[run_date] = RunBroadcaster(
@@ -201,6 +252,7 @@ class BroadcasterManager:
                 runs_dir=self.runs_dir,
                 config_dir=self.config_dir,
                 job_manager=self.job_manager,
+                on_idle=self.evict_idle,
             )
         return self.broadcasters[run_date]
 

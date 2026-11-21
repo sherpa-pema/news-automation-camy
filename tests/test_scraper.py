@@ -1001,8 +1001,10 @@ def test_cross_source_same_event_deduped(tmp_path, sample_article_html):
         with patch.object(scraper, "fetch_with_retry", side_effect=mock_fetch):
             articles, stats, errors = scraper.scrape_all(ref_time=ref_time)
 
-    assert len(articles) == 1
-    assert articles[0]["source"] == "Source A"
+    # Cross-source coverage is preserved so Editor clustering can group multi-outlet reporting
+    assert len(articles) == 2
+    sources = {a["source"] for a in articles}
+    assert sources == {"Source A", "Source B"}
 
 
 def test_nepali_article_marked_needs_translation(tmp_path):

@@ -19,6 +19,7 @@ def _generate_synthetic_video(
     with_audio: bool = True,
     color: str = "blue",
     size: str = "1920x1080",
+    ass_path: Path | None = None,
 ) -> None:
     """Generates a synthetic MP4 video matching broadcast specs."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -31,9 +32,15 @@ def _generate_synthetic_video(
             cmd.extend(["-i", str(audio_path)])
         else:
             cmd.extend(["-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={duration_sec}"])
-        cmd.extend(["-c:v", "libx264", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-pix_fmt", "yuv420p"])
+
+    if ass_path and ass_path.exists():
+        ass_escaped = str(ass_path.resolve()).replace('\\', '/').replace(':', r'\:')
+        cmd.extend(["-vf", f"ass='{ass_escaped}'"])
+
+    if with_audio:
+        cmd.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
     else:
-        cmd.extend(["-c:v", "libx264", "-an", "-pix_fmt", "yuv420p"])
+        cmd.extend(["-map", "0:v", "-c:v", "libx264", "-an", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
 
     cmd.append(str(output_path))
     subprocess.run(cmd, capture_output=True, check=True)

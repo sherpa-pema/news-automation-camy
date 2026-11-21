@@ -66,7 +66,7 @@ def _get_cached_provider(repo_root: Path = Path(".")) -> tuple[str | None, str |
 
 
 def _get_cached_outputs_config(config_dir: Path) -> dict[str, Any]:
-    cfg_file = config_dir / "outputs.yaml"
+    cfg_file = config_dir / "pipeline.yaml"
     mtime = cfg_file.stat().st_mtime if cfg_file.exists() else 0.0
     key = str(config_dir.resolve())
     cached = _OUTPUTS_CONFIG_CACHE.get(key)
@@ -325,6 +325,11 @@ def read_run_state(
     cand_file = run_dir / "media" / "review" / "candidates.json"
     qa_file = run_dir / "qa" / "qa_report.json"
     script_file = run_dir / "script" / "script.json"
+    draft_script_file = run_dir / "script" / "draft_script.json"
+    script_preview_file = run_dir / "script" / "script_preview.md"
+    validation_report_file = run_dir / "script" / "validation_report.json"
+    approval_file = run_dir / "script" / "approval.json"
+    desc_file = run_dir / "render" / "description.md"
     final_file = run_dir / "render" / "final.mp4"
 
     # Compute fast filesystem mtime fingerprint
@@ -338,6 +343,11 @@ def read_run_state(
         cand_file.stat().st_mtime_ns if cand_file.exists() else 0,
         qa_file.stat().st_mtime_ns if qa_file.exists() else 0,
         script_file.stat().st_mtime_ns if script_file.exists() else 0,
+        draft_script_file.stat().st_mtime_ns if draft_script_file.exists() else 0,
+        script_preview_file.stat().st_mtime_ns if script_preview_file.exists() else 0,
+        validation_report_file.stat().st_mtime_ns if validation_report_file.exists() else 0,
+        approval_file.stat().st_mtime_ns if approval_file.exists() else 0,
+        desc_file.stat().st_mtime_ns if desc_file.exists() else 0,
         final_file.exists(),
         include_events,
     )

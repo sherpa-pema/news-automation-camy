@@ -47,6 +47,9 @@ ORDINAL_WORDS = {
 MONTHS = {
     "january", "february", "march", "april", "may", "june",
     "july", "august", "september", "october", "november", "december",
+    "baisakh", "baishakh", "jestha", "jeth", "ashad", "asar", "ashadh",
+    "shrawan", "saun", "bhadra", "bhadau", "ashwin", "asoj", "kartik",
+    "mangsir", "poush", "push", "magh", "falgun", "phagun", "chaitra", "chait",
 }
 MONTHS_PATTERN = "|".join(sorted(MONTHS))
 
@@ -57,6 +60,7 @@ PRONOUNCEABLE_ACRONYMS = {
 }
 
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
+DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
 CURRENCY_RE = re.compile(
     r"(?<![A-Za-z0-9])"
@@ -108,6 +112,12 @@ def devanagari_to_roman_fallback(text: str) -> str:
         "ा": "aa", "ि": "i", "ी": "ee", "ु": "u", "ू": "oo", "ृ": "ri",
         "े": "e", "ै": "ai", "ो": "o", "ौ": "au", "ं": "n", "ँ": "n", "ः": "h",
     }
+    conjuncts = {
+        "\u0915\u094d\u0937": "ksh",  # क्ष
+        "\u0924\u094d\u0930": "tr",   # त्र
+        "\u091c\u094d\u091e": "gy",   # ज्ञ
+        "\u0936\u094d\u0930": "shr",  # श्र
+    }
     consonants = {
         "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
         "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "ny",
@@ -116,7 +126,6 @@ def devanagari_to_roman_fallback(text: str) -> str:
         "प": "p", "फ": "ph", "ब": "b", "भ": "bh", "म": "m",
         "य": "y", "र": "r", "ल": "l", "व": "w",
         "श": "sh", "ष": "sh", "स": "s", "ह": "h",
-        "क्ष": "ksh", "त्र": "tr", "ज्ञ": "gy",
     }
     virama = "्"
 
@@ -125,6 +134,28 @@ def devanagari_to_roman_fallback(text: str) -> str:
     i = 0
     n = len(chars)
     while i < n:
+        # Check 3-codepoint conjuncts first
+        if i + 2 < n:
+            triplet = "".join(chars[i : i + 3])
+            if triplet in conjuncts:
+                base = conjuncts[triplet]
+                i += 3
+                if i < n:
+                    nxt = chars[i]
+                    if nxt == virama:
+                        out.append(base)
+                        i += 1
+                    elif nxt in matras:
+                        out.append(base + matras[nxt])
+                        i += 1
+                    elif nxt.isspace() or nxt in ("।", "॥", ".", ",", "!", "?", "-", "(", ")"):
+                        out.append(base)
+                    else:
+                        out.append(base + "a")
+                else:
+                    out.append(base)
+                continue
+
         c = chars[i]
         if c in vowels:
             out.append(vowels[c])
@@ -138,6 +169,8 @@ def devanagari_to_roman_fallback(text: str) -> str:
                 elif nxt in matras:
                     out.append(base + matras[nxt])
                     i += 1
+                elif nxt.isspace() or nxt in ("।", "॥", ".", ",", "!", "?", "-", "(", ")"):
+                    out.append(base)
                 else:
                     out.append(base + "a")
             else:
@@ -176,7 +209,9 @@ def number_to_spoken_words(num: int, year_style: bool = True) -> str:
         return NUMBER_WORDS[num]
     if num < 1000:
         return _number_under_thousand(num)
-    if year_style and 2000 <= num <= 2099:
+    if year_style and 1900 <= num <= 2099:
+        if num == 2000:
+            return "two thousand"
         century = num // 100
         rem = num % 100
         century_str = _number_under_thousand(century)
@@ -270,11 +305,17 @@ def expand_digits(word: str, is_date_context: bool = False) -> str:
     return word
 
 
+def _clean_word_for_lookup(word: str) -> str:
+    """Strips leading/trailing punctuation preserving Devanagari letters and vowel matras."""
+    return re.sub(r"^[\s.,!?;:\"'()\[\]।॥]+|[\s.,!?;:\"'()\[\]।॥]+$", "", word).strip()
+
+
 def preclean_text(text: str) -> str:
-    """Strips paralinguistic tags and normalizes quotes, dashes, and spacing."""
+    """Strips paralinguistic tags and normalizes quotes, dashes, spacing, and Devanagari digits."""
     if not text:
         return ""
-    cleaned = re.sub(r"\[.*?\]", "", text)
+    cleaned = text.translate(DEVANAGARI_DIGITS)
+    cleaned = re.sub(r"\[.*?\]", "", cleaned)
     cleaned = cleaned.replace("“", '"').replace("”", '"')
     cleaned = cleaned.replace("‘", "'").replace("’", "'")
     cleaned = cleaned.replace("—", " - ").replace("–", " - ")
@@ -590,7 +631,7 @@ def split_into_sentences(text: str) -> list[str]:
 
     # Protect common abbreviations before splitting
     protected = text
-    abbrevs = ["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "e.g.", "i.e.", "vs.", "No.", "Rs.", "NRs."]
+    abbrevs = ["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "e.g.", "i.e.", "vs.", "No.", "Rs.", "NRs.", "U.S.", "U.K.", "U.N.", "St."]
     for idx, abb in enumerate(abbrevs):
         protected = protected.replace(abb, f"__ABB_{idx}__")
 

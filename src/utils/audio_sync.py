@@ -77,6 +77,7 @@ def generate_synthetic_broadcast_theme(
 def load_and_analyze_music(
     bgm_path: str | Path,
     sr: int = 22050,
+    bulletin_duration_sec: float | None = None,
 ) -> dict[str, Any]:
     """Analyzes background music to extract tempo, beat timestamps, and downbeats.
 
@@ -94,15 +95,16 @@ def load_and_analyze_music(
 
     if not HAS_LIBROSA:
         logger.warning("Librosa not installed. Using synthetic 120 BPM grid.")
-        # Fallback synthetic grid
         bpm = 120.0
         beat_interval = 60.0 / bpm
-        beats = [round(i * beat_interval, 3) for i in range(120)]
+        dur = max(60.0, float(bulletin_duration_sec or 60.0))
+        num_beats = int(dur / beat_interval) + 2
+        beats = [round(i * beat_interval, 3) for i in range(num_beats)]
         return {
             "tempo_bpm": bpm,
             "beat_times": beats,
             "downbeat_times": beats[::4],
-            "duration_sec": 60.0,
+            "duration_sec": dur,
         }
 
     try:
@@ -131,12 +133,14 @@ def load_and_analyze_music(
         logger.error(f"Failed to analyze music with librosa: {e}. Falling back to default.")
         bpm = 120.0
         beat_interval = 60.0 / bpm
-        beats = [round(i * beat_interval, 3) for i in range(120)]
+        dur = max(60.0, float(bulletin_duration_sec or 60.0))
+        num_beats = int(dur / beat_interval) + 2
+        beats = [round(i * beat_interval, 3) for i in range(num_beats)]
         return {
             "tempo_bpm": bpm,
             "beat_times": beats,
             "downbeat_times": beats[::4],
-            "duration_sec": 60.0,
+            "duration_sec": dur,
         }
 
 
@@ -152,7 +156,13 @@ def snap_cuts_to_beats(
     Ensures monotonic increasing order and non-negative timestamps.
     """
     if not beat_times or not raw_cuts:
-        return [round(c, 3) for c in raw_cuts]
+        out: list[float] = []
+        for c in raw_cuts:
+            if not out:
+                out.append(round(c, 3))
+            else:
+                out.append(round(max(c, out[-1] + min_gap_sec), 3))
+        return out
 
     beat_arr = np.array(beat_times)
     snapped: list[float] = []
@@ -163,6 +173,8 @@ def snap_cuts_to_beats(
             snapped.append(0.0)
             continue
 
+        prev = snapped[-1] if snapped else 0.0
+
         # Find closest beat
         diffs = np.abs(beat_arr - cut)
         closest_idx = int(np.argmin(diffs))
@@ -170,13 +182,14 @@ def snap_cuts_to_beats(
 
         if min_diff <= tolerance_sec:
             snapped_cut = float(beat_arr[closest_idx])
-            prev = snapped[-1] if snapped else 0.0
             if snapped_cut >= prev + min_gap_sec:
-                snapped.append(round(snapped_cut, 3))
+                val = snapped_cut
             else:
-                snapped.append(round(cut, 3))
+                val = max(cut, prev + min_gap_sec)
         else:
-            snapped.append(round(cut, 3))
+            val = max(cut, prev + min_gap_sec)
+
+        snapped.append(round(val, 3))
 
     return snapped
 
@@ -230,7 +243,8 @@ def extract_audio_grid(
             },
         }
 
-    analysis = load_and_analyze_music(bgm_path)
+    bulletin_dur = float(scene_boundaries[-1]["end"]) if scene_boundaries else 60.0
+    analysis = load_and_analyze_music(bgm_path, bulletin_duration_sec=bulletin_dur)
     beats = analysis.get("beat_times", [])
 
     # Extract cut points: scene starts and ends
@@ -251,7 +265,18 @@ def extract_audio_grid(
     # Compute ducking intervals where speech is active
     ducking_intervals: list[dict[str, float]] = []
     for sc in snapped_scenes:
-        # Duck during narration inside the scene
+        sp_start = sc.get("speech_start")
+        sp_end = sc.get("speech_end")
+        if sp_start is not None and sp_end is not None:
+            sp_s = float(sp_start)
+            sp_e = float(sp_end)
+            if sp_e > sp_s:
+                d_start = round(max(0.0, sp_s - 0.05), 3)
+                d_end = round(sp_e + 0.1, 3)
+                ducking_intervals.append({"start": d_start, "end": d_end})
+                continue
+
+        # Fallback to scene duration bounds
         sc_dur = float(sc["end"]) - float(sc["start"])
         if sc_dur > 0.8:
             # Leave a small musical swell at start (0.15s) and end (0.2s)

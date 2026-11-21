@@ -86,6 +86,10 @@
             "type": "string",
             "description": "Rewritten broadcast narration script in our own words"
           },
+          "spoken_text": {
+            "type": ["string", "null"],
+            "description": "Optional phonetic / expanded text for TTS synthesis; defaults to narration if null or omitted."
+          },
           "category": {
             "type": ["string", "null"],
             "enum": [
@@ -94,7 +98,8 @@
               "politics", "economy", "weather", "health", "transport",
               "crime", "disaster", "environment", "society",
               "technology", "tourism", "culture", "entertainment",
-              "science", "business", "other", null
+              "science", "business", "international", "world", "climate",
+              "general", "headlines", "other", null
             ],
             "description": "Editorial category of the story scene"
           },

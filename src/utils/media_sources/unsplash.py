@@ -1,6 +1,7 @@
 """Unsplash media source (disabled by default, stills only, download tracking)."""
 import logging
 import os
+from pathlib import Path
 import requests
 from src.utils.media_models import Candidate
 from src.utils.media_sources.base import BaseMediaSource
@@ -105,3 +106,11 @@ class UnsplashSource(BaseMediaSource):
             )
         except Exception as e:
             logger.warning(f"Failed to track Unsplash download: {e}")
+
+    def download(self, candidate: Candidate, offline: bool = False) -> Path | None:
+        """Downloads an Unsplash photo and triggers the required download tracking."""
+        raw_path = self.cache_mgr.download_file(candidate.download_url, offline=offline)
+        download_loc = (candidate.extra or {}).get("download_location")
+        if download_loc:
+            self.track_download(download_loc)
+        return raw_path

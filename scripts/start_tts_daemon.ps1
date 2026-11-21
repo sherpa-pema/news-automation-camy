@@ -16,6 +16,10 @@ if (-not (Test-Path $PythonPath)) {
     exit 1
 }
 
+# Ensure logs directory exists
+New-Item -ItemType Directory -Force -Path "logs" | Out-Null
+$env:PYTHONUNBUFFERED = "1"
+
 $HealthUrl = "http://${HostName}:${Port}/health"
 
 # Check if already running
@@ -29,8 +33,19 @@ try {
 
 Write-Host "[start_tts_daemon] Starting Ming-3.0-TTS daemon on http://${HostName}:${Port} (device=$Device, dtype=$Dtype, idle_ttl=${IdleTtlSec}s)..."
 
+$argList = @(
+    "tools/ming_worker.py",
+    "--serve",
+    "--host", $HostName,
+    "--port", $Port.ToString(),
+    "--model-path", $ModelPath,
+    "--device", $Device,
+    "--dtype", $Dtype,
+    "--idle-ttl-sec", $IdleTtlSec.ToString()
+)
+
 $proc = Start-Process -FilePath $PythonPath `
-    -ArgumentList "tools/ming_worker.py --serve --host $HostName --port $Port --model-path $ModelPath --device $Device --dtype $Dtype --idle-ttl-sec $IdleTtlSec" `
+    -ArgumentList $argList `
     -RedirectStandardOutput "logs/tts_daemon.log" `
     -RedirectStandardError "logs/tts_daemon_err.log" `
     -PassThru -WindowStyle Hidden
@@ -44,24 +59,23 @@ $ready = $false
 while ($elapsed -lt $timeout) {
     Start-Sleep -Seconds 2
     $elapsed += 2
+    if ($proc.HasExited) {
+        Write-Error "[start_tts_daemon] Daemon process exited unexpectedly with code $($proc.ExitCode)."
+        exit 1
+    }
     try {
-        $resp = Invoke-RestMethod -Uri $HealthUrl -Method Get -TimeoutSec 2 -ErrorAction SilentlyContinue
+        $resp = Invoke-RestMethod -Uri $HealthUrl -Method Get -TimeoutSec 2 -ErrorAction Stop
         if ($resp.status -eq "ok") {
-            Write-Host "[start_tts_daemon] TTS Daemon is READY! PID=$($resp.pid), Model=$($resp.model_path), Device=$($resp.device)"
+            Write-Host "[start_tts_daemon] TTS Daemon is READY! PID=$($resp.pid), Model=$($resp.model_path), Device=$($resp.device), ModelLoaded=$($resp.model_loaded)"
             $ready = $true
             Set-Content -Path "logs/tts_daemon.pid" -Value $resp.pid -Force
             break
         }
-    } catch {
-        # Process might have died prematurely
-        if ($proc.HasExited) {
-            Write-Error "[start_tts_daemon] Daemon process exited unexpectedly with code $($proc.ExitCode)."
-            exit 1
-        }
-    }
+    } catch {}
 }
 
 if (-not $ready) {
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     Write-Error "[start_tts_daemon] Timed out waiting for TTS daemon to initialize after $timeout seconds."
     exit 1
 }

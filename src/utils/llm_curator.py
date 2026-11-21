@@ -126,6 +126,8 @@ def build_candidate_digest(
     max_candidates: int = 60,
     min_words: int = 60,
     ref_time: datetime | None = None,
+    allow_opinion: bool = False,
+    allow_stale_preview: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Pre-filters raw articles and prepares a compact digest for the LLM curator.
 
@@ -143,7 +145,7 @@ def build_candidate_digest(
         is_op, op_reason = detect_opinion(art)
         art["is_opinion"] = is_op
         art["opinion_reason"] = op_reason if is_op else None
-        if is_op:
+        if is_op and not allow_opinion:
             opinions.append(art)
             continue
 
@@ -153,7 +155,7 @@ def build_candidate_digest(
         is_stale, stale_reason = detect_stale_preview(art, ref_time=ref_time)
         art["is_stale_preview"] = is_stale
         art["stale_preview_reason"] = stale_reason if is_stale else None
-        if is_stale:
+        if is_stale and not allow_stale_preview:
             stale_previews.append(art)
             continue
 
@@ -274,11 +276,16 @@ def curate_and_cluster_with_llm(
     token_overlap = float(editor_cfg.get("clustering", {}).get("token_overlap_threshold", 0.35))
     entity_aliases = editor_cfg.get("entity_aliases", DEFAULT_ENTITY_ALIASES)
 
+    allow_op = bool(curator_cfg.get("allow_opinion", False) or editor_cfg.get("allow_opinion", False))
+    allow_stale = bool(curator_cfg.get("allow_stale_preview", False) or editor_cfg.get("allow_stale_preview", False))
+
     eligible, digest, opinions, stale_previews = build_candidate_digest(
         articles,
         max_candidates=max_cand,
         min_words=min_words,
         ref_time=ref_time,
+        allow_opinion=allow_op,
+        allow_stale_preview=allow_stale,
     )
     if not eligible:
         return None
@@ -308,7 +315,7 @@ def curate_and_cluster_with_llm(
 
     for c_data in clusters_data:
         raw_ids = c_data.get("article_ids", [])
-        valid_ids = [i for i in raw_ids if isinstance(i, int) and 0 <= i < len(eligible)]
+        valid_ids = [i for i in raw_ids if isinstance(i, int) and 0 <= i < len(eligible) and i not in assigned_indices]
         if not valid_ids:
             continue
 
@@ -336,7 +343,7 @@ def curate_and_cluster_with_llm(
             reverse=True,
         )
 
-        # Detect differing numeric figures for supersession
+        # Detect genuine conflicting numeric figures for supersession
         article_num_sets = [
             frozenset(
                 extract_spine_numbers(
@@ -346,7 +353,11 @@ def curate_and_cluster_with_llm(
             )
             for a in sorted_members
         ]
-        has_differing_numbers = len(sorted_members) >= 2 and len(set(article_num_sets)) > 1
+        has_differing_numbers = (
+            len(sorted_members) >= 2
+            and sum(1 for s in article_num_sets if len(s) > 0) >= 2
+            and len(set(s for s in article_num_sets if len(s) > 0)) > 1
+        )
 
         superseded_flags: list[bool] = []
         for a in sorted_members:
@@ -426,7 +437,7 @@ def curate_and_cluster_with_llm(
 
     # Rank clusters: balance editorial priority, source count, topic diversity, and cross-day penalty
     def _curator_base_score(cand: dict[str, Any]) -> float:
-        repeat_adj = -5.0 if cand.get("covered_recently") else 0.0
+        repeat_adj = -80.0 if cand.get("covered_recently") else 0.0
         missing_adj = -0.5 if cand.get("all_dates_missing") else 0.0
         return (
             (cand.get("editorial_priority", 5.0) * 20.0)

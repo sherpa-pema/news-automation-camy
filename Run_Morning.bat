@@ -1,6 +1,7 @@
 @echo off
 setlocal
-set "PROJECT_DIR=C:\news-auto"
+set "PROJECT_DIR=%~dp0"
+if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 cd /d "%PROJECT_DIR%"
 chcp 65001 >nul
 set "PYTHONIOENCODING=utf-8"

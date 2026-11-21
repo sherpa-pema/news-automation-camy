@@ -103,10 +103,13 @@ def parse_spoken_number_phrase(tokens: list[str]) -> list[float]:
     for idx, tok in enumerate(tokens):
         clean_tok = tok.lower().strip(",.")
         if clean_tok == "point":
-            in_number = True
-            in_decimal = True
-            last_multiplier = 0.0
-            continue
+            if in_number and idx + 1 < n_toks and tokens[idx + 1].lower().strip(",.") in WORD_TO_NUMBER:
+                in_decimal = True
+                last_multiplier = 0.0
+                continue
+            else:
+                flush_current()
+                continue
 
         # Allow 'and' inside compound phrases like "one hundred and five" or "one crore and fifty lakh"
         if clean_tok == "and" and in_number and last_multiplier >= 100.0 and idx + 1 < n_toks:
@@ -128,6 +131,13 @@ def parse_spoken_number_phrase(tokens: list[str]) -> list[float]:
                         last_multiplier = val
                     in_decimal = False
                     decimal_digits = ""
+                elif val in (20, 30, 40, 50, 60, 70, 80, 90) and idx + 1 < n_toks and 1 <= WORD_TO_NUMBER.get(tokens[idx + 1].lower().strip(",."), -1) <= 9:
+                    # Multi-digit decimal like 'twenty five' -> 25
+                    next_val = WORD_TO_NUMBER[tokens[idx + 1].lower().strip(",.")]
+                    decimal_digits += str(int(val + next_val))
+                elif 1 <= val <= 9 and idx > 0 and tokens[idx - 1].lower().strip(",.") in ("twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"):
+                    # Already absorbed in previous tens step
+                    pass
                 elif 0 <= val <= 9:
                     decimal_digits += str(int(val))
                 else:
@@ -151,7 +161,19 @@ def parse_spoken_number_phrase(tokens: list[str]) -> list[float]:
                 # Support spoken year form like "twenty eighty three" (20 * 100 + 83 = 2083)
                 if current_val == 0.0 and current_acc in (19.0, 20.0) and 10.0 <= val < 100.0:
                     current_acc = current_acc * 100.0 + val
+                    # If this is a tens word (e.g. 20, 30, ..., 90) and next word is a unit (1..9), do not flush yet
+                    next_clean = tokens[idx + 1].lower().strip(",.") if idx + 1 < n_toks else ""
+                    next_val = WORD_TO_NUMBER.get(next_clean, -1.0)
+                    if val in (20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0) and 1.0 <= next_val <= 9.0:
+                        pass
+                    else:
+                        flush_current()
+                elif 1900.0 <= current_acc <= 2099.0 and (current_acc % 10 == 0) and 1.0 <= val <= 9.0:
+                    current_acc += val
+                    flush_current()
                 else:
+                    if 1900.0 <= current_acc <= 2099.0:
+                        flush_current()
                     current_acc += val
                 last_multiplier = 0.0
         else:
@@ -173,8 +195,8 @@ def extract_numbers_from_text(text: str) -> set[float]:
     norm_text = re.sub(r"\b(Rs|NRs|NPR|\$|€|£)\s*", r"\1 ", text, flags=re.IGNORECASE)
     norm_text = re.sub(r"([$€£])(\d)", r"\1 \2", norm_text)
 
-    # 1. Regex for digit quantities with optional commas, decimals
-    digit_matches = re.findall(r"(?<![\d.])\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])", norm_text)
+    # 1. Regex for digit quantities with optional commas, decimals (supporting South Asian commas)
+    digit_matches = re.findall(r"(?<![\d.])\d+(?:,\d{2,3})*(?:\.\d+)?(?![\d.])", norm_text)
     for m in digit_matches:
         try:
             val = float(m.replace(",", ""))
@@ -190,7 +212,7 @@ def extract_numbers_from_text(text: str) -> set[float]:
 
     # 3. Currency / South Asian & Western multipliers (English + Devanagari) + compound descending pairs
     unit_regex = (
-        r"(?<![\d.])(\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+        r"(?<![\d.])(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*"
         r"(hundreds?|thousands?|lakhs?|lacs?|millions?|crores?|arabs?|billions?|kharbas?|kharabs?|हजार|लाख|करोड|अर्ब|खर्ब)"
         r"(?![a-zA-Z\u0900-\u097F])"
     )
@@ -230,7 +252,7 @@ def find_number_spans_in_text(text: str) -> list[tuple[float, int, int]]:
 
     # 1. Digits (with optional adjacent unit multiplier)
     unit_regex = (
-        r"(?<![\d.])(\d+(?:,\d{3})*(?:\.\d+)?)"
+        r"(?<![\d.])(\d+(?:,\d{2,3})*(?:\.\d+)?)"
         r"(?:\s*(hundreds?|thousands?|lakhs?|lacs?|millions?|crores?|arabs?|billions?|kharbas?|kharabs?|हजार|लाख|करोड|अर्ब|खर्ब)(?![a-zA-Z\u0900-\u097F]))?"
     )
     for m in re.finditer(unit_regex, text, re.IGNORECASE):
@@ -289,9 +311,13 @@ def find_number_spans_in_text(text: str) -> list[tuple[float, int, int]]:
 
 
 def split_sentences(text: str) -> list[str]:
-    """Splits text into sentences."""
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    return [s for s in sentences if s.strip()]
+    """Splits text into clean sentences using text_normalizer.split_into_sentences."""
+    try:
+        from src.utils.text_normalizer import split_into_sentences
+        return split_into_sentences(text)
+    except Exception:
+        sentences = re.split(r"(?<=[.!?।॥])\s+", text.strip())
+        return [s for s in sentences if s.strip()]
 
 
 def load_pronunciation_keys(pronunciations_path: Path | str = "config/pronunciations.yaml") -> set[str]:
@@ -690,14 +716,36 @@ def validate_script_draft(
     if not (len(scenes) in (7, 8) or 14 <= len(scenes) <= 26):
         add_global_error(f"Expected 20 to 26 scenes (intro + 18-24 headlines + outro; legacy: Expected exactly 7 scenes), got {len(scenes)}")
 
-    BROADCAST_SEQUENCE_RULES = [
-        (1, "scene_01", "national_politics", {"national_politics", "politics", "political", "government", "parliament"}),
-        (2, "scene_02", "society_local", {"society_local", "society", "social", "local", "education", "health", "transport", "disaster", "crime", "weather", "climate", "environment"}),
-        (3, "scene_03", "culture_entertainment", {"culture_entertainment", "culture", "cultural", "entertainment", "heritage", "festival", "arts", "tourism"}),
-        (4, "scene_04", "business_economics", {"business_economics", "economy", "economic", "business", "market", "finance", "trade"}),
-        (5, "scene_05", "science_technology", {"science_technology", "technology", "tech", "science", "digital", "telecom", "cyber"}),
-        (6, "scene_06", "sports", {"sports", "sport", "cricket", "football", "athletics"}),
-    ]
+    broadcast_seq_cfg = None
+    if cfg and "broadcast_sequence" in cfg:
+        broadcast_seq_cfg = cfg["broadcast_sequence"]
+    elif Path("config/editor.yaml").exists():
+        try:
+            with open("config/editor.yaml", "r", encoding="utf-8") as f:
+                y = yaml.safe_load(f) or {}
+                broadcast_seq_cfg = y.get("broadcast_sequence")
+        except Exception:
+            broadcast_seq_cfg = None
+
+    if broadcast_seq_cfg and isinstance(broadcast_seq_cfg, list):
+        BROADCAST_SEQUENCE_RULES = []
+        for idx, entry in enumerate(broadcast_seq_cfg, 1):
+            s_id = entry.get("id", f"scene_{idx:02d}")
+            s_cat = entry.get("category", "")
+            s_aliases = set(entry.get("aliases", [s_cat])) | {s_cat}
+            BROADCAST_SEQUENCE_RULES.append((idx, s_id, s_cat, s_aliases))
+    else:
+        BROADCAST_SEQUENCE_RULES = [
+            (1, "scene_01", "national_politics", {"national_politics", "politics", "political", "government", "parliament"}),
+            (2, "scene_02", "society_local", {"society_local", "society", "social", "local", "education", "health", "transport", "disaster", "crime", "weather", "climate", "environment"}),
+            (3, "scene_03", "culture_entertainment", {"culture_entertainment", "culture", "cultural", "entertainment", "heritage", "festival", "arts", "tourism"}),
+            (4, "scene_04", "business_economics", {"business_economics", "economy", "economic", "business", "market", "finance", "trade"}),
+            (5, "scene_05", "science_technology", {"science_technology", "technology", "tech", "science", "digital", "telecom", "cyber"}),
+            (6, "scene_06", "sports", {"sports", "sport", "cricket", "football", "athletics"}),
+        ]
+
+    seen_cluster_ids: set[str] = set()
+    story_count = sum(1 for sc in scenes if sc.get("type", "story") == "story")
 
     total_words = 0
     total_syllables = 0
@@ -770,15 +818,18 @@ def validate_script_draft(
                     break
 
             kw_words = kw.strip().split()
-            if len(kw_words) >= 2 and all(w[0].isupper() for w in kw_words if w.isalpha()):
+            alpha_words = [w for w in kw_words if w.isalpha()]
+            if len(kw_words) >= 2 and alpha_words and all(w[0].isupper() for w in alpha_words):
                 if kw_lower not in proper_noun_whitelist:
                     sc_warnings.append(f"Visual keyword '{kw}' looks like a proper name or brand")
 
-        # Narration Word & Syllable Counts
-        narration_words = narration.strip().split()
-        word_count = len(narration_words)
-        syllable_count = count_syllables_in_text(narration)
-        sc_est_dur = estimate_scene_duration_sec(narration, budget)
+        # Narration / Spoken Text Word & Syllable Counts
+        spoken_text = scene.get("spoken_text")
+        target_spoken = spoken_text if spoken_text is not None else narration
+        spoken_words = target_spoken.strip().split()
+        word_count = len(spoken_words)
+        syllable_count = count_syllables_in_text(target_spoken)
+        sc_est_dur = estimate_scene_duration_sec(target_spoken, budget)
         total_words += word_count
         total_syllables += syllable_count
         total_est_duration_sec += sc_est_dur
@@ -811,35 +862,39 @@ def validate_script_draft(
                 if not (min_s <= len(sentences) <= max_s):
                     sc_errors.append(f"Story narration must have {min_s} to {max_s} sentences (got {len(sentences)})")
 
-        # TTS Rules
-        if re.search(r"\d", narration):
-            digits_found = re.findall(r"\d+", narration)
-            sc_errors.append(f"Digits found in narration (spell numbers out): {digits_found}")
+        # TTS Rules (checked against spoken_text when provided, else narration)
+        tts_text = spoken_text if spoken_text is not None else narration
+        field_name = "spoken_text" if spoken_text is not None else "narration"
 
-        banned_symbols = re.findall(r"[%$&/\\@#^*+=<>~]", narration)
+        if re.search(r"\d", tts_text):
+            digits_found = re.findall(r"\d+", tts_text)
+            sc_errors.append(f"Digits found in {field_name} (spell numbers out): {digits_found}")
+
+        banned_symbols = re.findall(r"[%$&/\\@#^*+=<>~]", tts_text)
         if banned_symbols:
-            sc_errors.append(f"Banned symbols in narration: {set(banned_symbols)}")
+            sc_errors.append(f"Banned symbols in {field_name}: {set(banned_symbols)}")
 
-        if re.search(r"[()\[\]{}]", narration):
-            sc_errors.append("Parentheses or brackets found in narration")
+        if re.search(r"[()\[\]{}]", tts_text):
+            sc_errors.append(f"Parentheses or brackets found in {field_name}")
 
-        # Non-ASCII / emoji check
-        non_ascii = [ch for ch in narration if ord(ch) > 127]
+        # Non-ASCII / emoji check (allow Devanagari in Nepali mode)
+        is_nepali = draft_data.get("language") == "Nepali"
+        non_ascii = [ch for ch in tts_text if (ord(ch) > 127 and not (is_nepali and '\u0900' <= ch <= '\u097F'))]
         if non_ascii:
             sc_errors.append(f"Non-ASCII characters or emojis found: {set(non_ascii)}")
 
         # Case-insensitive Acronym Blocklist check
         seen_blocked_acronyms: set[str] = set()
-        for tok in re.findall(r"\b[a-zA-Z]+\b", narration):
+        for tok in re.findall(r"\b[a-zA-Z]+\b", tts_text):
             tok_l = tok.lower()
             if tok_l in blocked_acronyms and tok_l not in seen_blocked_acronyms:
                 seen_blocked_acronyms.add(tok_l)
                 sc_errors.append(
-                    f"Blocked acronym '{tok}' ({blocked_acronyms[tok_l]}) in narration without pronunciation mapping; expand the full institution name"
+                    f"Blocked acronym '{tok}' ({blocked_acronyms[tok_l]}) in {field_name} without pronunciation mapping; expand the full institution name"
                 )
 
         # All-caps words (>1 letter) warning
-        all_caps = [w for w in re.findall(r"\b[A-Z]{2,}\b", narration)]
+        all_caps = [w for w in re.findall(r"\b[A-Z]{2,}\b", tts_text)]
         if all_caps:
             sc_warnings.append(f"All-caps words found: {all_caps}")
 
@@ -873,13 +928,20 @@ def validate_script_draft(
                 sc_errors.append("Missing evidence mappings")
 
             # Validate each evidence item explicitly against the shortlist
+            covered_sentences = set()
             for ev in evidence:
                 ev_idx = ev.get("sentence_index", -1)
                 ev_url = ev.get("source_url", "")
                 if ev_idx < 0 or ev_idx >= len(sentences):
                     sc_errors.append(f"Evidence sentence_index {ev_idx} out of range [0, {len(sentences)-1}]")
+                else:
+                    covered_sentences.add(ev_idx)
                 if ev_url not in cluster_by_url:
                     sc_errors.append(f"Evidence source_url '{ev_url}' does not belong to any shortlisted cluster")
+
+            for s_idx in range(len(sentences)):
+                if s_idx not in covered_sentences:
+                    sc_errors.append(f"Sentence {s_idx} has no corresponding evidence entry")
 
             # Resolve cluster for scene
             matched_clusters = []
@@ -894,7 +956,16 @@ def validate_script_draft(
                 cluster_combined_text = ""
             else:
                 cluster = matched_clusters[0]
-                cluster_texts = [f"{a.get('title', '')} {a.get('full_text', '')}" for a in cluster.get("articles", [])]
+                c_id = cluster.get("cluster_id") or cluster.get("id")
+                if c_id:
+                    if c_id in seen_cluster_ids and len(shortlist) >= story_count:
+                        sc_errors.append(f"Duplicate story scene for cluster '{c_id}'")
+                    seen_cluster_ids.add(c_id)
+
+                articles = cluster.get("articles", [])
+                non_sup_articles = [a for a in articles if not a.get("superseded", False)]
+                target_articles = non_sup_articles if non_sup_articles else articles
+                cluster_texts = [f"{a.get('title', '')} {a.get('full_text', '')}" for a in target_articles]
                 cluster_combined_text = " ".join(cluster_texts)
 
                 # Check evidence URLs belong to the matched cluster
@@ -926,10 +997,11 @@ def validate_script_draft(
                         sc_errors.append(f"Verbatim 8-word overlap with source text: '{bad_phrase}'")
                         break
 
-                # Number verification: numbers in narration must appear in cluster text (with unit-scale & BS date tolerance)
+                # Number verification: numbers in spoken text (or narration) must appear in cluster text (with unit-scale & BS date tolerance)
                 cluster_numbers = extract_numbers_from_text(cluster_combined_text)
+                num_sentences = split_sentences(spoken_text) if spoken_text is not None else sentences
 
-                for sent in sentences:
+                for sent in num_sentences:
                     sent_spans = find_number_spans_in_text(sent)
                     sent_nums = {sp[0] for sp in sent_spans}
                     has_bs_year_in_sent = bool(sent_nums & bs_whitelist_years)
@@ -1024,6 +1096,15 @@ def validate_script_draft(
     max_budget = budget.get("max_total_words", 380)
     if not (min_budget <= total_words <= max_budget):
         add_global_error(f"Total word count {total_words} outside budget range [{min_budget}, {max_budget}]")
+
+    dur_range = budget.get("duration_range_sec")
+    if dur_range and isinstance(dur_range, (list, tuple)) and len(dur_range) == 2:
+        min_dur = float(dur_range[0])
+        max_dur = float(dur_range[1])
+        if not (min_dur - 5.0 <= total_est_duration_sec <= max_dur + 5.0):
+            add_global_error(
+                f"Total estimated duration {total_est_duration_sec:.1f}s outside allowed range [{min_dur - 5.0:.1f}s, {max_dur + 5.0:.1f}s]"
+            )
 
     report["metrics"] = {
         "total_words": total_words,

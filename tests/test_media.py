@@ -1,5 +1,6 @@
 """Unit and integration tests for the Media Agent."""
 import json
+from pathlib import Path
 import subprocess
 from typing import Any
 import pytest
@@ -800,4 +801,111 @@ def test_media_agent_run_approval_fingerprint_gate(tmp_path):
     agent = MediaAgent(run_dir)
     outputs = agent.run(manifest)
     assert any("media_manifest.json" in out for out in outputs)
+
+
+def test_license_allowed_nasa_and_cc0(mock_media_config) -> None:
+    """Assert is_license_allowed('NASA media') and 'CC0 1.0 Universal' return True with allow_cc_by_sa=False."""
+    cache_mgr = MediaCacheManager()
+    selector = MediaSelector(mock_media_config, cache_mgr=cache_mgr)
+    selector.allow_cc_by_sa = False
+
+    assert selector.is_license_allowed("NASA media") is True
+    assert selector.is_license_allowed("CC0 1.0 Universal") is True
+    # CC BY-SA should be rejected when allow_cc_by_sa is False
+    assert selector.is_license_allowed("CC BY-SA 4.0") is False
+
+
+def test_apply_picks_classifies_jpg_url_as_image(tmp_path: Path, monkeypatch) -> None:
+    """Assert apply_picks() classifies .jpg URLs as images (type == 'image')."""
+    run_dir = tmp_path / "2026-11-20"
+    (run_dir / "script").mkdir(parents=True)
+    (run_dir / "script" / "script.json").write_text(json.dumps({
+        "origin": "fixture",
+        "date": "2026-11-20",
+        "scenes": [{"id": "scene_01", "type": "story", "headline": "Test Story"}],
+    }), encoding="utf-8")
+
+    (run_dir / "timeline").mkdir(parents=True)
+    (run_dir / "timeline" / "timeline.json").write_text(json.dumps({
+        "scenes": [{"id": "scene_01", "type": "story", "start": 0.0, "end": 5.0}],
+    }), encoding="utf-8")
+
+    # Create dummy local jpg file for simulated download
+    sample_jpg = tmp_path / "sample.jpg"
+    Image.new("RGB", (640, 360), (50, 100, 150)).save(str(sample_jpg))
+
+    # Mock download_file to return local sample_jpg
+    monkeypatch.setattr(
+        MediaCacheManager,
+        "download_file",
+        lambda self, url, target_filename=None, offline=False, max_size_mb=None: sample_jpg,
+    )
+
+    picks_data = {
+        "scene_01_00": {
+            "type": "link",
+            "url": "https://example.com/assets/city_view.jpg",
+            "author": "CityPhotographer",
+            "attribution": "City view via example.com",
+        }
+    }
+    picks_file = run_dir / "picks.json"
+    picks_file.write_text(json.dumps(picks_data), encoding="utf-8")
+
+    agent = MediaAgent(run_dir=run_dir, allow_fixture=True)
+    agent.apply_picks(picks_file)
+
+    manifest_file = run_dir / "media" / "media_manifest.json"
+    assert manifest_file.exists()
+    m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+    shots = m_data.get("shots", [])
+    assert len(shots) == 1
+    assert shots[0]["type"] == "image"
+    assert shots[0]["file"].endswith(".jpg")
+
+
+def test_media_cache_prune_retains_referenced_manifest_files(tmp_path: Path) -> None:
+    """Assert MediaCacheManager.prune_cache() retains files referenced by media_manifest.json."""
+    import time
+    cache_dir = tmp_path / "cache"
+    downloads_dir = cache_dir / "downloads"
+    downloads_dir.mkdir(parents=True)
+
+    # 1. Unreferenced old file (10 days old)
+    unref_file = downloads_dir / "old_unreferenced.mp4"
+    unref_file.write_bytes(b"dummy data unreferenced")
+    old_time = time.time() - 10 * 86400
+    import os
+    os.utime(str(unref_file), (old_time, old_time))
+
+    # 2. Referenced old file (10 days old, but listed in media_manifest.json)
+    ref_file = downloads_dir / "abc123def456.jpg"
+    ref_file.write_bytes(b"dummy data referenced")
+    os.utime(str(ref_file), (old_time, old_time))
+
+    # Setup runs_dir with media_manifest referencing ref_file
+    runs_dir = tmp_path / "runs"
+    run_media_dir = runs_dir / "2026-11-20" / "media"
+    run_media_dir.mkdir(parents=True)
+    manifest_data = {
+        "shots": [
+            {
+                "scene_id": "intro",
+                "shot_index": 0,
+                "sha256": "abc123def456",
+                "cache_key": "abc123def456",
+                "raw_path": "data/cache/downloads/abc123def456.jpg",
+            }
+        ]
+    }
+    (run_media_dir / "media_manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    mgr = MediaCacheManager(cache_dir=cache_dir)
+    res = mgr.prune_cache(runs_dir=runs_dir, keep_days=7)
+
+    # Assert unreferenced file was pruned, but referenced file was kept
+    assert not unref_file.exists()
+    assert ref_file.exists()
+    assert res["deleted_count"] == 1
+
 

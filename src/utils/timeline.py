@@ -212,14 +212,21 @@ def interpolate_unplaced_words(
             left_bound = min(pad_before, max(0.0, scene_duration - 0.1)) if scene_duration > 0 else 0.0
 
         if run_end < n:
-            right_bound = float(words[run_end]["start"])
+            max_right = float(words[run_end]["start"])
+            if max_right > left_bound:
+                right_bound = max_right
+            else:
+                # Next word starts at or before left_bound; preserve monotonicity
+                # by gently reclaiming room from left_bound
+                available_time = max(0.005 * run_len, 0.01)
+                right_bound = max_right
+                left_bound = max(0.0, right_bound - available_time)
         else:
             right_bound = max(left_bound + 0.1, scene_duration - pad_after)
             if scene_duration > 0:
                 right_bound = min(scene_duration, right_bound)
-
-        available_time = max(0.02 * run_len, right_bound - left_bound)
-        right_bound = left_bound + available_time
+            available_time = max(0.02 * run_len, right_bound - left_bound)
+            right_bound = left_bound + available_time
 
         run_slice = words[run_start:run_end]
         intervals = allocate_weighted_intervals(run_slice, left_bound, right_bound, active_ratio=1.0)
@@ -752,6 +759,11 @@ def chunk_scene_words_into_captions(
                         prev["end"] = round(c_start - min_gap_sec, 3)
 
                 prev["duration"] = round(prev["end"] - prev["start"], 3)
+                # Enforce minimum duration invariant
+                if prev["end"] <= prev["start"]:
+                    prev["end"] = round(prev["start"] + 0.05, 3)
+                    prev["duration"] = 0.05
+
                 # If capping reduced prev duration below max_cps or min_duration_sec,
                 # extend prev["start"] into preceding silence if available
                 prev_text_len = len(prev["text"].replace("\n", " "))
@@ -776,14 +788,20 @@ def chunk_scene_words_into_captions(
                         prev["start"] = round(prev["start"] - cede, 3)
                         prev["duration"] = round(prev["end"] - prev["start"], 3)
 
+                if prev["end"] <= prev["start"]:
+                    prev["end"] = round(prev["start"] + 0.05, 3)
+                    prev["duration"] = 0.05
+
             prev_limit = round(prev["end"] + min_gap_sec, 3)
 
         # If current duration is too short for max_cps, extend c_start into preceding silence
+        # Cap backward extension by both max_duration_sec and max early lead (0.5s)
         needed_dur = text_len / max_cps
         curr_dur = c_end - c_start
         if curr_dur < needed_dur and c_start > prev_limit:
             extra_needed = round(needed_dur - curr_dur, 3)
-            lead_extra = min(round(c_start - prev_limit, 3), extra_needed)
+            max_lead = min(0.5, max(0.0, round(max_duration_sec - curr_dur, 3)))
+            lead_extra = min(round(c_start - prev_limit, 3), extra_needed, max_lead)
             c_start = round(c_start - lead_extra, 3)
             curr_dur = c_end - c_start
 
@@ -795,7 +813,8 @@ def chunk_scene_words_into_captions(
             prev_min_dur = max(min_duration_sec, prev_text_len / max_cps)
             prev_slack = max(0.0, round(prev["end"] - max(prev_raw_end, prev["start"] + prev_min_dur), 3))
             extra_needed = round(needed_dur - curr_dur, 3)
-            cede = min(prev_slack, extra_needed)
+            max_lead = min(0.5, max(0.0, round(max_duration_sec - curr_dur, 3)))
+            cede = min(prev_slack, extra_needed, max_lead)
             if cede > 0:
                 prev["end"] = round(prev["end"] - cede, 3)
                 prev["duration"] = round(prev["end"] - prev["start"], 3)
@@ -806,10 +825,8 @@ def chunk_scene_words_into_captions(
 
         # Invariant checks
         if c_start >= c_end:
-            raise ValueError(
-                f"Invalid cue timing in scene '{scene_id}': start ({c_start}s) >= end ({c_end}s) "
-                f"for text: {repr(text)}"
-            )
+            c_end = round(c_start + 0.05, 3)
+            c_dur = 0.05
 
         captions.append({
             "id": curr_id,
@@ -908,6 +925,38 @@ def validate_srt_syntax(srt_content: str) -> tuple[bool, str | None]:
     return True, None
 
 
+def parse_srt(srt_text: str) -> list[dict[str, Any]]:
+    """Parses an SRT format string into caption dictionaries."""
+    blocks = srt_text.strip().replace("\r\n", "\n").split("\n\n")
+    captions = []
+    for b in blocks:
+        lines = [line.strip() for line in b.split("\n") if line.strip()]
+        if len(lines) < 3:
+            continue
+        try:
+            cid = int(lines[0])
+        except ValueError:
+            cid = len(captions) + 1
+        time_match = re.match(
+            r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})$",
+            lines[1],
+        )
+        if not time_match:
+            continue
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = map(int, time_match.groups())
+        start_sec = round(((h1 * 60 + m1) * 60 + s1) + ms1 / 1000.0, 3)
+        end_sec = round(((h2 * 60 + m2) * 60 + s2) + ms2 / 1000.0, 3)
+        text = "\n".join(lines[2:])
+        captions.append({
+            "id": cid,
+            "start": start_sec,
+            "end": end_sec,
+            "duration": round(end_sec - start_sec, 3),
+            "text": text,
+        })
+    return captions
+
+
 def audit_captions(
     captions: list[dict[str, Any]],
     scenes: list[dict[str, Any]] | None = None,
@@ -945,6 +994,7 @@ def audit_captions(
     word_cons_errors = 0
 
     prev_by_scene: dict[str, dict[str, Any]] = {}
+    global_prev_c: dict[str, Any] | None = None
 
     for c in captions:
         cid = c.get("id")
@@ -1010,11 +1060,13 @@ def audit_captions(
                 violations.append(v)
                 sc_stat["violations_count"] += 1
 
-        # 3. Overlaps
+        # 3. Overlaps (checked within scene and across scene boundaries)
+        has_overlap = False
         if sc_id in prev_by_scene:
             prev_c = prev_by_scene[sc_id]
             prev_end = float(prev_c.get("end", 0.0))
             if start < prev_end - 0.001:
+                has_overlap = True
                 overlap_count += 1
                 sc_stat["overlaps"] += 1
                 v = {
@@ -1025,7 +1077,23 @@ def audit_captions(
                 }
                 violations.append(v)
                 sc_stat["violations_count"] += 1
+        elif global_prev_c is not None:
+            prev_end = float(global_prev_c.get("end", 0.0))
+            if start < prev_end - 0.001:
+                has_overlap = True
+                overlap_count += 1
+                sc_stat["overlaps"] += 1
+                v = {
+                    "caption_id": cid,
+                    "scene_id": sc_id,
+                    "type": "overlap",
+                    "detail": f"Caption start ({start}s) overlaps across scene boundary with caption {global_prev_c.get('id')} ({global_prev_c.get('scene_id')}) end ({prev_end}s)",
+                }
+                violations.append(v)
+                sc_stat["violations_count"] += 1
+
         prev_by_scene[sc_id] = c
+        global_prev_c = c
 
         # 4. Duration limits
         if duration < min_duration_sec - 0.05:
@@ -1157,8 +1225,8 @@ def generate_timeline_preview_video(
     """Generates 1280x720 preview video with burned-in captions using fast encoding settings."""
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
 
-    rel_narration = os.path.relpath(narration_path, output_mp4.parent)
-    rel_srt = os.path.relpath(srt_path, output_mp4.parent)
+    rel_narration = os.path.relpath(narration_path, output_mp4.parent).replace("\\", "/")
+    rel_srt = os.path.relpath(srt_path, output_mp4.parent).replace("\\", "/").replace(":", "\\:")
 
     # Force style for crisp readable subtitles
     style = (

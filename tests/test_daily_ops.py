@@ -168,6 +168,9 @@ def test_finish_runs_media_auto_status_and_latest(tmp_path: Path, monkeypatch: p
     pipe_text = pipe_text.replace(
         "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest",
         mirror_dir.as_posix(),
+    ).replace(
+        "~/OneDrive/NepalNewsBot/latest",
+        mirror_dir.as_posix(),
     )
     (cfg_dir / "pipeline.yaml").write_text(pipe_text, encoding="utf-8")
 
@@ -1021,14 +1024,49 @@ def test_schedule_install_dry_run_powershell() -> None:
     out = proc.stdout
     assert "NepalNewsBot-Morning" in out
     assert "07:00" in out
+    assert "NepalNewsBot-Cleanup" in out
+    assert "03:00" in out
+    assert "run_daily.py --cleanup --keep-runs 14" in out
     assert "python.exe" in out
     assert "run_daily.py --morning" in out
     assert "logs\\morning_" in out
+    assert "logs\\cleanup_" in out
     assert "StartWhenAvailable" in out
     assert "WakeToRun" in out
     assert "Interactive" in out
     assert "C:\\news-auto" in out
     assert "DRY RUN" in out
+
+
+def test_atomic_mirror_deliverables_copy(tmp_path: Path) -> None:
+    from src.utils.daily_ops import _copy_latest_deliverables_to_dir
+
+    src = tmp_path / "src"
+    dst = tmp_path / "mirror"
+    src.mkdir()
+    dst.mkdir()
+
+    (src / "final.mp4").write_bytes(b"TEST_MP4_CONTENT")
+    (src / "description.md").write_text("# Title\nContent", encoding="utf-8")
+    (src / "shorts_caption.txt").write_text("Hook Line\n#Nepal", encoding="utf-8")
+    frames_dir = src / "storyboard_frames"
+    frames_dir.mkdir()
+    (frames_dir / "f1.jpg").write_bytes(b"FRAME1")
+
+    # Leave a dangling .tmp file in dst to verify cleanup
+    (dst / "stale.tmp").write_text("old tmp", encoding="utf-8")
+
+    mirrored = _copy_latest_deliverables_to_dir(src, dst)
+    assert "final.mp4" in mirrored
+    assert "description.md" in mirrored
+    assert "shorts_caption.txt" in mirrored
+    assert "storyboard_frames/" in mirrored
+
+    # Ensure no *.tmp files remain in dst
+    assert list(dst.glob("*.tmp")) == []
+    assert (dst / "final.mp4").read_bytes() == b"TEST_MP4_CONTENT"
+    assert (dst / "shorts_caption.txt").read_text(encoding="utf-8") == "Hook Line\n#Nepal"
+    assert (dst / "storyboard_frames" / "f1.jpg").read_bytes() == b"FRAME1"
 
 
 # ---------------------------------------------------------------------------
@@ -1122,6 +1160,9 @@ def test_finish_is_idempotent_unless_forced_and_still_checks_gate(tmp_path: Path
     pipe_text = (cfg_dir / "pipeline.yaml").read_text(encoding="utf-8")
     pipe_text = pipe_text.replace(
         "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest",
+        mirror_dir.as_posix(),
+    ).replace(
+        "~/OneDrive/NepalNewsBot/latest",
         mirror_dir.as_posix(),
     )
     (cfg_dir / "pipeline.yaml").write_text(pipe_text, encoding="utf-8")
@@ -1218,17 +1259,26 @@ def test_source_health_statuses_degraded_two_runs_and_non_blocking(tmp_path: Pat
             "date": day,
             "run_kind": "test",
             "status": "paused",
+            "created_at": f"{day}T07:00:00+05:45",
             "updated_at": f"{day}T07:05:00+05:45",
             "stages": {
                 "scraper": {
                     "status": "done",
+                    "retry_count": 0,
+                    "input_files": ["config/sources.yaml"],
+                    "output_files": ["raw/articles.json"],
                     "metrics": {
                         "total_articles": sum(v.get("extracted_ok", 0) for v in per_source_stats.values()),
                         "per_source_stats": per_source_stats,
                     },
                     "source_errors": source_errors or {},
                 },
-                "editor": {"status": "prepared"},
+                "editor": {
+                    "status": "prepared",
+                    "retry_count": 0,
+                    "input_files": ["raw/articles.json"],
+                    "output_files": ["script/script.json"],
+                },
             },
         }
         (rdir / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
@@ -1350,6 +1400,7 @@ def test_source_health_statuses_degraded_two_runs_and_non_blocking(tmp_path: Pat
         seen_titles,
         default_language="en",
         lookback_seconds=30 * 3600,
+        **kwargs,
     ):
         name = source["name"]
         if name == "StaleFeed":
@@ -1409,6 +1460,9 @@ def test_publish_to_latest_mirrors_and_replaces_stale_files(tmp_path: Path) -> N
     mirror_dir = tmp_path / "OneDrive" / "NepalNewsBot" / "latest"
     pipe_text = (cfg_dir / "pipeline.yaml").read_text(encoding="utf-8").replace(
         "C:/Users/Chungba Sherpa/OneDrive/NepalNewsBot/latest",
+        mirror_dir.as_posix(),
+    ).replace(
+        "~/OneDrive/NepalNewsBot/latest",
         mirror_dir.as_posix(),
     )
     (cfg_dir / "pipeline.yaml").write_text(pipe_text, encoding="utf-8")

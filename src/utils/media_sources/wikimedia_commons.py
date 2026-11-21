@@ -17,6 +17,11 @@ def clean_html(raw_html: str) -> str:
     return " ".join(clean.split()).strip()
 
 
+SA_PATTERN = re.compile(r"(?:^|[\s\-_/])(sa|sharealike)(?:$|[\s\-_/0-9])")
+NC_PATTERN = re.compile(r"(?:^|[\s\-_/])(nc|noncommercial)(?:$|[\s\-_/0-9])")
+ND_PATTERN = re.compile(r"(?:^|[\s\-_/])(nd|noderivs)(?:$|[\s\-_/0-9])")
+
+
 class WikimediaCommonsSource(BaseMediaSource):
     """Fetches Nepal-specific images and videos from Wikimedia Commons."""
 
@@ -124,11 +129,10 @@ class WikimediaCommonsSource(BaseMediaSource):
                 continue
 
             # Enforce license policies
-            lic_upper = lic_short.upper()
-            if "SA" in lic_upper or "SHAREALIKE" in lic_upper:
+            if SA_PATTERN.search(lic_clean):
                 if not allow_cc_by_sa:
                     continue
-            if "NC" in lic_upper or "NONCOMMERCIAL" in lic_upper or "ND" in lic_upper:
+            if NC_PATTERN.search(lic_clean) or ND_PATTERN.search(lic_clean):
                 continue
 
             # Sensitive check

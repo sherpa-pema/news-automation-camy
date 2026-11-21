@@ -56,7 +56,13 @@ def estimate_scene_duration_sec(narration: str, budget: dict[str, Any]) -> float
     text = (narration or "").strip()
     if not text:
         return 0.0
-    words = len(text.split())
+    try:
+        from src.utils.text_normalizer import normalize_for_speech
+        spoken_text = normalize_for_speech(text)
+    except Exception:
+        spoken_text = text
+
+    words = len(spoken_text.split())
     if words == 0:
         return 0.0
 
@@ -65,8 +71,8 @@ def estimate_scene_duration_sec(narration: str, budget: dict[str, Any]) -> float
     comma_pause = float(budget.get("comma_pause_sec", DEFAULT_COMMA_PAUSE_SEC))
     period_pause = float(budget.get("period_pause_sec", DEFAULT_PERIOD_PAUSE_SEC))
 
-    syllables = count_syllables_in_text(text)
-    commas, periods = count_punctuation_pauses(text)
+    syllables = count_syllables_in_text(spoken_text)
+    commas, periods = count_punctuation_pauses(spoken_text)
 
     word_dur = words / wps
     syl_pause_dur = (syllables / sps) + (commas * comma_pause) + (periods * period_pause)
@@ -97,48 +103,70 @@ def calculate_words_per_second_details(
             "message": msg,
         }
 
-    # Pick the most recently modified report
+    # Pick the most recently modified report that has a full broadcast duration (>= 60s)
     voice_reports.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    newest_report = voice_reports[0]
+
+    v_data = None
+    newest_report = None
+    total_audio_sec = 0.0
+
+    for r_path in voice_reports:
+        try:
+            with open(r_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            dur = float(data.get("total_audio_duration_sec", 0.0))
+            if dur >= 60.0:
+                v_data = data
+                newest_report = r_path
+                total_audio_sec = dur
+                break
+            elif dur > 0.0 and v_data is None:
+                # Keep candidate report if no full report >= 60s is available
+                v_data = data
+                newest_report = r_path
+                total_audio_sec = dur
+        except Exception:
+            continue
+
+    if v_data is None or newest_report is None or total_audio_sec <= 0.0:
+        msg = f"Default estimate: {default_wps:.2f} wps / {default_sps:.2f} sps (no valid voice report found)"
+        return {
+            "words_per_second": default_wps,
+            "syllables_per_second": default_sps,
+            "comma_pause_sec": comma_pause_sec,
+            "period_pause_sec": period_pause_sec,
+            "source": "default",
+            "source_file": str(voice_reports[0]) if voice_reports else None,
+            "calculation": f"default = {default_wps:.2f} words/sec, {default_sps:.2f} syl/sec",
+            "message": msg,
+        }
 
     try:
-        with open(newest_report, "r", encoding="utf-8") as f:
-            v_data = json.load(f)
-
-        total_audio_sec = float(v_data.get("total_audio_duration_sec", 0.0))
-        if total_audio_sec <= 0:
-            msg = f"Default estimate: {default_wps:.2f} wps / {default_sps:.2f} sps (voice report had zero duration)"
-            return {
-                "words_per_second": default_wps,
-                "syllables_per_second": default_sps,
-                "comma_pause_sec": comma_pause_sec,
-                "period_pause_sec": period_pause_sec,
-                "source": "default",
-                "source_file": newest_report.as_posix(),
-                "calculation": f"default = {default_wps:.2f} words/sec, {default_sps:.2f} syl/sec (voice report had zero duration)",
-                "message": msg,
-            }
-
         # Find corresponding script.json to count actual words & syllables
         run_folder = newest_report.parent.parent
         script_candidates = [
             run_folder / "script" / "script.json",
             run_folder / "script.json",
-            Path("tests/fixtures/sample_script.json"),
         ]
         total_words = 0
         total_syllables = 0
         total_commas = 0
         total_periods = 0
+        try:
+            from src.utils.text_normalizer import normalize_for_speech
+        except Exception:
+            normalize_for_speech = lambda t: t
+
         for sc_p in script_candidates:
             if sc_p.exists():
                 with open(sc_p, "r", encoding="utf-8") as sf:
                     s_data = json.load(sf)
                 scenes = s_data.get("scenes", [])
-                total_words = sum(len(sc.get("narration", "").split()) for sc in scenes)
-                total_syllables = sum(count_syllables_in_text(sc.get("narration", "")) for sc in scenes)
                 for sc in scenes:
-                    c, p = count_punctuation_pauses(sc.get("narration", ""))
+                    spoken = sc.get("spoken_text") or normalize_for_speech(sc.get("narration", ""))
+                    total_words += len(spoken.split())
+                    total_syllables += count_syllables_in_text(spoken)
+                    c, p = count_punctuation_pauses(spoken)
                     total_commas += c
                     total_periods += p
                 break
@@ -147,7 +175,8 @@ def calculate_words_per_second_details(
             wps = round(total_words / total_audio_sec, 2)
             pause_sec = (total_commas * comma_pause_sec) + (total_periods * period_pause_sec)
             active_speech_sec = max(total_audio_sec - pause_sec, total_audio_sec * 0.5)
-            sps = round(total_syllables / active_speech_sec, 2) if total_syllables > 0 else default_sps
+            raw_sps = round(total_syllables / active_speech_sec, 2) if total_syllables > 0 else default_sps
+            sps = max(raw_sps, round(wps * 1.5, 2), default_sps) if total_syllables > 0 else default_sps
             try:
                 rel_report = newest_report.relative_to(runs_path.parent)
             except ValueError:
@@ -192,15 +221,41 @@ def calculate_words_per_second(runs_dir: Path | str = "data/runs", default_wps: 
 
 def compute_word_budget(
     wps: float,
-    min_sec: float = 120.0,
-    max_sec: float = 180.0,
-    target_sec: float = 150.0,
-    tolerance_pct: float = 0.10,
+    min_sec: float | None = None,
+    max_sec: float | None = None,
+    target_sec: float | None = None,
+    tolerance_pct: float | None = None,
     sps: float = DEFAULT_SYLLABLES_PER_SEC,
     comma_pause_sec: float = DEFAULT_COMMA_PAUSE_SEC,
     period_pause_sec: float = DEFAULT_PERIOD_PAUSE_SEC,
+    editor_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Computes total word budget and scene targets for target audio duration."""
+    b_cfg = {}
+    if editor_cfg and "budget" in editor_cfg:
+        b_cfg = editor_cfg["budget"]
+    else:
+        try:
+            import yaml
+            ed_path = Path("config/editor.yaml")
+            if ed_path.exists():
+                b_cfg = (yaml.safe_load(ed_path.read_text(encoding="utf-8")) or {}).get("budget", {})
+        except Exception:
+            b_cfg = {}
+
+    min_sec = float(min_sec if min_sec is not None else b_cfg.get("min_duration_sec", 120.0))
+    max_sec = float(max_sec if max_sec is not None else b_cfg.get("max_duration_sec", 180.0))
+    target_sec = float(target_sec if target_sec is not None else b_cfg.get("target_duration_sec", 150.0))
+    tolerance_pct = float(tolerance_pct if tolerance_pct is not None else b_cfg.get("tolerance_pct", 0.10))
+
+    sc_cfg = b_cfg.get("scenes", {})
+    intro_min = int(sc_cfg.get("intro_min_words", 12))
+    intro_max = int(sc_cfg.get("intro_max_words", 25))
+    story_min = int(sc_cfg.get("story_min_words", 10))
+    story_max = int(sc_cfg.get("story_max_words", 25))
+    outro_min = int(sc_cfg.get("outro_min_words", 12))
+    outro_max = int(sc_cfg.get("outro_max_words", 25))
+
     target_words = round(target_sec * wps)
     min_total_words = round(min_sec * wps * (1.0 - tolerance_pct))
     max_total_words = round(max_sec * wps * (1.0 + tolerance_pct))
@@ -217,8 +272,8 @@ def compute_word_budget(
         "max_total_words": max_total_words,
         "tolerance_pct": tolerance_pct,
         "scene_targets": {
-            "intro": {"min_words": 12, "max_words": 25, "target_words": 18},
-            "story": {"min_words": 10, "max_words": 25, "target_words": 16, "count": 20},
-            "outro": {"min_words": 12, "max_words": 25, "target_words": 18},
+            "intro": {"min_words": intro_min, "max_words": intro_max, "target_words": round((intro_min + intro_max) / 2)},
+            "story": {"min_words": story_min, "max_words": story_max, "target_words": round((story_min + story_max) / 2), "count": 20},
+            "outro": {"min_words": outro_min, "max_words": outro_max, "target_words": round((outro_min + outro_max) / 2)},
         },
     }

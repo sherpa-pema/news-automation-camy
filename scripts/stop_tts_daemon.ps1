@@ -32,8 +32,13 @@ try {
     $running = $false
 }
 
+# Fallback to killing PID from pidfile if still running
 if (Test-Path "logs/tts_daemon.pid") {
-    Remove-Item "logs/tts_daemon.pid" -Force
+    $savedPid = Get-Content "logs/tts_daemon.pid" -ErrorAction SilentlyContinue
+    if ($savedPid) {
+        Stop-Process -Id ([int]$savedPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item "logs/tts_daemon.pid" -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "[stop_tts_daemon] TTS Daemon stopped successfully."

@@ -2405,6 +2405,74 @@ def test_rank_clusters_with_diversity_matches_naive_greedy():
     assert [c["id"] for c in fast_ranked] == naive_order
 
 
+def test_spoken_text_allows_digits_in_narration_display(tmp_path):
+    """When spoken_text is provided, narration may contain digits/symbols; spoken_text must not."""
+    cluster = [
+        {"cluster_id": "c1", "urls": ["https://example.com/story"], "articles": [{"url": "https://example.com/story", "full_text": "Road project cost 1,50,000 rupees."}]}
+    ]
+    shortlist_p = tmp_path / "shortlist.json"
+    shortlist_p.write_text(json.dumps(cluster), encoding="utf-8")
+
+    draft = _make_7_scene_draft(
+        story_overrides={
+            1: {
+                "narration": "Officials allocated 1,50,000 rupees ($1,100) for road repair work in Pokhara today. Engineers confirmed that construction will begin promptly.",
+                "spoken_text": "Officials allocated one lakh fifty thousand rupees for road repair work in Pokhara today. Engineers confirmed that construction will begin promptly.",
+            }
+        }
+    )
+    draft_p = tmp_path / "draft.json"
+    draft_p.write_text(json.dumps(draft), encoding="utf-8")
+    budget = compute_word_budget(2.15)
+
+    is_valid, errors, warnings, report = validate_script_draft(draft_p, shortlist_p, budget)
+    assert is_valid is True, f"Expected pass with valid spoken_text, got errors: {errors}"
+
+    # If spoken_text itself has digits, it must fail
+    draft["scenes"][1]["spoken_text"] = "Officials allocated 150000 rupees for road repair work in Pokhara today."
+    draft_p.write_text(json.dumps(draft), encoding="utf-8")
+    is_valid, errors, _, _ = validate_script_draft(draft_p, shortlist_p, budget)
+    assert is_valid is False
+    assert any("Digits found in spoken_text" in e for e in errors)
+
+
+def test_duplicate_cluster_rejection_when_shortlist_sufficient(tmp_path):
+    """When shortlist has sufficient clusters (len >= story_count), duplicate cluster_id is rejected."""
+    cluster = [
+        {"cluster_id": f"c_{i}", "urls": [f"https://news.com/{i}"], "articles": [{"url": f"https://news.com/{i}", "full_text": "Content here."}]}
+        for i in range(1, 7)
+    ]
+    shortlist_p = tmp_path / "shortlist.json"
+    shortlist_p.write_text(json.dumps(cluster), encoding="utf-8")
+
+    # Override scene 2 to use same URL/cluster as scene 1
+    draft = _make_7_scene_draft(
+        story_overrides={
+            1: {"source_urls": ["https://news.com/1"]},
+            2: {"source_urls": ["https://news.com/1"]},
+            3: {"source_urls": ["https://news.com/3"]},
+            4: {"source_urls": ["https://news.com/4"]},
+            5: {"source_urls": ["https://news.com/5"]},
+        }
+    )
+    draft_p = tmp_path / "draft.json"
+    draft_p.write_text(json.dumps(draft), encoding="utf-8")
+    budget = compute_word_budget(2.15)
+
+    is_valid, errors, _, _ = validate_script_draft(draft_p, shortlist_p, budget)
+    assert is_valid is False
+    assert any("Duplicate story scene for cluster 'c_1'" in e for e in errors)
+
+
+def test_south_asian_comma_number_extraction():
+    """Verify numbers with South Asian grouping (1,50,000) are extracted accurately."""
+    from src.utils.editor_validator import extract_numbers_from_text
+    nums = extract_numbers_from_text("The total cost was 1,50,000 rupees and 25,00,000 for phase two.")
+    assert 150000.0 in nums
+    assert 2500000.0 in nums
+
+
+
 
 
 

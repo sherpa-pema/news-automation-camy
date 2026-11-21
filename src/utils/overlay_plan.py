@@ -27,6 +27,8 @@ STOCK_SOURCES: tuple[str, ...] = (
     "openverse",
     "nasa",
     "internet_archive",
+    "unsplash",
+    "pexels",
 )
 
 # 2. Timing Formulas & Constants (in seconds)
@@ -177,16 +179,15 @@ def build_scene_overlays(
 
         if overlays_dir is not None:
             png_path = overlays_dir / png_name
-            if not png_path.exists():
-                png_path.parent.mkdir(parents=True, exist_ok=True)
-                draw_title_card(
-                    channel_name=channel_name,
-                    date_str=date_display_str or "Daily Briefing",
-                    output_path=png_path,
-                    width=title_rect["w"],
-                    height=title_rect["h"],
-                    font_candidates=font_cands,
-                )
+            png_path.parent.mkdir(parents=True, exist_ok=True)
+            draw_title_card(
+                channel_name=channel_name,
+                date_str=date_display_str or "Daily Briefing",
+                output_path=png_path,
+                width=title_rect["w"],
+                height=title_rect["h"],
+                font_candidates=font_cands,
+            )
 
         overlays.append({
             "id": f"{scene_id}_title_card",
@@ -212,15 +213,14 @@ def build_scene_overlays(
 
         if overlays_dir is not None:
             png_path = overlays_dir / png_name
-            if not png_path.exists():
-                png_path.parent.mkdir(parents=True, exist_ok=True)
-                draw_outro_card(
-                    channel_name=channel_name,
-                    output_path=png_path,
-                    width=outro_rect["w"],
-                    height=outro_rect["h"],
-                    font_candidates=font_cands,
-                )
+            png_path.parent.mkdir(parents=True, exist_ok=True)
+            draw_outro_card(
+                channel_name=channel_name,
+                output_path=png_path,
+                width=outro_rect["w"],
+                height=outro_rect["h"],
+                font_candidates=font_cands,
+            )
 
         overlays.append({
             "id": f"{scene_id}_outro_card",
@@ -254,18 +254,17 @@ def build_scene_overlays(
 
             if overlays_dir is not None:
                 png_path = overlays_dir / png_name
-                if not png_path.exists():
-                    png_path.parent.mkdir(parents=True, exist_ok=True)
-                    draw_stat_callout(
-                        stat_value=recipe_data.get("value", ""),
-                        stat_label=recipe_data.get("label", headline),
-                        stat_delta=recipe_data.get("delta"),
-                        source_credit=credit_label,
-                        output_path=png_path,
-                        width=stat_rect["w"],
-                        height=stat_rect["h"],
-                        font_candidates=font_cands,
-                    )
+                png_path.parent.mkdir(parents=True, exist_ok=True)
+                draw_stat_callout(
+                    stat_value=recipe_data.get("value", ""),
+                    stat_label=recipe_data.get("label", headline),
+                    stat_delta=recipe_data.get("delta"),
+                    source_credit=credit_label,
+                    output_path=png_path,
+                    width=stat_rect["w"],
+                    height=stat_rect["h"],
+                    font_candidates=font_cands,
+                )
 
             overlays.append({
                 "id": f"{scene_id}_stat_callout",
@@ -294,18 +293,17 @@ def build_scene_overlays(
 
             if overlays_dir is not None:
                 png_path = overlays_dir / png_name
-                if not png_path.exists():
-                    png_path.parent.mkdir(parents=True, exist_ok=True)
-                    draw_quote_card(
-                        quote_text=recipe_data.get("quote", ""),
-                        speaker_name=recipe_data.get("speaker", "Official Statement"),
-                        speaker_title=recipe_data.get("title"),
-                        source_credit=credit_label,
-                        output_path=png_path,
-                        width=quote_rect["w"],
-                        height=quote_rect["h"],
-                        font_candidates=font_cands,
-                    )
+                png_path.parent.mkdir(parents=True, exist_ok=True)
+                draw_quote_card(
+                    quote_text=recipe_data.get("quote", ""),
+                    speaker_name=recipe_data.get("speaker", "Official Statement"),
+                    speaker_title=recipe_data.get("title"),
+                    source_credit=credit_label,
+                    output_path=png_path,
+                    width=quote_rect["w"],
+                    height=quote_rect["h"],
+                    font_candidates=font_cands,
+                )
 
             overlays.append({
                 "id": f"{scene_id}_quote_card",
@@ -334,18 +332,17 @@ def build_scene_overlays(
 
             if overlays_dir is not None:
                 png_path = overlays_dir / png_name
-                if not png_path.exists():
-                    png_path.parent.mkdir(parents=True, exist_ok=True)
-                    draw_headline_split(
-                        kicker=recipe_data.get("kicker", "DEVELOPING"),
-                        headline=headline,
-                        bullets=recipe_data.get("bullets", []),
-                        source_credit=credit_label,
-                        output_path=png_path,
-                        width=split_rect["w"],
-                        height=split_rect["h"],
-                        font_candidates=font_cands,
-                    )
+                png_path.parent.mkdir(parents=True, exist_ok=True)
+                draw_headline_split(
+                    kicker=recipe_data.get("kicker", "DEVELOPING"),
+                    headline=headline,
+                    bullets=recipe_data.get("bullets", []),
+                    source_credit=credit_label,
+                    output_path=png_path,
+                    width=split_rect["w"],
+                    height=split_rect["h"],
+                    font_candidates=font_cands,
+                )
 
             overlays.append({
                 "id": f"{scene_id}_headline_split",
@@ -375,16 +372,15 @@ def build_scene_overlays(
 
             if overlays_dir is not None:
                 png_path = overlays_dir / png_name
-                if not png_path.exists():
-                    png_path.parent.mkdir(parents=True, exist_ok=True)
-                    draw_lower_third(
-                        headline=headline,
-                        source_text=credit_label,
-                        output_path=png_path,
-                        width=lt_rect["w"],
-                        height=lt_rect["h"],
-                        font_candidates=font_cands,
-                    )
+                png_path.parent.mkdir(parents=True, exist_ok=True)
+                draw_lower_third(
+                    headline=headline,
+                    source_text=credit_label,
+                    output_path=png_path,
+                    width=lt_rect["w"],
+                    height=lt_rect["h"],
+                    font_candidates=font_cands,
+                )
 
             overlays.append({
                 "id": f"{scene_id}_lower_third",
@@ -412,14 +408,13 @@ def build_scene_overlays(
 
             if overlays_dir is not None:
                 png_path = overlays_dir / png_name
-                if not png_path.exists():
-                    png_path.parent.mkdir(parents=True, exist_ok=True)
-                    draw_illustrative_tag(
-                        output_path=png_path,
-                        width=tag_rect["w"],
-                        height=tag_rect["h"],
-                        font_candidates=font_cands,
-                    )
+                png_path.parent.mkdir(parents=True, exist_ok=True)
+                draw_illustrative_tag(
+                    output_path=png_path,
+                    width=tag_rect["w"],
+                    height=tag_rect["h"],
+                    font_candidates=font_cands,
+                )
 
             overlays.append({
                 "id": f"{scene_id}_illustrative_tag",
@@ -488,9 +483,8 @@ def build_all_overlays(
     if watermark_enabled and run_kind != "production":
         test_rect = rects.get("test_run_tag", {"x": 48, "y": 48, "w": 280, "h": 48})
         test_png = overlays_dir / "test_run_tag.png"
-        if not test_png.exists():
-            test_png.parent.mkdir(parents=True, exist_ok=True)
-            draw_test_run_tag(test_png, width=test_rect["w"], height=test_rect["h"], font_candidates=font_candidates)
+        test_png.parent.mkdir(parents=True, exist_ok=True)
+        draw_test_run_tag(test_png, width=test_rect["w"], height=test_rect["h"], font_candidates=font_candidates)
         all_overlays.append({
             "id": "global_test_tag",
             "scene_id": None,

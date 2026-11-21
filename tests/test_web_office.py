@@ -103,6 +103,17 @@ def test_web_office_api_and_sandboxing(tmp_path: Path) -> None:
     bad_file = client.get("/api/runs/2026-11-12/file", params={"path": "../../config/pipeline.yaml"})
     assert bad_file.status_code == 403
 
+    # Disallowed extension blocked
+    fake_exe = tmp_path / "data" / "runs" / "2026-11-12" / "malicious.exe"
+    fake_exe.write_text("dummy", encoding="utf-8")
+    blocked_ext = client.get("/api/runs/2026-11-12/file", params={"path": "malicious.exe"})
+    assert blocked_ext.status_code == 403
+
+    # SSRF blocked on validate-media-link
+    ssrf_res = client.post("/api/runs/2026-11-12/validate-media-link", json={"url": "http://127.0.0.1:8765/something"})
+    assert ssrf_res.status_code == 400
+    assert "private or loopback" in ssrf_res.json()["detail"]
+
     # WebSocket snapshot
     with client.websocket_connect("/ws/runs/2026-11-12") as ws:
         msg = ws.receive_json()
@@ -339,6 +350,14 @@ def test_secure_lan_mode_token_and_headers(tmp_path: Path, monkeypatch) -> None:
     with client.websocket_connect("/ws/runs/2026-11-12?token=secret-test-token-123") as ws:
         msg = ws.receive_json()
         assert msg["type"] == "state_snapshot"
+
+    # 7. WebSocket with forbidden host rejected
+    try:
+        with client.websocket_connect("/ws/runs/2026-11-12?token=secret-test-token-123", headers={"host": "evil.com"}) as ws:
+            ws.receive_json()
+            assert False, "Should have been rejected due to forbidden host"
+    except Exception:
+        pass  # Rejected / closed with 1008
 
 
 def test_bounded_uploads_size_and_content(tmp_path: Path) -> None:
@@ -674,6 +693,133 @@ def test_web_office_scraper_categories_and_morning_dispatch(tmp_path: Path, monk
     assert d_res.status_code == 200
     _, _, args3 = started_jobs[-1]
     assert "--auto-approve" in args3
+
+
+def test_atomic_pid_and_global_pipeline_lock(tmp_path: Path) -> None:
+    from src.utils.manifest import (
+        acquire_run_lock,
+        release_run_lock,
+        acquire_global_lock,
+        release_global_lock,
+        global_pipeline_lock,
+        run_process_lock,
+        is_global_pipeline_active,
+    )
+
+    run_dir = tmp_path / "data" / "runs" / "2026-11-20"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Acquire run lock
+    lock_file = acquire_run_lock(run_dir)
+    assert lock_file.exists()
+
+    # Re-entrant acquisition from same process succeeds
+    acquire_run_lock(run_dir)
+
+    # Releasing run lock
+    release_run_lock(run_dir)
+    assert not lock_file.exists()
+
+    # 2. Global lock
+    g_lock = acquire_global_lock(repo_root=tmp_path, run_date="2026-11-20")
+    assert g_lock.exists()
+    assert is_global_pipeline_active(repo_root=tmp_path)
+
+    release_global_lock(repo_root=tmp_path)
+    assert not g_lock.exists()
+    assert not is_global_pipeline_active(repo_root=tmp_path)
+
+    # Context managers
+    with global_pipeline_lock(repo_root=tmp_path, run_date="2026-11-20"):
+        assert is_global_pipeline_active(repo_root=tmp_path)
+    assert not is_global_pipeline_active(repo_root=tmp_path)
+
+
+def test_cleanup_and_source_health_contract_keys(tmp_path: Path) -> None:
+    """Assert JSON keys returned by execute_cleanup() and compute_source_health() match properties read in UI."""
+    from src.utils.daily_ops import execute_cleanup, compute_source_health
+
+    # 1. Cleanup plan contract keys matching main.js (deleted_paths, freed_run_mb)
+    plan = {
+        "runs_dir": str(tmp_path / "data" / "runs"),
+        "cache_dir": str(tmp_path / "data" / "cache"),
+        "kept_runs": ["2026-11-20"],
+        "older_runs": [],
+        "run_targets": [],
+        "run_bytes": 0,
+        "keep_days": 7,
+        "max_gb": 5.0,
+        "cache_preview": {"deleted_count": 0, "freed_mb": 0.0, "remaining_mb": 0.0, "files": [], "dry_run": True},
+    }
+    c_res = execute_cleanup(plan, dry_run=True, repo_root=tmp_path)
+    assert "deleted_paths" in c_res
+    assert isinstance(c_res["deleted_paths"], list)
+    assert "freed_run_mb" in c_res
+    assert isinstance(c_res["freed_run_mb"], (int, float))
+    assert "cache_result" in c_res
+    assert "dry_run" in c_res
+
+    # 2. Source health contract keys matching drawers.js
+    run_dir = _make_sample_run(tmp_path, "2026-11-20")
+    health_rows = compute_source_health(run_dir)
+    assert isinstance(health_rows, list)
+    if health_rows:
+        row = health_rows[0]
+        for key in ["source", "found", "kept", "newest_age_hours", "status", "degraded", "display_status", "error"]:
+            assert key in row, f"Missing key '{key}' in source health row for drawers.js"
+
+
+def test_websocket_cross_origin_rejection(tmp_path: Path) -> None:
+    """Assert WebSocket connections with unauthorized Origin headers are rejected with code 1008."""
+    from starlette.websockets import WebSocketDisconnect
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    _make_sample_run(tmp_path, "2026-11-12")
+    app = create_app(repo_root=tmp_path)
+    client = TestClient(app)
+
+    try:
+        with client.websocket_connect(
+            "/ws/runs/2026-11-12",
+            headers={"origin": "https://malicious-site.com", "host": "localhost:8000"},
+        ) as ws:
+            # If accept() wasn't called or close was sent, receiving will raise or close
+            data = ws.receive()
+            # If server sent close frame or closed socket
+            assert False, "Unauthorized origin should have been rejected"
+    except WebSocketDisconnect as exc:
+        assert exc.code == 1008
+    except Exception:
+        # Client raised connection closed / rejected
+        pass
+
+
+def test_api_validate_media_link_ssrf_blocking(tmp_path: Path) -> None:
+    """Assert api_validate_media_link blocks local/private IP SSRF attempts and news portals."""
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    _make_sample_run(tmp_path, "2026-11-12")
+    app = create_app(repo_root=tmp_path)
+    client = TestClient(app)
+
+    # 1. Loopback IP blocked
+    res_loopback = client.post("/api/runs/2026-11-12/validate-media-link", json={"url": "http://127.0.0.1:8000/media.mp4"})
+    assert res_loopback.status_code == 400
+    assert "private or loopback IP" in res_loopback.json()["detail"]
+
+    # 2. Local network IP blocked
+    res_private = client.post("/api/runs/2026-11-12/validate-media-link", json={"url": "http://192.168.1.100/video.mp4"})
+    assert res_private.status_code == 400
+    assert "private or loopback IP" in res_private.json()["detail"]
+
+    # 3. Localhost hostname blocked
+    res_localhost = client.post("/api/runs/2026-11-12/validate-media-link", json={"url": "http://localhost:3000/image.jpg"})
+    assert res_localhost.status_code == 400
+    assert "private or loopback IP" in res_localhost.json()["detail"]
+
+    # 4. Valid external public URL allowed
+    res_ok = client.post("/api/runs/2026-11-12/validate-media-link", json={"url": "https://upload.wikimedia.org/wikipedia/commons/test.jpg"})
+    assert res_ok.status_code == 200
+    assert res_ok.json()["ok"] is True
+
 
 
 

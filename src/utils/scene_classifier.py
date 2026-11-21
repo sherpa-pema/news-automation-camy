@@ -58,10 +58,10 @@ def classify_scene(
     if quote_match:
         quote_snippet = quote_match.group(1).strip()
         speaker = "Official Statement"
-        # Check both "Name said/stated/told" and "said/stated/according to Name"
-        sp_pre = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s+(?:said|stated|told)', full_text)
-        sp_post = re.search(r'(?:said|stated|told|according to|spokesperson)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', full_text)
-        if sp_pre and sp_pre.group(1).strip() not in ("The", "This", "That", "Managing Director", "President", "Prime Minister"):
+        # Check both "Name said/stated/told/भने/बताए" and "said/stated/according to/अनुसार Name"
+        sp_pre = re.search(r'([A-Z\u0900-\u097F][a-z\u0900-\u097F]+(?:\s+[A-Z\u0900-\u097F][a-z\u0900-\u097F]+){1,3})\s+(?:said|stated|told|भने|बताए|दाबी गरे)', full_text)
+        sp_post = re.search(r'(?:said|stated|told|according to|spokesperson|अनुसार|भनाइमा)\s+([A-Z\u0900-\u097F][a-z\u0900-\u097F]+(?:\s+[A-Z\u0900-\u097F][a-z\u0900-\u097F]+){1,3})', full_text)
+        if sp_pre and sp_pre.group(1).strip() not in ("The", "This", "That", "Managing Director", "President", "Prime Minister", "मन्त्रालय", "विभाग"):
             speaker = sp_pre.group(1).strip()
         elif sp_post:
             speaker = sp_post.group(1).strip()
@@ -86,7 +86,7 @@ def classify_scene(
     stat_val = None
     stat_delta = None
 
-    curr_match = re.search(r'((?:Rs\.?|रू|USD|\$)\s*[\d,]+(?:\.\d+)?\s*(?:crore|billion|lakh|million|trillion|tola)?)', full_text, re.IGNORECASE)
+    curr_match = re.search(r'((?:Rs\.?|रू|USD|\$)\s*[\d,]+(?:\.\d+)?\s*(?:crore|billion|lakh|million|trillion|tola|करोड|अर्ब|लाख|हजार)?)', full_text, re.IGNORECASE)
     pct_match = re.search(r'([\+\-]?[\d]+(?:\.\d+)?\s*%)', full_text)
     mw_match = re.search(r'([\d,]+(?:\.\d+)?\s*(?:MW|megawatt|metric tons|km|tola|spots))', full_text, re.IGNORECASE)
 
@@ -116,7 +116,7 @@ def classify_scene(
         )
 
     # 3. Headline Split heuristic (multi-bullet briefing)
-    sentences = [s.strip() for s in re.split(r'[.!?]+', narration) if s.strip()]
+    sentences = [s.strip() for s in re.split(r'[.!?।॥]+', narration) if s.strip()]
     if len(sentences) >= 3 and not has_video:
         kicker = sc_script.get("category") or "DEVELOPING"
         bullets = [sentences[0][:60], sentences[1][:60]]

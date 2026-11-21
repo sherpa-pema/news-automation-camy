@@ -5,10 +5,17 @@ from typing import Any
 
 
 def format_spoken_date(date_str: str) -> str:
-    """Formats YYYY-MM-DD into natural spoken words (e.g. Saturday, November 7, 2026)."""
+    """Formats YYYY-MM-DD into natural spoken words (e.g. Saturday, November 7, 2026 / Kartik 22, 2083 BS)."""
     try:
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        return d.strftime("%A, %B %d, %Y").replace(" 0", " ")
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        ad_str = d.strftime("%A, %B %d, %Y").replace(" 0", " ")
+        try:
+            from src.utils.nepali_date import ad_to_bs, format_bs_date
+            bs_d = ad_to_bs(d.year, d.month, d.day)
+            bs_str = format_bs_date(bs_d.year, bs_d.month, bs_d.day, lang="en")
+            return f"{ad_str} ({bs_str} BS)"
+        except Exception:
+            return ad_str
     except Exception:
         return date_str
 
@@ -21,6 +28,7 @@ def generate_editor_brief(
     opinion_clusters: list[dict[str, Any]] | None = None,
     stale_preview_clusters: list[dict[str, Any]] | None = None,
     run_kind: str = "test",
+    mode: str = "headlines",
 ) -> str:
     """Assembles the comprehensive editor brief markdown document."""
     spoken_date = format_spoken_date(run_date)
@@ -29,6 +37,7 @@ def generate_editor_brief(
     target_words = budget["target_total_words"]
     min_words = budget["min_total_words"]
     max_words = budget["max_total_words"]
+    is_headlines = (mode == "headlines" or len(shortlist) >= 12)
 
     lines = []
     lines.append(f"# Broadcast Editor Brief - {spoken_date}")
@@ -47,7 +56,7 @@ def generate_editor_brief(
 
     lines.append("> **Role**: You (the Antigravity agent) are acting as the Broadcast News Writer.")
     lines.append("> There are no external LLM calls or API keys. You will review the shortlist below,")
-    lines.append("> select the top 5 news clusters, write `draft_script.json` and `selection.json`,")
+    lines.append("> select the top news clusters, write `draft_script.json` and `selection.json`,")
     lines.append("> and run deterministic validation.")
     lines.append("")
     lines.append("---")
@@ -56,16 +65,22 @@ def generate_editor_brief(
     lines.append(f"- **Speech Rate**: `{wps:.2f}` words per second (`{sps:.2f}` syllables per second)")
     lines.append(f"- **Target Video Duration**: 2:00 to 3:00 (120 to 180 seconds, target {budget['target_duration_sec']:.0f}s)")
     lines.append(f"- **Total Word Budget**: **{target_words} words** (allowed range: **{min_words} to {max_words} words**)")
-    lines.append("- **Scene Breakdown** (Headlines Bulletin: 20 to 26 scenes total, 3 to 4 single-line summarized headlines per category in exact sequential order):")
-    lines.append("  - **1 Intro scene**: 12 to 25 words (target ~18 words)")
-    lines.append("  - **18 to 24 Story scenes** (strictly 1 single spoken sentence per scene, 10 to 22 words each, target ~15 words each):")
-    lines.append("    * Block 1: **National Politics** (`national_politics`) — 3 to 4 single-line headlines")
-    lines.append("    * Block 2: **Society and Local News** (`society_local`) — 3 to 4 single-line headlines")
-    lines.append("    * Block 3: **Culture and Entertainment** (`culture_entertainment`) — 3 to 4 single-line headlines")
-    lines.append("    * Block 4: **Business and Economics** (`business_economics`) — 3 to 4 single-line headlines")
-    lines.append("    * Block 5: **Science and Technology** (`science_technology`) — 3 to 4 single-line headlines")
-    lines.append("    * Block 6: **Sports** (`sports`) — 3 to 4 single-line headlines")
-    lines.append("  - **1 Outro scene**: 12 to 25 words (target ~18 words)")
+    if is_headlines:
+        lines.append("- **Scene Breakdown** (Headlines Bulletin: 20 to 26 scenes total, 3 to 4 single-line summarized headlines per category in exact sequential order):")
+        lines.append("  - **1 Intro scene**: 12 to 25 words (target ~18 words)")
+        lines.append("  - **18 to 24 Story scenes** (strictly 1 single spoken sentence per scene, 10 to 22 words each, target ~15 words each):")
+        lines.append("    * Block 1: **National Politics** (`national_politics`) — 3 to 4 single-line headlines")
+        lines.append("    * Block 2: **Society and Local News** (`society_local`) — 3 to 4 single-line headlines")
+        lines.append("    * Block 3: **Culture and Entertainment** (`culture_entertainment`) — 3 to 4 single-line headlines")
+        lines.append("    * Block 4: **Business and Economics** (`business_economics`) — 3 to 4 single-line headlines")
+        lines.append("    * Block 5: **Science and Technology** (`science_technology`) — 3 to 4 single-line headlines")
+        lines.append("    * Block 6: **Sports** (`sports`) — 3 to 4 single-line headlines")
+        lines.append("  - **1 Outro scene**: 12 to 25 words (target ~18 words)")
+    else:
+        lines.append("- **Scene Breakdown** (Focused Topic Bulletin: 7 scenes total):")
+        lines.append("  - **1 Intro scene**: 15 to 35 words (target ~25 words)")
+        lines.append("  - **5 Story scenes** (2 to 3 broadcast sentences per scene, 44 to 56 words each):")
+        lines.append("  - **1 Outro scene**: 15 to 35 words (target ~25 words)")
     lines.append("")
     lines.append("---")
     lines.append("## 2. Mandatory Writing Rules")
@@ -106,7 +121,7 @@ def generate_editor_brief(
                 "id": "intro",
                 "type": "intro",
                 "headline": f"Nepal Daily Briefing for {spoken_date}",
-                "narration": f"Good evening. Welcome to the Nepal Daily Briefing for {spoken_date}. Here are today's top stories from across the nation.",
+                "narration": "Good evening. Welcome to the Nepal Daily Briefing. Here are today's top stories from across the nation.",
                 "category": None,
                 "sensitive": False,
                 "source": "Nepal News Desk",
@@ -118,13 +133,12 @@ def generate_editor_brief(
                 "id": "scene_01",
                 "type": "story",
                 "headline": "Example Headline in Sentence Case Without Period",
-                "narration": "In Kathmandu, officials announced twenty new initiatives today. Environmental departments confirmed that community volunteers gathered to plant trees along the riverbank.",
-                "category": "environment",
+                "narration": "In Kathmandu, officials announced twenty new environmental initiatives today while community volunteers gathered to plant trees along the riverbank.",
+                "category": "national_politics",
                 "sensitive": False,
                 "source": "The Kathmandu Post, Onlinekhabar English",
                 "source_urls": [
-                    "https://example.com/article1",
-                    "https://example.com/article2"
+                    "https://example.com/article1"
                 ],
                 "visual_keywords": [
                     "Kathmandu city",
@@ -136,10 +150,6 @@ def generate_editor_brief(
                     {
                         "sentence_index": 0,
                         "source_url": "https://example.com/article1"
-                    },
-                    {
-                        "sentence_index": 1,
-                        "source_url": "https://example.com/article2"
                     }
                 ]
             },
@@ -152,7 +162,7 @@ def generate_editor_brief(
                 "sensitive": False,
                 "source": "Nepal News Desk",
                 "source_urls": [],
-                "visual_keywords": ["Kathmandu night skyline", "sunset mountains"],
+                "visual_keywords": ["Kathmandu night skyline", "sunset mountains", "Nepal landscape"],
                 "evidence": []
             }
         ]

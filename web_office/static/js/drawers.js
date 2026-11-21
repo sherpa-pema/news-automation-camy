@@ -473,23 +473,23 @@ export class DrawerManager {
                   <th>Status</th>
                   <th>Found</th>
                   <th>Kept</th>
-                  <th>Dropped</th>
-                  <th>Stale</th>
-                  <th>Detail</th>
+                  <th>Age (h)</th>
+                  <th>Error / Detail</th>
                 </tr>
               </thead>
               <tbody>
                 ${health.map((src) => {
                   const statusClass = `source-status-${(src.status || "ok").toLowerCase()}`;
+                  const ageText = src.newest_age_hours != null ? `${src.newest_age_hours}h` : "-";
+                  const detailText = src.error || src.detail || "-";
                   return `
                     <tr>
-                      <td><strong>${escapeHtml(src.name)}</strong></td>
-                      <td><span class="source-status-badge ${statusClass}">${escapeHtml(src.status)}</span></td>
+                      <td><strong>${escapeHtml(src.source || src.name || "")}</strong></td>
+                      <td><span class="source-status-badge ${statusClass}">${escapeHtml(src.display_status || src.status || "OK")}</span></td>
                       <td>${src.found ?? 0}</td>
                       <td style="color:#22c55e;font-weight:700">${src.kept ?? 0}</td>
-                      <td>${src.dropped ?? 0}</td>
-                      <td>${src.stale ?? 0}</td>
-                      <td class="muted" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(src.detail || src.error || '')}">${escapeHtml(src.detail || src.error || '-')}</td>
+                      <td>${ageText}</td>
+                      <td class="muted" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(detailText)}">${escapeHtml(detailText)}</td>
                     </tr>
                   `;
                 }).join("")}
@@ -819,6 +819,10 @@ export class DrawerManager {
 
   _openIframeModal(relPath, title) {
     const url = `/api/runs/${encodeURIComponent(this.state.date)}/file?path=${encodeURIComponent(relPath)}${this._getTokenQuery()}`;
-    this.openModal(title, `<iframe src="${url}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>`);
+    const needsSameOrigin = relPath.includes("picker.html");
+    const sandbox = needsSameOrigin
+      ? "allow-scripts allow-same-origin allow-forms allow-popups"
+      : "allow-scripts allow-forms allow-popups";
+    this.openModal(title, `<iframe src="${url}" sandbox="${sandbox}"></iframe>`);
   }
 }

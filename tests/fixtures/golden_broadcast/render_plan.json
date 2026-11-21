@@ -1,0 +1,227 @@
+{
+  "resolution": "1920x1080",
+  "fps": 30,
+  "audio_file": "audio/narration.wav",
+  "duration_sec": 38.0,
+  "duration": 38.0,
+  "captions_ass": "motion/captions.ass",
+  "overlays": [
+    {
+      "id": "global_test_tag",
+      "scene_id": null,
+      "type": "test_tag",
+      "png": "motion/overlays/test_run_tag.png",
+      "start": 0.0,
+      "end": 38.0,
+      "x": 96,
+      "y": 54,
+      "w": 180,
+      "h": 44,
+      "animation": null,
+      "fade_in": 0.0,
+      "fade_out": 0.0
+    }
+  ],
+  "scenes": [
+    {
+      "id": "intro",
+      "start": 0.0,
+      "end": 8.0,
+      "media": "media/shots/intro/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/intro/card_00.png",
+          "start": 0.0,
+          "end": 8.0,
+          "duration": 8.0,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "system",
+          "author": "System"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "intro_title",
+          "scene_id": "intro",
+          "type": "title_card",
+          "png": "motion/overlays/intro_title.png",
+          "start": 0.5,
+          "end": 7.5,
+          "x": 260,
+          "y": 280,
+          "w": 1400,
+          "h": 460,
+          "animation": "fade",
+          "fade_in": 0.3,
+          "fade_out": 0.3
+        }
+      ],
+      "shot_recipe": "title_card",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "काठमाडौं नेपालबाट आजको मुख्य समाचार",
+        "source_credit": "Nepal News Bot"
+      },
+      "caption_style": {
+        "position": "bottom",
+        "highlight_color": "#F5A623"
+      },
+      "transition": {
+        "type": "fade",
+        "duration_sec": 0.5
+      }
+    },
+    {
+      "id": "scene_01",
+      "start": 8.0,
+      "end": 20.0,
+      "media": "media/shots/scene_01/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_01/card_00.png",
+          "start": 8.0,
+          "end": 20.0,
+          "duration": 12.0,
+          "type": "card",
+          "motion": "pan_left",
+          "source": "wikimedia_commons",
+          "author": "Pramod Shrestha"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_01_lower_third",
+          "scene_id": "scene_01",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_01_lower_third.png",
+          "start": 8.5,
+          "end": 19.5,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "चक्रपथ विस्तार कार्यलाई तीव्रता दिइने",
+        "source_credit": "स्रोत: कान्तिपुर दैनिक"
+      },
+      "caption_style": {
+        "position": "bottom",
+        "highlight_color": "#F5A623"
+      },
+      "transition": {
+        "type": "wipe_left",
+        "duration_sec": 0.5
+      }
+    },
+    {
+      "id": "scene_02",
+      "start": 20.0,
+      "end": 32.0,
+      "media": "media/shots/scene_02/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/scene_02/card_00.png",
+          "start": 20.0,
+          "end": 32.0,
+          "duration": 12.0,
+          "type": "card",
+          "motion": "zoom_in",
+          "source": "pexels",
+          "author": "Mountain Photographers"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "scene_02_lower_third",
+          "scene_id": "scene_02",
+          "type": "lower_third",
+          "png": "motion/overlays/scene_02_lower_third.png",
+          "start": 20.5,
+          "end": 31.5,
+          "x": 96,
+          "y": 730,
+          "w": 1320,
+          "h": 155,
+          "animation": "slide_up",
+          "fade_in": 0.2,
+          "fade_out": 0.2
+        }
+      ],
+      "shot_recipe": "cinematic_broll_full",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "Nepal Tourism Board Reports Surge in Autumn Trekkers",
+        "source_credit": "Source: The Kathmandu Post"
+      },
+      "caption_style": {
+        "position": "bottom",
+        "highlight_color": "#F5A623"
+      },
+      "transition": {
+        "type": "fade",
+        "duration_sec": 0.5
+      }
+    },
+    {
+      "id": "outro",
+      "start": 32.0,
+      "end": 38.0,
+      "media": "media/shots/outro/card_00.png",
+      "shots": [
+        {
+          "shot_index": 0,
+          "file": "media/shots/outro/card_00.png",
+          "start": 32.0,
+          "end": 38.0,
+          "duration": 6.0,
+          "type": "card",
+          "motion": "zoom_out",
+          "source": "system",
+          "author": "System"
+        }
+      ],
+      "overlays": [
+        {
+          "id": "outro_card",
+          "scene_id": "outro",
+          "type": "outro_card",
+          "png": "motion/overlays/outro_card.png",
+          "start": 32.5,
+          "end": 37.5,
+          "x": 260,
+          "y": 280,
+          "w": 1400,
+          "h": 460,
+          "animation": "fade",
+          "fade_in": 0.3,
+          "fade_out": 0.3
+        }
+      ],
+      "shot_recipe": "outro_card",
+      "beat_aligned": false,
+      "lower_third": {
+        "headline": "थप समाचारको लागि सब्स्क्राइब गर्नुहोस्",
+        "source_credit": "Nepal News Bot"
+      },
+      "caption_style": {
+        "position": "bottom",
+        "highlight_color": "#F5A623"
+      },
+      "transition": {
+        "type": "fade",
+        "duration_sec": 0.5
+      }
+    }
+  ]
+}

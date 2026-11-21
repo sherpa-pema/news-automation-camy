@@ -27,9 +27,16 @@ import trafilatura
 import yaml
 
 from src.agents.base import BaseAgent
-from src.utils.editor_cluster import _compile_word_boundary_re, is_advertisement, is_thin_story, tokenize
+from src.utils.editor_cluster import (
+    _compile_word_boundary_re,
+    extract_canonical_entities,
+    is_advertisement,
+    is_thin_story,
+    tokenize,
+)
 from src.utils.logging import setup_logger
 from src.utils.manifest import load_manifest, save_manifest, update_stage_status
+from src.utils.nepali_date import parse_nepali_date, today_npt
 from src.utils.office_events import emit_office_event
 from src.utils.schema_validate import validate_contract
 
@@ -118,7 +125,7 @@ def truncate_at_sentence_boundary(text: str, max_chars: int = 6000) -> str:
 
     # Prefer the last clean sentence boundary inside [0.70 * max_chars, max_chars]
     last_clean_end: int | None = None
-    for m in re.finditer(r"[.!?](?=\s|$)", candidate_slice[window_start:]):
+    for m in re.finditer(r"[.!?।॥](?=\s|$)", candidate_slice[window_start:]):
         abs_pos = window_start + m.start()
         if not _is_abbreviation_boundary(candidate_slice, abs_pos):
             last_clean_end = window_start + m.end()
@@ -165,10 +172,10 @@ def is_boilerplate(text: str) -> bool:
 def strip_datelines_and_bylines(para: str) -> str:
     """Strips common news datelines (e.g. 'KATHMANDU, Nov 12 —') and bylines from the lead."""
     cleaned = para.strip()
-    cleaned = re.sub(r"^[A-Z\s,()]+(?:,\s*[A-Za-z\s\d(),]+)?\s*[-—–]\s*", "", cleaned)
-    cleaned = re.sub(r"^[A-Z][A-Za-z\s,().\d]*?\s*[-—–]\s*", "", cleaned)
-    cleaned = re.sub(r"^[\u0900-\u097F\s,()]+[-—–]\s*", "", cleaned)
-    cleaned = re.sub(r"^(?:by\s+[A-Za-z\s]+[-—–]?\s*)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^[A-Z\s,()]{2,45}(?:,\s*[A-Za-z\s\d(),]{1,30})?\s*[-—–]\s*", "", cleaned)
+    cleaned = re.sub(r"^[A-Z][A-Za-z\s,().\d]{0,40}\s+[-—–]\s+", "", cleaned)
+    cleaned = re.sub(r"^[\u0900-\u097F\s,()]{2,45}\s*[-—–]\s*", "", cleaned)
+    cleaned = re.sub(r"^(?:by\s+[A-Za-z\s]{1,40}[-—–]?\s*)", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"(?i)\s*(?:read more|continue reading|थप पढ्नुहोस्|सम्बन्धित समाचार).*$", "", cleaned)
     return cleaned.strip()
 
@@ -183,7 +190,7 @@ def _truncate_summary_slice(
         return text
 
     search_region = text[min_cut:max_cut]
-    for m in re.finditer(r"[.!?](?=\s|$)", search_region):
+    for m in re.finditer(r"[.!?।॥](?=\s|$)", search_region):
         abs_pos = min_cut + m.start()
         if not _is_abbreviation_boundary(text, abs_pos):
             return text[: min_cut + m.end()].strip()
@@ -735,12 +742,23 @@ def parse_article_date_with_confidence(
             except Exception:
                 pass
 
-        try:
-            dt = dateparser.parse(raw_date)
-            if dt is not None:
-                confidence = "exact"
-        except Exception:
-            dt = None
+        # Check Bikram Sambat date first
+        bs_d = parse_nepali_date(raw_date)
+        if bs_d is not None:
+            dt = datetime(bs_d.year, bs_d.month, bs_d.day, 12, 0, 0, tzinfo=KATHMANDU_TZ)
+            confidence = "exact"
+        else:
+            try:
+                dt = dateparser.parse(raw_date)
+                if dt is not None:
+                    # If parsed as a future AD date that falls into BS range (2070-2095), convert from BS
+                    if 2070 <= dt.year <= 2095:
+                        converted = parse_nepali_date(f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}")
+                        if converted:
+                            dt = datetime(converted.year, converted.month, converted.day, dt.hour, dt.minute, dt.second, tzinfo=KATHMANDU_TZ)
+                    confidence = "exact"
+            except Exception:
+                dt = None
 
     # 2. Check URL for /YYYY/MM/DD/ pattern (e.g. Kathmandu Post)
     if dt is None and url:
@@ -748,8 +766,14 @@ def parse_article_date_with_confidence(
         if match:
             try:
                 year, month, day = map(int, match.groups())
-                dt = datetime(year, month, day, 12, 0, 0)
-                confidence = "url_date"
+                if 2070 <= year <= 2095:
+                    converted = parse_nepali_date(f"{year:04d}-{month:02d}-{day:02d}")
+                    if converted:
+                        dt = datetime(converted.year, converted.month, converted.day, 12, 0, 0, tzinfo=KATHMANDU_TZ)
+                        confidence = "url_date"
+                if dt is None:
+                    dt = datetime(year, month, day, 12, 0, 0)
+                    confidence = "url_date"
             except Exception:
                 dt = None
 
@@ -989,6 +1013,8 @@ class ScraperAgent(BaseAgent):
             self._circuit_breaker_file = self.run_dir / "source_health.json"
         else:
             self._circuit_breaker_file = self.repo_root / "data" / "state" / "source_health.json"
+        self._circuit_breaker_lock = threading.Lock()
+        self._last_http_status: int | None = None
         self._start_time: float | None = None
 
     def _get_session(self, domain: str) -> requests.Session:
@@ -1123,6 +1149,8 @@ class ScraperAgent(BaseAgent):
 
                 if latency_sink is not None:
                     latency_sink.append(round((time.monotonic() - t0) * 1000.0, 1))
+
+                self._last_http_status = getattr(response, "status_code", None)
 
                 # 429 Too Many Requests: dedicated rate limit handling
                 if response.status_code == 429:
@@ -1332,22 +1360,27 @@ class ScraperAgent(BaseAgent):
     def _save_circuit_breaker_state(self, state: dict[str, Any]) -> None:
         try:
             self._circuit_breaker_file.parent.mkdir(parents=True, exist_ok=True)
-            self._circuit_breaker_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            tmp_path = self._circuit_breaker_file.with_name(
+                f"{self._circuit_breaker_file.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            tmp_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            os.replace(tmp_path, self._circuit_breaker_file)
         except Exception as e:
             self.logger.warning(f"Could not persist circuit breaker state: {e}")
 
     def _is_circuit_breaker_tripped(self, source_name: str, cb_cfg: dict[str, Any] | None = None) -> bool:
         if self.force_source and self.force_source.lower() == source_name.lower():
             return False
-        state = self._load_circuit_breaker_state()
-        src_data = state.get("sources", {}).get(source_name, {})
-        cooldown = int(src_data.get("cooldown_runs_left", 0))
-        if cooldown > 0:
-            src_data["cooldown_runs_left"] = cooldown - 1
-            state.setdefault("sources", {})[source_name] = src_data
-            self._save_circuit_breaker_state(state)
-            return True
-        return False
+        with self._circuit_breaker_lock:
+            state = self._load_circuit_breaker_state()
+            src_data = state.get("sources", {}).get(source_name, {})
+            cooldown = int(src_data.get("cooldown_runs_left", 0))
+            if cooldown > 0:
+                src_data["cooldown_runs_left"] = cooldown - 1
+                state.setdefault("sources", {})[source_name] = src_data
+                self._save_circuit_breaker_state(state)
+                return True
+            return False
 
     def _record_circuit_breaker_outcome(
         self,
@@ -1356,31 +1389,32 @@ class ScraperAgent(BaseAgent):
         error: str | None = None,
         cb_cfg: dict[str, Any] | None = None,
     ) -> None:
-        state = self._load_circuit_breaker_state()
-        src_data = state.get("sources", {}).get(source_name, {})
-        cfg = cb_cfg or self._runtime_settings.get("circuit_breaker") or {"failures": 3, "cooldown_runs": 3}
-        failures_thresh = int(cfg.get("failures", 3))
-        cooldown_runs = int(cfg.get("cooldown_runs", 3))
+        with self._circuit_breaker_lock:
+            state = self._load_circuit_breaker_state()
+            src_data = state.get("sources", {}).get(source_name, {})
+            cfg = cb_cfg or self._runtime_settings.get("circuit_breaker") or {"failures": 3, "cooldown_runs": 3}
+            failures_thresh = int(cfg.get("failures", 3))
+            cooldown_runs = int(cfg.get("cooldown_runs", 3))
 
-        is_failure = bool(error or kept <= 0)
-        if is_failure:
-            consecutive = int(src_data.get("consecutive_failures", 0)) + 1
-            src_data["consecutive_failures"] = consecutive
-            src_data["last_status"] = error or "EMPTY"
-            if consecutive >= failures_thresh:
-                src_data["cooldown_runs_left"] = cooldown_runs
-                self.logger.warning(
-                    f"Circuit breaker TRIPPED for {source_name}: {consecutive} consecutive failures. "
-                    f"Entering cooldown for {cooldown_runs} runs."
-                )
-        else:
-            src_data["consecutive_failures"] = 0
-            src_data["cooldown_runs_left"] = 0
-            src_data["last_status"] = "OK"
+            is_failure = bool(error or kept <= 0)
+            if is_failure:
+                consecutive = int(src_data.get("consecutive_failures", 0)) + 1
+                src_data["consecutive_failures"] = consecutive
+                src_data["last_status"] = error or "EMPTY"
+                if consecutive >= failures_thresh:
+                    src_data["cooldown_runs_left"] = cooldown_runs
+                    self.logger.warning(
+                        f"Circuit breaker TRIPPED for {source_name}: {consecutive} consecutive failures. "
+                        f"Entering cooldown for {cooldown_runs} runs."
+                    )
+            else:
+                src_data["consecutive_failures"] = 0
+                src_data["cooldown_runs_left"] = 0
+                src_data["last_status"] = "OK"
 
-        src_data["last_updated"] = datetime.now(timezone.utc).isoformat()
-        state.setdefault("sources", {})[source_name] = src_data
-        self._save_circuit_breaker_state(state)
+            src_data["last_updated"] = datetime.now(timezone.utc).isoformat()
+            state.setdefault("sources", {})[source_name] = src_data
+            self._save_circuit_breaker_state(state)
 
     @staticmethod
     def _init_source_stats() -> dict[str, Any]:
@@ -1535,6 +1569,8 @@ class ScraperAgent(BaseAgent):
         elif not resp or resp.status_code != 200:
             status = resp.status_code if resp else "timeout/connection failure"
             error_msg = f"Failed to fetch RSS feed ({status})"
+            if resp and resp.status_code == 429:
+                stats["drop_reasons"]["rate_limited"] += 1
             self.logger.warning(f"{source_name}: {error_msg}")
             self._record_circuit_breaker_outcome(source_name, 0, error_msg, cb_cfg)
             self._finalize_latency_stats(stats, latencies)
@@ -1695,7 +1731,10 @@ class ScraperAgent(BaseAgent):
 
             if not article:
                 stats["dropped"] += 1
-                stats["drop_reasons"]["extract_fail"] += 1
+                if getattr(self, "_last_http_status", None) == 429:
+                    stats["drop_reasons"]["rate_limited"] += 1
+                else:
+                    stats["drop_reasons"]["extract_fail"] += 1
                 continue
 
             # Quality gate: drop advertorials and thin stories
@@ -1715,7 +1754,7 @@ class ScraperAgent(BaseAgent):
             # If date was recovered from HTML metadata, enforce lookback window now
             if pub_dt is None and article.get("age_hours") is not None:
                 diff_seconds = float(article["age_hours"]) * 3600.0
-                if diff_seconds > lookback_seconds:
+                if diff_seconds > effective_lookback_sec:
                     stats["dropped"] += 1
                     stats["drop_reasons"]["lookback"] += 1
                     continue
@@ -1836,12 +1875,21 @@ class ScraperAgent(BaseAgent):
         if not resp or resp.status_code != 200:
             status = resp.status_code if resp else "connection failure"
             error_msg = f"Failed to fetch homepage ({status})"
+            if resp and resp.status_code == 429:
+                stats["drop_reasons"]["rate_limited"] += 1
             self.logger.warning(f"{source_name}: {error_msg}")
             self._record_circuit_breaker_outcome(source_name, 0, error_msg, cb_cfg)
             self._finalize_latency_stats(stats, latencies)
             return articles, stats, error_msg
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        raw_markup: Any = None
+        if hasattr(resp, "content") and isinstance(resp.content, (bytes, bytearray)):
+            raw_markup = resp.content
+        elif hasattr(resp, "text") and isinstance(resp.text, str):
+            raw_markup = resp.text
+        else:
+            raw_markup = getattr(resp, "content", None) or getattr(resp, "text", "") or ""
+        soup = BeautifulSoup(raw_markup, "html.parser")
         base_domain = urlparse(homepage).netloc
 
         candidate_entries: list[dict[str, Any]] = []
@@ -1971,28 +2019,35 @@ class ScraperAgent(BaseAgent):
                     stats["drop_reasons"]["category_filtered"] += 1
                     continue
 
+            cand_pub_at = cand["cand_dt"].isoformat() if cand.get("cand_dt") else None
+            cand_age = round((ref_time - cand["cand_dt"]).total_seconds() / 3600.0, 2) if cand.get("cand_dt") else None
+            cand_conf = "url_date" if cand.get("cand_dt") else "missing"
+
             article = self._extract_article(
                 source_name=publisher_name,
                 title=anchor_title or "Untitled Article",
                 url=norm_url,
-                published_at=None,
+                published_at=cand_pub_at,
                 rss_entry={},
                 user_agent=user_agent,
                 delay_seconds=delay_seconds,
                 language=source_lang,
                 scraped_at=ref_time.isoformat(),
-                age_hours=None,
+                age_hours=cand_age,
                 ref_time=ref_time,
                 latency_sink=latencies,
                 raw_tags=[],
                 feed_position=feed_pos,
                 source_trust=source_trust,
-                date_confidence="missing",
+                date_confidence=cand_conf,
             )
 
             if not article:
                 stats["dropped"] += 1
-                stats["drop_reasons"]["extract_fail"] += 1
+                if getattr(self, "_last_http_status", None) == 429:
+                    stats["drop_reasons"]["rate_limited"] += 1
+                else:
+                    stats["drop_reasons"]["extract_fail"] += 1
                 continue
 
             # Quality gate: drop advertorials and thin stories
@@ -2113,6 +2168,8 @@ class ScraperAgent(BaseAgent):
                 fetch_kwargs["latency_sink"] = latency_sink
             html_resp = self.fetch_with_retry(url, user_agent, delay_seconds, **fetch_kwargs)
             if html_resp and html_resp.status_code == 200:
+                if html_resp.encoding is None or html_resp.encoding.lower() == "iso-8859-1":
+                    html_resp.encoding = html_resp.apparent_encoding or "utf-8"
                 raw_html = html_resp.text
 
         if raw_html:
@@ -2302,9 +2359,6 @@ class ScraperAgent(BaseAgent):
         local_urls: set[str] = set()
         local_titles: list[str] = []
 
-        if selected_categories is not None:
-            self.selected_categories = sorted(selected_categories)
-
         if method == "rss":
             src_articles, stats, err = self._fetch_rss_source(
                 src,
@@ -2315,6 +2369,7 @@ class ScraperAgent(BaseAgent):
                 local_titles,
                 default_language=default_language,
                 lookback_seconds=lookback_seconds,
+                selected_categories=selected_categories,
             )
         elif method in ("html_only", "html"):
             src_articles, stats, err = self._fetch_html_source(
@@ -2326,6 +2381,7 @@ class ScraperAgent(BaseAgent):
                 local_titles,
                 default_language=default_language,
                 lookback_seconds=lookback_seconds,
+                selected_categories=selected_categories,
             )
         else:
             self.logger.warning(f"Unknown method '{method}' for {name}")
@@ -2342,18 +2398,8 @@ class ScraperAgent(BaseAgent):
         return name, src_articles, stats, err
 
     def _extract_entities_from_article(self, article: dict[str, Any], entity_aliases: dict[str, list[str]]) -> set[str]:
-        text = f"{article.get('title', '')} {article.get('text_summary', '')}".lower()
-        matched: set[str] = set()
-        for ent_key, aliases in entity_aliases.items():
-            for alias in aliases:
-                alias_clean = alias.strip().lower()
-                if not alias_clean:
-                    continue
-                if re.search(r"\b" + re.escape(alias_clean) + r"\b|[\u0900-\u097F]+", text):
-                    if alias_clean in text:
-                        matched.add(ent_key)
-                        break
-        return matched
+        text = f"{article.get('title', '')} {article.get('text_summary', '')}"
+        return extract_canonical_entities(text, entity_aliases=entity_aliases)
 
     def preflight_scan_feed_categories(
         self,
@@ -2371,6 +2417,9 @@ class ScraperAgent(BaseAgent):
             if src.get("method", "rss") != "rss" or not src.get("rss"):
                 continue
             rss_url = src["rss"]
+            allowed, _ = self._check_robots_for_url(rss_url, user_agent, delay_seconds)
+            if not allowed:
+                continue
             try:
                 resp = self.fetch_with_retry(rss_url, user_agent, delay_seconds, timeout=5)
                 if not resp or resp.status_code != 200:
@@ -2576,6 +2625,7 @@ class ScraperAgent(BaseAgent):
                 source_errors[name] = err
 
             for cand in src_articles:
+                cand["_feed_name"] = name
                 cand_key = canonical_url_key(cand.get("url", ""))
                 if cand_key and cand_key in seen_urls:
                     stats["dropped"] += 1
@@ -2583,18 +2633,23 @@ class ScraperAgent(BaseAgent):
                     stats["drop_reasons"]["dup_url"] += 1
                     continue
 
-                # Cross-source deduplication (Tier 2 & Tier 3)
+                # Same-source deduplication (Tier 2 & Tier 3 within same outlet)
+                # Cross-outlet stories are preserved so Editor clustering can group multi-source stories.
+                cand_source = cand.get("source", "")
                 cand_tokens = tokenize(f"{cand.get('title', '')} {cand.get('text_summary', '')}")
                 cand_entities = self._extract_entities_from_article(cand, entity_aliases)
 
                 dup_match_idx = -1
                 for idx, existing in enumerate(all_articles):
-                    # Tier 2: Title similarity >= 0.9 across sources
+                    if existing.get("source", "") != cand_source:
+                        continue
+
+                    # Tier 2: Title similarity >= 0.9 within same source
                     if is_duplicate_title(cand.get("title", ""), [existing.get("title", "")], threshold=0.9):
                         dup_match_idx = idx
                         break
 
-                    # Tier 3: Token overlap >= 0.35 + entity match
+                    # Tier 3: Token overlap >= 0.35 + entity match within same source
                     if "token" in dedupe_mode:
                         exist_tokens = tokenize(f"{existing.get('title', '')} {existing.get('text_summary', '')}")
                         exist_entities = self._extract_entities_from_article(existing, entity_aliases)
@@ -2617,24 +2672,37 @@ class ScraperAgent(BaseAgent):
                     if (cand_trust > exist_trust) or (cand_trust == exist_trust and cand_pub > exist_pub):
                         loser = existing
                         loser_src = loser.get("source", "")
-                        if loser_src in per_source_stats:
-                            per_source_stats[loser_src]["dropped"] += 1
-                            per_source_stats[loser_src]["extracted_ok"] = max(0, per_source_stats[loser_src]["extracted_ok"] - 1)
-                            per_source_stats[loser_src]["drop_reasons"]["dup_story"] += 1
+                        loser_feed = loser.get("_feed_name") or loser_src
+                        target_stat = per_source_stats.get(loser_feed)
+                        if not target_stat:
+                            for pk, pv in per_source_stats.items():
+                                if pk == loser_src or pk.startswith(f"{loser_src} ("):
+                                    target_stat = pv
+                                    break
+                        if target_stat:
+                            target_stat["dropped"] += 1
+                            target_stat["extracted_ok"] = max(0, target_stat["extracted_ok"] - 1)
+                            target_stat["drop_reasons"]["dup_story"] += 1
                         self.logger.info(
-                            f"Cross-source duplicate: '{cand['title']}' ({cand['source']}) supersedes '{loser['title']}' ({loser_src})"
+                            f"Same-source duplicate: '{cand['title']}' ({cand['source']}) supersedes '{loser['title']}'"
                         )
                         if cand_key:
                             seen_urls.add(cand_key)
                         all_articles[dup_match_idx] = cand
                     else:
                         cand_src = cand.get("source", "")
-                        if cand_src in per_source_stats:
-                            per_source_stats[cand_src]["dropped"] += 1
-                            per_source_stats[cand_src]["extracted_ok"] = max(0, per_source_stats[cand_src]["extracted_ok"] - 1)
-                            per_source_stats[cand_src]["drop_reasons"]["dup_story"] += 1
+                        cand_stat = per_source_stats.get(name) or per_source_stats.get(cand_src)
+                        if not cand_stat:
+                            for pk, pv in per_source_stats.items():
+                                if pk == cand_src or pk.startswith(f"{cand_src} ("):
+                                    cand_stat = pv
+                                    break
+                        if cand_stat:
+                            cand_stat["dropped"] += 1
+                            cand_stat["extracted_ok"] = max(0, cand_stat["extracted_ok"] - 1)
+                            cand_stat["drop_reasons"]["dup_story"] += 1
                         self.logger.info(
-                            f"Cross-source duplicate: '{existing['title']}' ({existing['source']}) retained over '{cand['title']}' ({cand_src})"
+                            f"Same-source duplicate: '{existing['title']}' retained over '{cand['title']}'"
                         )
                         continue
                 else:
@@ -2642,13 +2710,35 @@ class ScraperAgent(BaseAgent):
                         seen_urls.add(cand_key)
                     all_articles.append(cand)
 
+        for a in all_articles:
+            a.pop("_feed_name", None)
+
         return all_articles, per_source_stats, source_errors
 
     def run(self, manifest: dict[str, Any]) -> list[str]:
         """Executes the Scraper Agent within the multi-agent pipeline."""
+        try:
+            return self._run_internal(manifest)
+        finally:
+            self._close_sessions()
+
+    def _close_sessions(self) -> None:
+        """Closes all cached requests.Session instances."""
+        for s in list(self._sessions.values()):
+            try:
+                s.close()
+            except Exception:
+                pass
+        self._sessions.clear()
+
+    def _run_internal(self, manifest: dict[str, Any]) -> list[str]:
         target_date = manifest.get("date")
         pipeline_cfg = self._load_pipeline_config()
         scraper_st = next((st for st in pipeline_cfg.get("stages", []) if st.get("id") == "scraper"), {})
+
+        if not self._runtime_settings:
+            sources_cfg = self._load_sources_config()
+            self._runtime_settings = sources_cfg.get("settings", {})
 
         min_eligible = int(scraper_st.get("min_eligible_articles", scraper_st.get("min_articles", 6)))
         degraded_floor = int(scraper_st.get("degraded_floor", 3))
@@ -2902,7 +2992,7 @@ class ScraperAgent(BaseAgent):
 def main() -> int:
     """Standalone CLI entry point for testing and debugging the Scraper Agent."""
     parser = argparse.ArgumentParser(description="Run Scraper Agent independently.")
-    parser.add_argument("--date", default=str(datetime.now().date()), help="Target run date (YYYY-MM-DD)")
+    parser.add_argument("--date", default=today_npt().isoformat(), help="Target run date (YYYY-MM-DD)")
     parser.add_argument("--source", default=None, help="Limit scraping to one specific source name")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without saving outputs to disk")
     parser.add_argument("--backfill", action="store_true", help="Anchor lookback window to 23:59:59 of target date instead of current scrape time")

@@ -51,6 +51,16 @@ def load_mms_model(model_path: str | Path | None, device: str = "cuda:0", dtype:
     return model, tokenizer, aligner
 
 
+_RESAMPLERS: dict[tuple[int, int], Any] = {}
+
+
+def _get_resampler(orig_sr: int, target_sr: int) -> Any:
+    key = (orig_sr, target_sr)
+    if key not in _RESAMPLERS:
+        _RESAMPLERS[key] = torchaudio.transforms.Resample(orig_sr, target_sr)
+    return _RESAMPLERS[key]
+
+
 def align_scene(
     audio_path: str | Path,
     words_data: list[dict[str, Any]],
@@ -67,7 +77,7 @@ def align_scene(
 
     waveform, sr = torchaudio.load(str(audio_path))
     if sr != bundle_sr:
-        waveform = torchaudio.transforms.Resample(sr, bundle_sr)(waveform)
+        waveform = _get_resampler(sr, bundle_sr)(waveform)
     # Ensure mono
     waveform = waveform.mean(dim=0, keepdim=True)
 
@@ -223,6 +233,9 @@ def main() -> int:
                     for item in words_data
                 ],
             }
+        finally:
+            if "cuda" in str(device).lower() and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     out_payload = {
         "status": "success",

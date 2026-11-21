@@ -88,8 +88,21 @@ def resolve_style(
     caption_top = max(nominal_top, min_caption_top)
     caption_bottom = caption_top + caption_height
 
-    # MarginV in ASS (Alignment=2) is distance from bottom of frame to bottom of text
-    margin_v = max(20, h - caption_bottom)
+    # Honor caption_margin_v as a floor, shrinking font_size if needed to avoid pushing into lower_third
+    target_margin_v = rects.get("caption_margin_v")
+    if target_margin_v is not None:
+        target_margin_v = int(target_margin_v)
+        max_allowed_bottom = h - target_margin_v
+        avail_height = max_allowed_bottom - min_caption_top
+        if avail_height > 20 and caption_height > avail_height:
+            font_size = max(20, int(avail_height / (max_lines * line_height_pct)))
+            caption_height = int(max_lines * font_size * line_height_pct)
+        caption_top = min_caption_top
+        caption_bottom = caption_top + caption_height
+        margin_v = max(20, h - caption_bottom)
+    else:
+        # MarginV in ASS (Alignment=2) is distance from bottom of frame to bottom of text
+        margin_v = max(20, h - caption_bottom)
 
     return CaptionStyle(
         font_family=font_family,

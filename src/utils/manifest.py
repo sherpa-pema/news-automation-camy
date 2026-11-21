@@ -12,6 +12,7 @@ from src.utils.schema_validate import validate_contract
 
 PAUSE_STATES = {"prepared", "needs_revision", "awaiting_approval"}
 LOCK_FILENAME = ".pipeline.pid"
+GLOBAL_LOCK_FILENAME = ".pipeline_global.lock"
 DEFAULT_STALE_MINUTES = 30.0
 
 
@@ -83,25 +84,67 @@ def is_run_process_active(run_dir: Path | str | None) -> bool:
 
 
 def acquire_run_lock(run_dir: Path | str) -> Path:
-    """Writes .pipeline.pid for the current active process."""
+    """Writes .pipeline.pid for the current active process atomically."""
     lock_path = Path(run_dir) / LOCK_FILENAME
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "pid": os.getpid(),
         "started_at": datetime.now().astimezone().isoformat(),
     }
-    lock_path.write_text(json.dumps(payload), encoding="utf-8")
+    content = json.dumps(payload).encode("utf-8")
+
+    if lock_path.exists():
+        try:
+            raw = lock_path.read_text(encoding="utf-8").strip()
+            data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+            existing_pid = int(data.get("pid", 0))
+            if existing_pid == os.getpid():
+                return lock_path
+            if existing_pid > 0 and is_pid_alive(existing_pid):
+                raise RuntimeError(
+                    f"Pipeline process lock ({LOCK_FILENAME}) already held by active PID {existing_pid}."
+                )
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+        except (ValueError, OSError, json.JSONDecodeError):
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+    except FileExistsError:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+        existing_pid = int(data.get("pid", 0))
+        if existing_pid > 0 and is_pid_alive(existing_pid) and existing_pid != os.getpid():
+            raise RuntimeError(
+                f"Pipeline process lock ({LOCK_FILENAME}) acquired by concurrent PID {existing_pid}."
+            )
+        lock_path.write_text(json.dumps(payload), encoding="utf-8")
     return lock_path
 
 
 def release_run_lock(run_dir: Path | str) -> None:
-    """Removes .pipeline.pid if present."""
+    """Removes .pipeline.pid if present and owned by current process or dead."""
     lock_path = Path(run_dir) / LOCK_FILENAME
     try:
         if lock_path.exists():
+            raw = lock_path.read_text(encoding="utf-8").strip()
+            data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+            owner_pid = int(data.get("pid", 0))
+            if owner_pid == os.getpid() or not is_pid_alive(owner_pid):
+                lock_path.unlink()
+    except (OSError, ValueError, json.JSONDecodeError):
+        try:
             lock_path.unlink()
-    except OSError:
-        pass
+        except OSError:
+            pass
 
 
 @contextmanager
@@ -123,6 +166,118 @@ def run_process_lock(run_dir: Path | str) -> Iterator[Path]:
     finally:
         if owned:
             release_run_lock(run_dir)
+
+
+def get_global_lock_path(repo_root: Path | str | None = None) -> Path:
+    if repo_root is None:
+        root = Path(__file__).resolve().parent.parent.parent
+    else:
+        root = Path(repo_root).resolve()
+    return root / "data" / GLOBAL_LOCK_FILENAME
+
+
+def is_global_pipeline_active(repo_root: Path | str | None = None) -> bool:
+    lock_path = get_global_lock_path(repo_root)
+    if not lock_path.exists():
+        return False
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return False
+        data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+        pid = int(data.get("pid", 0))
+        return is_pid_alive(pid)
+    except Exception:
+        return False
+
+
+def acquire_global_lock(repo_root: Path | str | None = None, run_date: str = "") -> Path:
+    """Atomically acquires the single global lock for hardware / GPU resources."""
+    lock_path = get_global_lock_path(repo_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "run_date": run_date,
+        "started_at": datetime.now().astimezone().isoformat(),
+    }
+    content = json.dumps(payload).encode("utf-8")
+
+    if lock_path.exists():
+        try:
+            raw = lock_path.read_text(encoding="utf-8").strip()
+            data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+            existing_pid = int(data.get("pid", 0))
+            if existing_pid == os.getpid():
+                return lock_path
+            if existing_pid > 0 and is_pid_alive(existing_pid):
+                locked_date = data.get("run_date", "unknown")
+                raise RuntimeError(
+                    f"Global pipeline lock ({GLOBAL_LOCK_FILENAME}) is held by active PID {existing_pid} (run date: {locked_date})."
+                )
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+        except (ValueError, OSError, json.JSONDecodeError):
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+    except FileExistsError:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+        existing_pid = int(data.get("pid", 0))
+        if existing_pid > 0 and is_pid_alive(existing_pid) and existing_pid != os.getpid():
+            locked_date = data.get("run_date", "unknown")
+            raise RuntimeError(
+                f"Global pipeline lock ({GLOBAL_LOCK_FILENAME}) acquired by concurrent PID {existing_pid} (run date: {locked_date})."
+            )
+        lock_path.write_text(json.dumps(payload), encoding="utf-8")
+    return lock_path
+
+
+def release_global_lock(repo_root: Path | str | None = None) -> None:
+    """Removes .pipeline_global.lock if owned by current process or dead."""
+    lock_path = get_global_lock_path(repo_root)
+    try:
+        if lock_path.exists():
+            raw = lock_path.read_text(encoding="utf-8").strip()
+            data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+            owner_pid = int(data.get("pid", 0))
+            if owner_pid == os.getpid() or not is_pid_alive(owner_pid):
+                lock_path.unlink()
+    except Exception:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
+@contextmanager
+def global_pipeline_lock(repo_root: Path | str | None = None, run_date: str = "") -> Iterator[Path]:
+    """Context manager acquiring the single-tenant global pipeline lock."""
+    lock_path = get_global_lock_path(repo_root)
+    owned = True
+    if lock_path.exists():
+        try:
+            raw = lock_path.read_text(encoding="utf-8").strip()
+            data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+            if int(data.get("pid", 0)) == os.getpid():
+                owned = False
+        except Exception:
+            pass
+    if owned:
+        acquire_global_lock(repo_root=repo_root, run_date=run_date)
+    try:
+        yield lock_path
+    finally:
+        if owned:
+            release_global_lock(repo_root=repo_root)
 
 
 def compute_manifest_status(
@@ -229,13 +384,22 @@ def create_initial_manifest(run_id: str, date_str: str, pipeline_config: dict[st
     return manifest
 
 
-def load_manifest(manifest_path: Path | str) -> dict[str, Any]:
-    """Loads and returns the manifest dictionary from disk.
-
-    TODO: Implement schema validation against manifest.schema.json.
-    """
+def load_manifest(manifest_path: Path | str, validate: bool = True) -> dict[str, Any]:
+    """Loads and returns the manifest dictionary from disk, validating against schema."""
     with open(manifest_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        manifest = json.load(f)
+    if validate:
+        now_iso = datetime.now().astimezone().isoformat()
+        if "created_at" not in manifest:
+            manifest["created_at"] = now_iso
+        if "updated_at" not in manifest:
+            manifest["updated_at"] = now_iso
+        schema_path = Path(__file__).resolve().parents[2] / "contracts" / "manifest.schema.json"
+        if schema_path.exists():
+            is_valid, err = validate_contract(manifest, schema_path)
+            if not is_valid:
+                raise ValueError(f"manifest.json schema validation failed: {err}")
+    return manifest
 
 
 def save_manifest(manifest: dict[str, Any], manifest_path: Path | str) -> None:
@@ -244,7 +408,7 @@ def save_manifest(manifest: dict[str, Any], manifest_path: Path | str) -> None:
     manifest["updated_at"] = now_iso
     if "created_at" not in manifest:
         manifest["created_at"] = now_iso
-    schema_path = Path("contracts/manifest.schema.json")
+    schema_path = Path(__file__).resolve().parents[2] / "contracts" / "manifest.schema.json"
     if schema_path.exists():
         is_valid, err = validate_contract(manifest, schema_path)
         if not is_valid:

@@ -21,7 +21,8 @@ _FIRST_PERSON_WORDS = frozenset({
     "we", "We", "our", "Our", "ours", "Ours", "ourselves", "Ourselves", "us",
     "म", "मेरो", "मेरा", "मेरी", "हामी", "हाम्रो", "हाम्रा", "हामीलाई",
 })
-_SPINE_NUM_RE = re.compile(r"(?<![\d.])\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])")
+_SPINE_NUM_RE = re.compile(r"(?<![\d.])\d+(?:,\d{2,3})*(?:\.\d+)?(?![\d.])")
+GENERIC_SPINE_ENTITIES = frozenset({"nepal", "kathmandu"})
 
 
 @lru_cache(maxsize=512)
@@ -180,8 +181,10 @@ def detect_opinion(article: dict[str, Any]) -> tuple[bool, str]:
     if author_match:
         return True, f"Author designation '{author_match.group(1)}'"
 
-    # 4. First-person pronoun heuristic
-    words = _FIRST_PERSON_RE.findall(full_text)
+    # 4. First-person pronoun heuristic (strip quotes to avoid flagging direct speech in news)
+    unquoted = re.sub(r'["“][^"”]*["”]|‘[^’]*’', " ", full_text)
+    words = _FIRST_PERSON_RE.findall(unquoted)
+    total_words = len(words)
     fp_count = 0
     fp_examples = []
     for w in words:
@@ -190,7 +193,7 @@ def detect_opinion(article: dict[str, Any]) -> tuple[bool, str]:
             if len(fp_examples) < 5:
                 fp_examples.append(w)
 
-    if fp_count >= 5:
+    if fp_count >= 5 and (total_words == 0 or (fp_count / total_words) >= 0.008 or fp_count >= 8):
         return True, f"First-person pronoun count ({fp_count}) >= 5 (e.g. {', '.join(fp_examples)})"
 
     return False, ""
@@ -240,9 +243,8 @@ def detect_stale_preview(article: dict[str, Any], ref_time: datetime | None = No
     ref_npt = ref_time.astimezone(NPT_TZ)
     pub_npt = pub_dt.astimezone(NPT_TZ)
 
-    m_phrase = re.search(
+    future_trigger_re = re.compile(
         r"\b(will|scheduled|set to|to face|to host|to open|to begin|to start|to hold|to meet|due to|slated|expected to)\b|(हुने|बस्ने|खुल्ने|सुरु हुने)",
-        text,
         re.IGNORECASE,
     )
 
@@ -253,47 +255,57 @@ def detect_stale_preview(article: dict[str, Any], ref_time: datetime | None = No
             re.IGNORECASE,
         )
     )
-    if m_phrase and time_matches:
-        for tm in time_matches:
-            time_str = tm.group(0)
-            hour, minute = parse_time_str(time_str)
+    for tm in time_matches:
+        # Require future trigger within ±80 characters of the clock time
+        t_start = max(0, tm.start() - 80)
+        t_end = min(len(text), tm.end() + 80)
+        local_window = text[t_start:t_end]
+        m_phrase = future_trigger_re.search(local_window)
+        if not m_phrase:
+            continue
 
-            start = max(0, tm.start() - 50)
-            end = min(len(text), tm.end() + 50)
-            window = text[start:end].lower()
+        time_str = tm.group(0)
+        hour, minute = parse_time_str(time_str)
 
-            event_year = pub_dt.year
-            event_month = pub_dt.month
-            event_day = pub_dt.day
+        event_year = pub_npt.year
+        event_month = pub_npt.month
+        event_day = pub_npt.day
 
-            m_date = re.search(
-                r"\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})\b",
-                window,
+        m_date = re.search(
+            r"\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})\b",
+            local_window,
+            re.IGNORECASE,
+        )
+        if m_date:
+            event_month = MONTHS[m_date.group(1).lower()]
+            event_day = int(m_date.group(2))
+        else:
+            m_date2 = re.search(
+                r"\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b",
+                local_window,
+                re.IGNORECASE,
             )
-            if m_date:
-                event_month = MONTHS[m_date.group(1)]
-                event_day = int(m_date.group(2))
-            else:
-                m_date2 = re.search(
-                    r"\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b",
-                    window,
-                )
-                if m_date2:
-                    event_day = int(m_date2.group(1))
-                    event_month = MONTHS[m_date2.group(2)]
+            if m_date2:
+                event_day = int(m_date2.group(1))
+                event_month = MONTHS[m_date2.group(2).lower()]
 
-            try:
-                event_dt = datetime(event_year, event_month, event_day, hour, minute, tzinfo=pub_dt.tzinfo)
-            except Exception:
-                continue
+        # Year rollover: December article previewing January event
+        if pub_npt.month == 12 and event_month == 1:
+            event_year += 1
 
-            if event_dt < ref_time:
-                return (
-                    True,
-                    f"Future event preview ('{m_phrase.group()}', time '{time_str}') on {event_dt.strftime('%Y-%m-%d %H:%M')} has passed relative to {ref_time.strftime('%Y-%m-%d %H:%M')}",
-                )
+        try:
+            event_dt = datetime(event_year, event_month, event_day, hour, minute, tzinfo=NPT_TZ)
+        except Exception:
+            continue
+
+        if event_dt < ref_npt:
+            return (
+                True,
+                f"Future event preview ('{m_phrase.group()}', time '{time_str}') on {event_dt.strftime('%Y-%m-%d %H:%M')} has passed relative to {ref_npt.strftime('%Y-%m-%d %H:%M')}",
+            )
 
     # Nepal time-of-day anchor checks (relative to +05:45 NPT) even without explicit clock time
+    m_phrase_any = future_trigger_re.search(text)
     m_nepse = re.search(r"\b(nepse to open|market set to open|nepse set to open)\b", text, re.IGNORECASE)
     if m_nepse and (pub_npt.date() < ref_npt.date() or ref_npt.hour >= 15):
         return (
@@ -301,7 +313,7 @@ def detect_stale_preview(article: dict[str, Any], ref_time: datetime | None = No
             f"NEPSE pre-market preview ('{m_nepse.group(0)}') is stale at {ref_npt.strftime('%Y-%m-%d %H:%M NPT')}",
         )
 
-    if m_phrase:
+    if m_phrase_any:
         m_morning = re.search(r"\b(this morning|today morning)\b|आज बिहान", text, re.IGNORECASE)
         if m_morning and (pub_npt.date() < ref_npt.date() or ref_npt.hour >= 12):
             return (
@@ -398,9 +410,11 @@ def extract_spine_numbers(text: str, exclude_years: set[int] | None = None) -> s
         return set()
     norm = text.translate(DEVANAGARI_DIGITS)
     cur_year = datetime.now().year
-    excluded = {0.0, 1.0, float(cur_year)}
+    # Exclude trivial integers, BS years (2080-2090), and current AD year
+    excluded = {float(y) for y in range(2080, 2091)}
+    excluded.add(float(cur_year))
     if exclude_years:
-        excluded.update(float(y) for y in exclude_years)
+        excluded.update(float(y) for y in exclude_years if y is not None)
 
     found: set[float] = set()
     for m in _SPINE_NUM_RE.finditer(norm):
@@ -408,8 +422,9 @@ def extract_spine_numbers(text: str, exclude_years: set[int] | None = None) -> s
             val = float(m.group(0).replace(",", ""))
         except ValueError:
             continue
-        if val not in excluded:
-            found.add(val)
+        if val in excluded or (val < 10.0 and val.is_integer()):
+            continue
+        found.add(val)
     return found
 
 
@@ -468,12 +483,13 @@ def _features_are_similar(
                     if (c_inter / c_union) >= 0.40:
                         return True
 
-    # 4. Cross-script Entity & Numeric Spine Matching (>= 2 canonical entities + >= 1 non-trivial number within 12h)
+    # 4. Cross-script Entity & Numeric Spine Matching (>= 2 canonical non-generic entities + >= 1 non-trivial number within 12h)
     ts1 = f1["ts"]
     ts2 = f2["ts"]
     within_window = True if (ts1 == 0.0 or ts2 == 0.0) else (abs(ts1 - ts2) <= 12 * 3600)
     if within_window:
-        if len(f1["entities"] & f2["entities"]) >= 2:
+        shared_ents = (f1["entities"] & f2["entities"]) - GENERIC_SPINE_ENTITIES
+        if len(shared_ents) >= 2:
             if len(f1["numbers"] & f2["numbers"]) >= 1:
                 return True
 
@@ -517,7 +533,7 @@ def articles_are_similar(
                     if (c_inter / c_union) >= 0.40:
                         return True
 
-    # 4. Cross-script Entity & Numeric Spine Matching (>= 2 canonical entities + >= 1 non-trivial number within 12h)
+    # 4. Cross-script Entity & Numeric Spine Matching (>= 2 canonical non-generic entities + >= 1 non-trivial number within 12h)
     ts1 = parse_timestamp(a1.get("published_at"))
     ts2 = parse_timestamp(a2.get("published_at"))
     within_window = True if (ts1 == 0.0 or ts2 == 0.0) else (abs(ts1 - ts2) <= 12 * 3600)
@@ -526,7 +542,8 @@ def articles_are_similar(
         txt2 = f"{t2} {a2.get('text_summary', '')} {a2.get('full_text', '')}"
         ents1 = extract_canonical_entities(txt1, entity_aliases=entity_aliases)
         ents2 = extract_canonical_entities(txt2, entity_aliases=entity_aliases)
-        if len(ents1 & ents2) >= 2:
+        shared_ents = (ents1 & ents2) - GENERIC_SPINE_ENTITIES
+        if len(shared_ents) >= 2:
             excl = {ref_year} if ref_year else None
             nums1 = extract_spine_numbers(txt1, exclude_years=excl)
             nums2 = extract_spine_numbers(txt2, exclude_years=excl)
@@ -728,7 +745,7 @@ def cluster_articles(
         art_feat = _precompute_article_features(art, entity_aliases=entity_aliases, ref_year=ref_year)
         placed = False
         for c, c_feats in zip(clusters, cluster_features):
-            if any(
+            if all(
                 _features_are_similar(art_feat, existing_feat, title_ratio, token_overlap)
                 for existing_feat in c_feats
             ):
@@ -768,7 +785,7 @@ def cluster_articles(
             reverse=True,
         )
 
-        # Detect differing numeric figures across articles in cluster for supersession
+        # Detect genuine conflicting numeric figures across articles in cluster for supersession
         article_num_sets = [
             frozenset(
                 extract_spine_numbers(
@@ -778,7 +795,11 @@ def cluster_articles(
             )
             for a in sorted_members
         ]
-        has_differing_numbers = len(sorted_members) >= 2 and len(set(article_num_sets)) > 1
+        has_differing_numbers = (
+            len(sorted_members) >= 2
+            and sum(1 for s in article_num_sets if len(s) > 0) >= 2
+            and len(set(s for s in article_num_sets if len(s) > 0)) > 1
+        )
         newest_article = sorted_members[0]
 
         superseded_flags: list[bool] = []
@@ -938,6 +959,12 @@ def cluster_articles(
             assigned_ids.add(id(c))
 
     news_clusters = slot_news if slot_news else raw_news
+    news_clusters.sort(
+        key=lambda c: (
+            c.get("broadcast_slot_id") or "slot_99",
+            int(c.get("slot_item_index") or 99),
+        )
+    )
 
     # Re-index cluster_id cleanly
     for idx, c in enumerate(news_clusters, 1):

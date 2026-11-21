@@ -24,13 +24,21 @@ def _fmt_ts(sec: float) -> str:
 
 
 def _extract_timestamps_from_warning(warning_text: str) -> list[float]:
-    """Best-effort extraction of numeric timestamps mentioned in a QA warning."""
-    matches = re.findall(r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)\s*s?\b", warning_text)
+    """Best-effort extraction of numeric timestamps mentioned in a QA warning,
+    ignoring threshold constants like '> 3.0s' or '< 0.5s'."""
+    pattern = r"(?:([><]=?)\s*)?(\d+(?:\.\d+)?)\s*s?\b"
+    matches = re.finditer(pattern, warning_text)
     vals: list[float] = []
     for m in matches:
+        comparator, num_str = m.groups()
+        if comparator:
+            continue
+        start, end = m.span()
+        after = warning_text[end : end + 20].lower()
+        if any(w in after for w in ["limit", "threshold", "tolerance"]):
+            continue
         try:
-            v = float(m)
-            # Ignore obvious threshold constants like 3.0 if paired with '>' or '<'
+            v = float(num_str)
             vals.append(v)
         except ValueError:
             pass
@@ -201,25 +209,43 @@ def generate_storyboard(
     extracted_frames: list[Path] = []
     entries: list[dict[str, Any]] = []
 
+    # Single-pass frame extraction across final_mp4
+    if duration_sec > 0.0:
+        batch_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(final_mp4),
+            "-vf",
+            f"fps=1/{interval_sec},scale={frame_width}:-2",
+            "-start_number",
+            "0",
+            "-q:v",
+            "3",
+            str(frames_dir / "frame_%04d.jpg"),
+        ]
+        subprocess.run(batch_cmd, capture_output=True)
+
     for idx, t in enumerate(timestamps):
         fname = f"frame_{idx:04d}.jpg"
         fpath = frames_dir / fname
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            f"{t:.3f}",
-            "-i",
-            str(final_mp4),
-            "-vframes",
-            "1",
-            "-vf",
-            f"scale={frame_width}:-2",
-            "-q:v",
-            "3",
-            str(fpath),
-        ]
-        subprocess.run(cmd, capture_output=True)
+        if not fpath.exists():
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{t:.3f}",
+                "-i",
+                str(final_mp4),
+                "-vframes",
+                "1",
+                "-vf",
+                f"scale={frame_width}:-2",
+                "-q:v",
+                "3",
+                str(fpath),
+            ]
+            subprocess.run(cmd, capture_output=True)
         if not fpath.exists():
             continue
         extracted_frames.append(fpath)

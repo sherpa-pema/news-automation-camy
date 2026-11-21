@@ -993,3 +993,99 @@ def test_picker_html_has_direct_apply_picks_controls(tmp_path):
     assert "<script src=\"http" not in html_text
 
 
+def test_draw_card_image_visible_center_text_landscape_and_vertical(tmp_path: Path) -> None:
+    """Assert draw_card_image() renders visible text pixels in the center region for 16:9 and 9:16."""
+    from src.utils.media_review import draw_card_image
+
+    # Landscape 16:9 (1920x1080)
+    card_16_9 = tmp_path / "card_16_9.png"
+    draw_card_image("Nepal Economic Growth Exceeds Target", card_16_9, width=1920, height=1080)
+    assert card_16_9.exists()
+    img_l = Image.open(card_16_9)
+    assert img_l.size == (1920, 1080)
+    # Center text box crop
+    center_l = img_l.crop((300, 300, 1620, 780))
+    # Count bright white text pixels in center
+    has_text_l = any(
+        p[0] > 230 and p[1] > 230 and p[2] > 230
+        for p in list(center_l.getdata())
+    )
+    assert has_text_l is True
+
+    # Vertical 9:16 (1080x1920)
+    card_9_16 = tmp_path / "card_9_16.png"
+    draw_card_image("Nepal Economic Growth Exceeds Target", card_9_16, width=1080, height=1920)
+    assert card_9_16.exists()
+    img_v = Image.open(card_9_16)
+    assert img_v.size == (1080, 1920)
+    # Center text box crop
+    center_v = img_v.crop((150, 600, 930, 1320))
+    has_text_v = any(
+        p[0] > 230 and p[1] > 230 and p[2] > 230
+        for p in list(center_v.getdata())
+    )
+    assert has_text_v is True
+
+
+def test_picker_html_balanced_div_tags(tmp_path: Path) -> None:
+    """Assert picker.html has balanced <div> tags both with and without candidate shots."""
+    from html.parser import HTMLParser
+
+    class DivBalanceParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.div_open_count = 0
+            self.div_close_count = 0
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() == "div":
+                self.div_open_count += 1
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "div":
+                self.div_close_count += 1
+
+    # Case 1: Populated candidates
+    data_with_candidates = {
+        "date": "2026-11-20",
+        "shots": [
+            {
+                "shot_id": "sc_01_00",
+                "scene_id": "sc_01",
+                "shot_index": 0,
+                "scene_headline": "Test Story",
+                "duration": 5.0,
+                "candidates": [
+                    {
+                        "id": "cand_1",
+                        "source": "wikimedia_commons",
+                        "kind": "image",
+                        "thumbnail_url": "https://example.com/thumb.jpg",
+                        "relevance_score": 0.85,
+                    }
+                ],
+            }
+        ],
+    }
+    html_file1 = tmp_path / "picker_with_cands.html"
+    generate_picker_html(data_with_candidates, html_file1)
+    parser1 = DivBalanceParser()
+    parser1.feed(html_file1.read_text(encoding="utf-8"))
+    assert parser1.div_open_count > 0
+    assert parser1.div_open_count == parser1.div_close_count, (
+        f"Unbalanced <div> tags in populated picker: {parser1.div_open_count} open vs {parser1.div_close_count} close"
+    )
+
+    # Case 2: Zero candidates (shots: [])
+    data_empty = {"date": "2026-11-20", "shots": []}
+    html_file2 = tmp_path / "picker_empty.html"
+    generate_picker_html(data_empty, html_file2)
+    parser2 = DivBalanceParser()
+    parser2.feed(html_file2.read_text(encoding="utf-8"))
+    assert parser2.div_open_count > 0
+    assert parser2.div_open_count == parser2.div_close_count, (
+        f"Unbalanced <div> tags in empty picker: {parser2.div_open_count} open vs {parser2.div_close_count} close"
+    )
+
+
+

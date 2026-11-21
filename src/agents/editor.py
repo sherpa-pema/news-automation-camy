@@ -45,11 +45,17 @@ logger = setup_logger("editor")
 class EditorAgent(BaseAgent):
     """Editor Agent handles clustering, briefing, validation, and approval of broadcast scripts."""
 
-    def __init__(self, run_dir: Path | str, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        run_dir: Path | str,
+        config: dict[str, Any] | None = None,
+        editor_mode: str = "ide_agent",
+    ) -> None:
         super().__init__(run_dir, config)
         self.script_dir = self.run_dir / "script"
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.editor_cfg, self.whitelist = load_editor_config()
+        self.editor_mode = editor_mode
 
     def _get_default_run_kind(self) -> str:
         """Reads default_run_kind from config/pipeline.yaml (defaults to 'test')."""
@@ -528,11 +534,6 @@ class EditorAgent(BaseAgent):
         for sc in draft_data.get("scenes", []):
             sc["est_duration_sec"] = estimate_scene_duration_sec(sc.get("narration", ""), budget)
         total_duration = round(sum(float(sc.get("est_duration_sec", 0.0)) for sc in draft_data.get("scenes", [])), 1)
-
-        # Add scene_04 warning if event time has passed on 2026-11-07 run
-        warn_scene_04 = "Scene 04: The match event time (17:00 on 2026-11-07) has passed; match preview narration is now historical."
-        if self.run_dir.name == "2026-11-07" and warn_scene_04 not in warnings:
-            warnings.append(warn_scene_04)
         report["warnings"] = warnings
 
         effective_run_kind = draft_data.get("run_kind") or manifest.get("run_kind") or self._get_default_run_kind()
@@ -540,7 +541,7 @@ class EditorAgent(BaseAgent):
             "language": draft_data.get("language", "English"),
             "origin": "editor",
             "run_kind": effective_run_kind,
-            "editor_mode": "ide_agent",
+            "editor_mode": self.editor_mode,
             "draft_sha256": draft_sha256,
             "validator_fingerprint": report.get("validator_fingerprint"),
             "validated_at": validated_at,
@@ -659,6 +660,21 @@ class EditorAgent(BaseAgent):
                 f"Current:  {current_fp}\n"
                 f"Re-run validate before approving."
             )
+
+        # Verify draft_sha256 against current draft_script.json if it exists
+        draft_script_path = self.script_dir / "draft_script.json"
+        if draft_script_path.exists():
+            current_draft_sha = hashlib.sha256(draft_script_path.read_bytes()).hexdigest()
+            with open(script_path, "r", encoding="utf-8") as sf:
+                script_data = json.load(sf)
+            recorded_draft_sha = script_data.get("draft_sha256")
+            if recorded_draft_sha and recorded_draft_sha != current_draft_sha:
+                raise ValueError(
+                    f"draft_script.json was modified after script.json was generated.\n"
+                    f"Recorded draft_sha256: {recorded_draft_sha}\n"
+                    f"Current draft_sha256:  {current_draft_sha}\n"
+                    f"Re-run validate before approving."
+                )
 
         script_sha256 = hashlib.sha256(script_path.read_bytes()).hexdigest()
         approval_data = {

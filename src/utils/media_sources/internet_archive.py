@@ -59,16 +59,28 @@ class InternetArchiveSource(BaseMediaSource):
                 allowed in lic_url
                 for allowed in ["publicdomain", "cc0", "licenses/by/"]
             )
-            if not is_valid_license or "by-sa" in lic_url or "by-nc" in lic_url:
+            if not is_valid_license or "by-sa" in lic_url or "by-nc" in lic_url or "by-nd" in lic_url:
                 continue
 
             ident = doc.get("identifier")
+            mp4_filename = f"{ident}.mp4"
+            meta_endpoint = cfg.get("metadata_endpoint", f"https://archive.org/metadata/{ident}")
+            if not meta_endpoint.endswith(ident):
+                meta_endpoint = f"{meta_endpoint.rstrip('/')}/{ident}"
+            meta_data = self.cache_mgr.get_json(meta_endpoint, min_interval=0.5, domain_key="archive.org", offline=offline)
+            if meta_data and "files" in meta_data:
+                files = meta_data["files"]
+                mp4_files = [f for f in files if isinstance(f, dict) and f.get("name", "").lower().endswith(".mp4")]
+                if mp4_files:
+                    best_f = sorted(mp4_files, key=lambda x: int(x.get("size") or 0), reverse=True)[0]
+                    mp4_filename = best_f.get("name", mp4_filename)
+
             cand = Candidate(
                 source="internet_archive",
                 id=f"ia_{ident}",
                 kind="video",
                 page_url=f"https://archive.org/details/{ident}",
-                download_url=f"https://archive.org/download/{ident}/{ident}.mp4",
+                download_url=f"https://archive.org/download/{ident}/{mp4_filename}",
                 width=1920,
                 height=1080,
                 duration=None,
@@ -77,6 +89,7 @@ class InternetArchiveSource(BaseMediaSource):
                 author=doc.get("creator", "Internet Archive"),
                 title=doc.get("title", ident),
                 attribution_text=f"Archive footage via Internet Archive ({ident})",
+                attribution_required=("by" in lic_url),
             )
             candidates.append(cand)
 

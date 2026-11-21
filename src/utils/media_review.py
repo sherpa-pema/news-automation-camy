@@ -55,13 +55,21 @@ def generate_credits_markdown(
     lines.append("## Stock & Archive Providers")
     if "pixabay" in used_sources:
         lines.append("- Stock video and imagery courtesy of [Pixabay](https://pixabay.com).")
+    if "pexels" in used_sources:
+        lines.append("- Stock video and imagery courtesy of [Pexels](https://www.pexels.com).")
+    if "unsplash" in used_sources:
+        lines.append("- Photography courtesy of [Unsplash](https://unsplash.com).")
     if "nasa" in used_sources:
         lines.append("- Media and imagery courtesy of [NASA](https://images.nasa.gov).")
     if "coverr" in used_sources:
         lines.append("- Footage courtesy of [Coverr](https://coverr.co).")
     if "openverse" in used_sources:
         lines.append("- Open-licensed imagery sourced via [Openverse](https://openverse.org).")
-    if "user-provided" in used_sources:
+    if "internet_archive" in used_sources:
+        lines.append("- Historical and archive footage courtesy of [Internet Archive](https://archive.org).")
+    if "wikimedia_commons" in used_sources:
+        lines.append("- Media and imagery sourced via [Wikimedia Commons](https://commons.wikimedia.org).")
+    if "user-provided" in used_sources or "local_library" in used_sources:
         lines.append("- Field footage and photography provided directly by the production team.")
 
     lines.append("")
@@ -79,10 +87,37 @@ def create_contact_sheet_for_scene(
     scene_shots: list[dict[str, Any]],
     run_dir: Path,
     output_path: Path,
+    orientation: str | None = None,
 ) -> None:
     """Creates a contact sheet JPEG showing the first frame of each shot in the scene with captions."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tile_w, tile_h = 480, 270
+
+    is_vertical = (orientation in ("vertical", "portrait"))
+    if not is_vertical:
+        mm_file = run_dir / "media" / "media_manifest.json"
+        if mm_file.exists():
+            try:
+                import json
+                with open(mm_file, "r", encoding="utf-8") as f:
+                    mm = json.load(f)
+                res = mm.get("resolution", {})
+                if res.get("height", 0) > res.get("width", 0):
+                    is_vertical = True
+            except Exception:
+                pass
+    if not is_vertical:
+        mf_file = run_dir / "manifest.json"
+        if mf_file.exists():
+            try:
+                import json
+                with open(mf_file, "r", encoding="utf-8") as f:
+                    mf = json.load(f)
+                if mf.get("orientation") == "vertical":
+                    is_vertical = True
+            except Exception:
+                pass
+
+    tile_w, tile_h = (270, 480) if is_vertical else (480, 270)
     n_shots = max(1, len(scene_shots))
 
     # Single row layout or multi-row if > 4 shots
@@ -199,7 +234,7 @@ def generate_review_html(
         "</head>",
         "<body>",
         f"  <h1>Nepal News Bot - Media Stage Review</h1>",
-        f"  <div class='meta'>Run Date: <strong>{date_str}</strong> | Orientation: <strong>{manifest_data.get('orientation')}</strong> | FPS: <strong>{manifest_data.get('fps')}</strong> | Total Shots: <strong>{len(shots)}</strong></div>",
+        f"  <div class='meta'>Run Date: <strong>{html.escape(str(date_str))}</strong> | Orientation: <strong>{html.escape(str(manifest_data.get('orientation', 'landscape')))}</strong> | FPS: <strong>{html.escape(str(manifest_data.get('fps', 30)))}</strong> | Total Shots: <strong>{len(shots)}</strong></div>",
     ]
 
     for scene in script_scenes:
@@ -228,9 +263,9 @@ def generate_review_html(
             lic = s.get("license")
             author = s.get("author")
             orig = s.get("origin_url")
-            orig_html = f"<a href='{orig}' target='_blank'>Link</a>" if orig and orig != "local" else (orig or "-")
+            orig_html = f"<a href='{html.escape(orig)}' target='_blank'>Link</a>" if orig and orig != "local" else html.escape(orig or "-")
 
-            html_lines.append(f"        <tr><td>{sh_idx}</td><td>{t_span}</td><td>{typ}</td><td>{src}</td><td>{lic}</td><td>{html.escape(author or '')}</td><td>{orig_html}</td></tr>")
+            html_lines.append(f"        <tr><td>{sh_idx}</td><td>{html.escape(str(t_span))}</td><td>{html.escape(str(typ or ''))}</td><td>{html.escape(str(src or ''))}</td><td>{html.escape(str(lic or ''))}</td><td>{html.escape(author or '')}</td><td>{orig_html}</td></tr>")
         html_lines.append("      </tbody>")
         html_lines.append("    </table>")
         html_lines.append("  </div>")
@@ -254,16 +289,20 @@ def draw_card_image(
     so background cards do not visually collide with featured foreground cards.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.new("RGBA", (width, height), (11, 31, 58, 255))
+    # Vertical gradient background via 1xH strip resized to width x height
+    gradient_strip = Image.new("RGBA", (1, height))
+    pixels = [
+        (
+            int(11 * (1 - y / height) + 20 * (y / height)),
+            int(31 * (1 - y / height) + 52 * (y / height)),
+            int(58 * (1 - y / height) + 90 * (y / height)),
+            255,
+        )
+        for y in range(height)
+    ]
+    gradient_strip.putdata(pixels)
+    img = gradient_strip.resize((width, height), Image.Resampling.BICUBIC)
     draw = ImageDraw.Draw(img)
-
-    # Vertical gradient background
-    for y in range(height):
-        factor = y / height
-        r = int(11 * (1 - factor) + 20 * factor)
-        g = int(31 * (1 - factor) + 52 * factor)
-        b = int(58 * (1 - factor) + 90 * factor)
-        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
 
     # Amber decorative frame / accents
     margin = 80
@@ -291,11 +330,13 @@ def draw_card_image(
 
     # Fonts
     font_paths = ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"]
+    scale = width / 1920.0
+    main_font_size = max(24, int(56 * scale))
     font = None
     for fp in font_paths:
         if Path(fp).exists():
             try:
-                font = ImageFont.truetype(fp, 56)
+                font = ImageFont.truetype(fp, main_font_size)
                 break
             except Exception:
                 pass
@@ -338,6 +379,34 @@ def draw_card_image(
             font=font_watermark,
             fill=(255, 255, 255, 50),
         )
+
+    if card_text and card_text.strip():
+        import textwrap
+        content_w = width - (margin * 2 + int(120 * scale))
+        sample_bbox = draw.textbbox((0, 0), "A", font=font)
+        char_w = max(10, sample_bbox[2] - sample_bbox[0])
+        wrap_chars = max(15, int(content_w / char_w))
+        lines = textwrap.wrap(card_text.strip(), width=wrap_chars)
+        if not lines:
+            lines = [card_text.strip()]
+
+        line_spacing = int(18 * scale)
+        line_bboxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+        line_heights = [(bb[3] - bb[1]) for bb in line_bboxes]
+        line_widths = [(bb[2] - bb[0]) for bb in line_bboxes]
+        total_text_h = sum(line_heights) + line_spacing * (len(lines) - 1)
+
+        y_start = (height - total_text_h) / 2
+        if not quiet:
+            y_start += int(25 * scale)
+
+        curr_y = y_start
+        for ln, lw, lh in zip(lines, line_widths, line_heights):
+            curr_x = (width - lw) / 2
+            shadow_off = max(1, int(2 * scale))
+            draw.text((curr_x + shadow_off, curr_y + shadow_off), ln, font=font, fill=(0, 0, 0, 160))
+            draw.text((curr_x, curr_y), ln, font=font, fill=(255, 255, 255, 255))
+            curr_y += lh + line_spacing
 
     img.convert("RGB").save(output_path, "PNG")
 
@@ -932,8 +1001,6 @@ def generate_picker_html(candidates_data: dict[str, Any], output_path: Path) -> 
         <div class="shot-narration">
           🗣️ "{html.escape(sent_str)}"
         </div>
-
-        <div class="candidates-grid">
 """
             candidates = sh.get("candidates", [])
             if candidates:

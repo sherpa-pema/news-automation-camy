@@ -6,10 +6,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import os
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any, Callable
 
-from src.utils.manifest import is_pid_alive, is_run_process_active
+from src.utils.manifest import (
+    get_global_lock_path,
+    is_global_pipeline_active,
+    is_pid_alive,
+    is_run_process_active,
+)
 
 
 def terminate_pid_tree(pid: int) -> bool:
@@ -92,10 +98,26 @@ class OfficeJobManager:
                     f"is currently executing on the pipeline. GPU/TTS resources are single-tenant."
                 )
 
-        # 2. Check external pipeline lock on requesting run date
-        run_dir = self.repo_root / "data" / "runs" / requesting_run_date
-        if is_run_process_active(run_dir):
-            return True, f"Pipeline process lock (.pipeline.pid) is active for {requesting_run_date}."
+        # 2. Check global pipeline lock
+        global_lock_path = get_global_lock_path(self.repo_root)
+        if global_lock_path.exists():
+            try:
+                import json
+                raw = global_lock_path.read_text(encoding="utf-8").strip()
+                data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+                g_pid = int(data.get("pid", 0))
+                if g_pid > 0 and is_pid_alive(g_pid):
+                    g_date = data.get("run_date", "unknown")
+                    return True, f"Global pipeline lock (.pipeline_global.lock) is active for PID {g_pid} (run date: {g_date})."
+            except Exception:
+                pass
+
+        # 3. Check any active run across data/runs/
+        runs_dir = self.repo_root / "data" / "runs"
+        if runs_dir.exists():
+            for d in runs_dir.iterdir():
+                if d.is_dir() and is_run_process_active(d):
+                    return True, f"Pipeline process lock (.pipeline.pid) is active for {d.name}."
 
         return False, None
 
@@ -131,12 +153,17 @@ class OfficeJobManager:
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
 
+            extra_kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                extra_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self.repo_root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
+                **extra_kwargs,
             )
             job.proc = proc
 
