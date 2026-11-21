@@ -821,6 +821,66 @@ def test_api_validate_media_link_ssrf_blocking(tmp_path: Path) -> None:
     assert res_ok.json()["ok"] is True
 
 
+def test_web_office_categories_and_reset_run(tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    run_dir = _make_sample_run(tmp_path)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["selected_categories"] = ["sports"]
+    manifest["status"] = "done"
+    for s in manifest["stages"]:
+        manifest["stages"][s]["status"] = "done"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    # Put a mock final.mp4
+    (run_dir / "render").mkdir(parents=True, exist_ok=True)
+    (run_dir / "render" / "final.mp4").write_text("dummy-video", encoding="utf-8")
+
+    app = create_app(repo_root=tmp_path)
+    client = TestClient(app)
+
+    # 1. /api/runs returns category info
+    res_runs = client.get("/api/runs")
+    assert res_runs.status_code == 200
+    runs = res_runs.json()["runs"]
+    matched = next((r for r in runs if r["date"] == "2026-11-12"), None)
+    assert matched is not None
+    assert matched["selected_categories"] == ["sports"]
+    assert matched["category_display"] == "Sports"
+
+    # 2. /api/runs/2026-11-12/state returns category info
+    res_st = client.get("/api/runs/2026-11-12/state")
+    assert res_st.status_code == 200
+    st_data = res_st.json()
+    assert st_data["selected_categories"] == ["sports"]
+    assert st_data["category_display"] == "Sports"
+
+    # 3. POST reset-run archives previous and resets stages
+    res_reset = client.post(
+        "/api/runs/2026-11-12/reset-run",
+        json={"categories": ["business_economics"], "archive_previous": True},
+    )
+    assert res_reset.status_code == 200
+    reset_data = res_reset.json()
+    assert reset_data["ok"] is True
+    assert reset_data["selected_categories"] == ["business_economics"]
+    assert reset_data["archived_to"] is not None
+    assert Path(reset_data["archived_to"]).exists()
+
+    # Active final.mp4 was cleaned
+    assert not (run_dir / "render" / "final.mp4").exists()
+
+    # State now reflects pending stages and new category
+    res_st2 = client.get("/api/runs/2026-11-12/state")
+    assert res_st2.status_code == 200
+    st_data2 = res_st2.json()
+    assert st_data2["manifest"]["status"] == "pending"
+    assert st_data2["manifest"]["stages"]["scraper"]["status"] == "pending"
+    assert st_data2["category_display"] == "Business & Economics"
+    assert st_data2["selected_categories"] == ["business_economics"]
+
+
+
 
 
 

@@ -33,6 +33,7 @@ export class OfficeCanvasEngine {
 
     // Visual overrides used by Replay Mode
     this.overrideStatuses = null;
+    this.freshStandbyMode = false;
     this.bubbles = new Map(); // stationId -> { text, expiresAt, color }
     this.packets = []; // { from, to, label, artifact, progress, speed, color, sizeBytes }
 
@@ -67,6 +68,10 @@ export class OfficeCanvasEngine {
 
   setOverrideStatuses(mapOrNull) {
     this.overrideStatuses = mapOrNull;
+  }
+
+  setFreshStandbyMode(enabled) {
+    this.freshStandbyMode = Boolean(enabled);
   }
 
   setSelectedStation(id) {
@@ -175,7 +180,9 @@ export class OfficeCanvasEngine {
         x: clientX,
         y: clientY,
         title: `${hit.title} (${hit.agentName})`,
-        subtitle: `${hit.role} • ${stStatus.toUpperCase()} — Click to inspect`,
+        subtitle: this.freshStandbyMode
+          ? `${hit.role} • STANDBY — Ready for new run`
+          : `${hit.role} • ${stStatus.toUpperCase()} — Click to inspect`,
       });
     } else {
       this.onHoverInfo?.(null);
@@ -183,6 +190,9 @@ export class OfficeCanvasEngine {
   }
 
   _stationStatus(station) {
+    if (this.freshStandbyMode) {
+      return "pending";
+    }
     const stages = this.state?.manifest?.stages || {};
     if (this.overrideStatuses) {
       if (station.stageKey) return this.overrideStatuses[station.stageKey] || "pending";
@@ -482,6 +492,9 @@ export class OfficeCanvasEngine {
   }
 
   _stationSubtext(st, status) {
+    if (this.freshStandbyMode) {
+      return st.role.slice(0, 30);
+    }
     const stages = this.state?.manifest?.stages || {};
     const meta = st.stageKey ? stages[st.stageKey] : null;
     const m = meta?.metrics || {};

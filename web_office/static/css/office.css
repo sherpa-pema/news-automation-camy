@@ -132,6 +132,8 @@ select, input, textarea {
 .badge-paused { background: var(--amber-soft); color: var(--amber); }
 .badge-failed { background: var(--red-soft); color: var(--red); }
 .badge-status { background: var(--bg-card); color: var(--text); border: 1px solid var(--border); }
+.badge-category { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); text-transform: uppercase; letter-spacing: 0.5px; }
+.badge-standby { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }
 
 .btn {
   border: 1px solid var(--border);
@@ -184,6 +186,16 @@ select, input, textarea {
   background: var(--red-soft);
   color: #fca5a5;
   border-color: rgba(239, 68, 68, 0.5);
+}
+
+.btn-warning {
+  background: var(--amber);
+  color: #06101f;
+  font-weight: 700;
+  border-color: var(--amber);
+}
+.btn-warning:hover:not(:disabled) {
+  background: #e09618;
 }
 
 /* Main Stage & Drawer */

@@ -129,6 +129,40 @@ def _safe_read_text(path: Path, max_chars: int = 120_000) -> str | None:
         return None
 
 
+CATEGORY_LABELS: dict[str, str] = {
+    "headlines": "Headlines",
+    "politics": "Politics",
+    "society_local": "Society & Local",
+    "business_economics": "Business & Economics",
+    "health": "Health & Medicine",
+    "culture_entertainment": "Culture & Entertainment",
+    "science_technology": "Science & Tech",
+    "sports": "Sports",
+    "international": "International",
+    "all": "All Categories",
+}
+
+
+def extract_run_categories(manifest: dict[str, Any] | None) -> list[str]:
+    """Extracts the selected categories from the run manifest or scraper metrics."""
+    if not manifest or not isinstance(manifest, dict):
+        return []
+    cats = manifest.get("selected_categories")
+    if not cats:
+        cats = manifest.get("stages", {}).get("scraper", {}).get("metrics", {}).get("selected_categories")
+    if isinstance(cats, list) and cats:
+        return [str(c).strip() for c in cats if str(c).strip()]
+    return []
+
+
+def format_category_display(categories: list[str]) -> str:
+    """Formats category slugs into user-friendly display labels."""
+    if not categories:
+        return ""
+    labels = [CATEGORY_LABELS.get(c.lower(), c.replace("_", " ").title()) for c in categories]
+    return ", ".join(labels)
+
+
 def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
     """Lists all dated runs in data/runs sorted newest-first."""
     today = get_kathmandu_today()
@@ -152,6 +186,7 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
                 s: manifest.get("stages", {}).get(s, {}).get("status", "pending")
                 for s in STAGE_ORDER
             }
+            cats = extract_run_categories(manifest) if manifest else []
             items.append(
                 {
                     "date": entry.name,
@@ -162,6 +197,8 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
                     "updated_at": manifest.get("updated_at"),
                     "has_final_mp4": (entry / "render" / "final.mp4").exists(),
                     "stages": stages_summary,
+                    "selected_categories": cats,
+                    "category_display": format_category_display(cats),
                 }
             )
 
@@ -177,6 +214,8 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
                 "updated_at": None,
                 "has_final_mp4": False,
                 "stages": {s: "pending" for s in STAGE_ORDER},
+                "selected_categories": [],
+                "category_display": "",
             },
         )
 
@@ -438,6 +477,8 @@ def read_run_state(
         "exists": exists,
         "active_process": active,
         "manifest": manifest,
+        "selected_categories": extract_run_categories(manifest),
+        "category_display": format_category_display(extract_run_categories(manifest)),
         "gate": {"ok": gate_ok, "reason": gate_reason},
         "next_action": next_action,
         "source_health": source_health,

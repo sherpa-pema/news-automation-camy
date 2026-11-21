@@ -1302,8 +1302,7 @@ def test_frozen_budget_ignores_newer_voice_report_after_prepare(tmp_path):
         "Municipal planners noted steady attendance from local students and dedicated teachers throughout the busy afternoon."
     )
     intro_narr = (
-        "Good evening and welcome to the daily news briefing across the country. "
-        "Here are our top stories from local development and community initiatives today."
+        "The top stories, breaking updates, and major community developments shaping the nation right now."
     )
     outro_narr = (
         "That concludes our daily news briefing for tonight. "
@@ -1469,8 +1468,7 @@ def _make_7_scene_draft(
 ) -> dict:
     """Helper building a valid 7-scene draft for validator unit tests."""
     intro_narr = (
-        "Good evening and welcome to the daily news briefing from Kathmandu. "
-        "Here are our top national updates from across the provinces today."
+        "The top headlines, breaking news updates, and major developments from across the nation right now."
     )
     outro_narr = (
         "That concludes our daily news briefing for tonight. "
@@ -2056,7 +2054,7 @@ def test_eight_scene_broadcast_sequence_validation_pass(tmp_path):
                 "id": "intro",
                 "type": "intro",
                 "headline": "Nepal Daily Briefing for Sunday, November 15",
-                "narration": "Good evening and welcome to the Nepal Daily Briefing. Here are today's top stories from across the nation.",
+                "narration": "The top stories and major developments shaping the nation right now.",
                 "category": None,
                 "sensitive": False,
                 "source": "Nepal News Desk",
@@ -2195,7 +2193,7 @@ def test_eight_scene_broadcast_sequence_validation_fail(tmp_path):
         "run_kind": "test",
         "date": "2026-11-15",
         "scenes": [
-            {"id": "intro", "type": "intro", "headline": "Intro", "narration": "Good evening and welcome to the briefing. Here are today's top stories.", "category": None, "sensitive": False, "source": "Desk", "source_urls": [], "visual_keywords": ["Kathmandu", "studio", "map"], "evidence": []},
+            {"id": "intro", "type": "intro", "headline": "Intro", "narration": "The top stories, breaking updates, and major developments shaping the nation right now.", "category": None, "sensitive": False, "source": "Desk", "source_urls": [], "visual_keywords": ["Kathmandu", "studio", "map"], "evidence": []},
             {"id": "scene_01", "type": "story", "headline": "Politics", "narration": "Lawmakers approved the bill today during parliament session.", "category": "national_politics", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/politics"], "visual_keywords": ["parliament", "meeting", "Kathmandu"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/politics"}]},
             {"id": "scene_02", "type": "story", "headline": "Society", "narration": "Authorities inaugurated a new school in Lalitpur today.", "category": "society_local", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/society"], "visual_keywords": ["school", "classroom", "Lalitpur"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/society"}]},
             {"id": "scene_03", "type": "story", "headline": "Sports in Slot 3", "narration": "The national team won their tournament match today.", "category": "sports", "sensitive": False, "source": "Desk", "source_urls": ["https://news.com/sports"], "visual_keywords": ["stadium", "crowd", "celebration"], "evidence": [{"sentence_index": 0, "source_url": "https://news.com/sports"}]},

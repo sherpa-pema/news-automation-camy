@@ -289,6 +289,31 @@ def _is_word_budget_global_error(message: str) -> bool:
     )
 
 
+def _enforce_canonical_intro_scene(draft_obj: dict[str, Any], intro_info: dict[str, Any] | None) -> None:
+    """Enforces that the intro scene strictly uses the canonical, pre-warmed category template."""
+    if not intro_info or not isinstance(draft_obj, dict):
+        return
+    scenes = draft_obj.get("scenes", [])
+    if not isinstance(scenes, list) or not scenes:
+        return
+    for sc in scenes:
+        if sc.get("id") == "intro" or sc.get("type") == "intro":
+            sc["id"] = "intro"
+            sc["type"] = "intro"
+            if intro_info.get("headline"):
+                sc["headline"] = intro_info["headline"]
+            if intro_info.get("narration"):
+                sc["narration"] = intro_info["narration"]
+            if intro_info.get("visual_keywords"):
+                sc["visual_keywords"] = list(intro_info["visual_keywords"])
+            sc["category"] = None
+            sc["sensitive"] = False
+            sc.setdefault("source", "Nepal News Desk")
+            sc["source_urls"] = []
+            sc["evidence"] = []
+            break
+
+
 def _build_surgical_repair_prompt(
     scenes: list[dict[str, Any]],
     failing_indices: list[int],
@@ -357,9 +382,9 @@ def _build_surgical_repair_prompt(
         sc_id = sc.get("id", f"scene_{idx}")
         sc_type = sc.get("type", "story")
         if is_headlines_mode:
-            sc_min, sc_max = (12, 25) if sc_type in ("intro", "outro") else (10, 25)
+            sc_min, sc_max = (10, 25) if sc_type in ("intro", "outro") else (10, 25)
         else:
-            sc_min, sc_max = (15, 38) if sc_type in ("intro", "outro") else (25, 58)
+            sc_min, sc_max = (10, 25) if sc_type == "intro" else ((15, 38) if sc_type == "outro" else (25, 58))
         if len(failing_indices) == 1:
             adj_min = max(sc_min, rem_min)
             adj_max = min(sc_max, rem_max)
@@ -498,7 +523,7 @@ def generate_and_validate_draft(
             '  "draft_script": { "language": "English", "origin": "editor", "run_kind": "...", "date": "YYYY-MM-DD", "scenes": [...] },\n'
             '  "selection": { "selected_clusters": [...], "skipped_clusters": [...] }\n'
             "CRITICAL RULES (FOCUSED 7-SCENE TOPIC BULLETIN):\n"
-            f"1. Exactly 7 scenes: intro (id='intro', 15-35 words, announcing the broadcast category: \"{intro_info['narration']}\"), followed by 5 distinct story scenes (scene_01..scene_05, each from a different shortlisted cluster), and outro (id='outro', 15-35 words).\n"
+            f"1. Exactly 7 scenes: intro (id='intro', FIXED 10-20 words, with the EXACT canonical hook: \"{intro_info['narration']}\". Do NOT add greetings like 'Good evening' or conversational filler), followed by 5 distinct story scenes (scene_01..scene_05, each from a different shortlisted cluster), and outro (id='outro', 15-35 words).\n"
             "2. STORY NARRATION: Each story scene narration MUST contain 2 to 3 crisp broadcast sentences (44 to 56 words per story scene) summarizing the verified facts from its cluster.\n"
             "3. Total spoken words across all 7 scenes MUST fall inside the allowed range in Section 1.\n"
             "4. Narration MUST contain ZERO digits (0-9), ZERO %, $, &, /, (), [], or non-ASCII characters. Spell all numbers out (e.g. 'forty percent', 'ten million').\n"
@@ -517,7 +542,7 @@ def generate_and_validate_draft(
             '  "draft_script": { "language": "English", "origin": "editor", "run_kind": "...", "date": "YYYY-MM-DD", "scenes": [...] },\n'
             '  "selection": { "selected_clusters": [...], "skipped_clusters": [...] }\n'
             "CRITICAL RULES (HEADLINES-ONLY BULLETIN):\n"
-            f"1. Exactly 20 to 26 scenes: intro (12-25 words, announcing the broadcast category: \"{intro_info['narration']}\"), followed by 18 to 24 story headline scenes, and outro (12-25 words).\n"
+            f"1. Exactly 20 to 26 scenes: intro (id='intro', FIXED 10-20 words, with the EXACT canonical hook: \"{intro_info['narration']}\". Do NOT add greetings like 'Good evening' or conversational filler), followed by 18 to 24 story headline scenes, and outro (12-25 words).\n"
             "2. SINGLE-LINE HEADLINES ONLY: Every story scene narration MUST contain strictly ONE single spoken sentence (10 to 22 words, target ~15 words) summarizing the core event. Absolutely NO descriptions, background paragraphs, historical context, or secondary sentences.\n"
             "3. Total spoken words across all scenes MUST fall inside the allowed range in Section 1.\n"
             "4. Narration MUST contain ZERO digits (0-9), ZERO %, $, &, /, (), [], or non-ASCII characters. Spell all numbers out.\n"
@@ -592,6 +617,7 @@ def generate_and_validate_draft(
                         scenes_list[target_idx] = merged_sc
 
                 current_draft_obj["scenes"] = scenes_list
+                _enforce_canonical_intro_scene(current_draft_obj, intro_info)
                 (script_dir / "draft_script.json").write_text(
                     json.dumps(current_draft_obj, indent=2, ensure_ascii=False),
                     encoding="utf-8",
@@ -602,6 +628,7 @@ def generate_and_validate_draft(
                 current_draft_obj = parsed.get("draft_script") or parsed
                 selection_obj = parsed.get("selection") or {"selected_clusters": [], "skipped_clusters": []}
 
+                _enforce_canonical_intro_scene(current_draft_obj, intro_info)
                 (script_dir / "draft_script.json").write_text(
                     json.dumps(current_draft_obj, indent=2, ensure_ascii=False),
                     encoding="utf-8",

@@ -204,13 +204,37 @@ export class DrawerManager {
       })
       .join("");
 
-    let html = `
+    const completedCategoryDisplay = this.state.category_display || (Array.isArray(runScrapedCats) && runScrapedCats.length ? runScrapedCats.join(", ") : "");
+    const isRunFinished = manifest.status === "done" || Boolean(arts.has_final_mp4);
+
+    let html = ``;
+
+    if (isRunFinished || edStatus === "done") {
+      html += `
+        <div class="card" style="border:1px solid rgba(245, 166, 35, 0.4); background:rgba(245, 166, 35, 0.08);">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <h4 style="margin:0; color:#fbbf24;">🔄 Reset Agents for New Run</h4>
+            <span class="badge badge-done">${escapeHtml(completedCategoryDisplay || "Run")} Done</span>
+          </div>
+          <p class="muted" style="margin:0 0 10px 0; font-size:12px;">
+            Finished category: <strong>${escapeHtml(completedCategoryDisplay || "Headlines")}</strong>.
+            To run another category (e.g. switch from Sports to Business), reset the agents to standby. Previous broadcast artifacts will be safely archived.
+          </p>
+          <div class="btn-row">
+            <button class="btn btn-warning" id="btnResetAgents" ${busy ? "disabled" : ""}>🔄 Reset Agents for New Run</button>
+            ${arts.has_final_mp4 ? `<button class="btn btn-sm btn-ghost" id="btnWatchPreviousInBoss">🎥 Watch Video (${escapeHtml(completedCategoryDisplay || "Completed")})</button>` : ""}
+          </div>
+        </div>
+      `;
+    }
+
+    html += `
       <div class="card">
         <h4>1. Morning Prep & Run Mode</h4>
         <p class="muted" style="margin-top:0">Target date: <strong>${escapeHtml(d)}</strong> • Editor status: <strong>${escapeHtml(edStatus)}</strong></p>
         ${
-          Array.isArray(runScrapedCats) && runScrapedCats.length
-            ? `<p class="muted" style="margin:4px 0 8px;font-size:11px">Last scraped categories: <code>${escapeHtml(runScrapedCats.join(", "))}</code></p>`
+          completedCategoryDisplay
+            ? `<p class="muted" style="margin:4px 0 8px;font-size:11px">Current / Finished category: <strong>${escapeHtml(completedCategoryDisplay)}</strong></p>`
             : ""
         }
         <div class="category-picker-wrap">
@@ -231,6 +255,7 @@ export class DrawerManager {
             <option value="production">Production Broadcast</option>
           </select>
           <button class="btn btn-primary" id="btnMorning" ${busy ? "disabled" : ""}>▶ Start Morning Prep</button>
+          <button class="btn btn-sm btn-ghost" id="btnResetAgentsInline" ${busy ? "disabled" : ""} title="Reset all agent desks to standby">↺ Reset Agents</button>
         </div>
       </div>
     `;
@@ -363,12 +388,37 @@ export class DrawerManager {
       syncCategoryChips();
     });
 
+    const handleResetAction = () => {
+      const catName = completedCategoryDisplay || "current";
+      if (confirm(`Reset all agents to standby for a new run? The completed ${catName} run will be safely archived so no previous work is lost.`)) {
+        this.onAction("reset-run", {});
+      }
+    };
+
+    this.bodyEl.querySelector("#btnResetAgents")?.addEventListener("click", handleResetAction);
+    this.bodyEl.querySelector("#btnResetAgentsInline")?.addEventListener("click", handleResetAction);
+    this.bodyEl.querySelector("#btnWatchPreviousInBoss")?.addEventListener("click", () => {
+      this._openVideoModal("render/final.mp4", `Final Broadcast — ${completedCategoryDisplay || 'Done'} (${d})`);
+    });
+
     this.bodyEl.querySelector("#btnMorning")?.addEventListener("click", () => {
       const rk = this.bodyEl.querySelector("#morningKindSelect").value;
       const chosenCats = syncCategoryChips();
       const effectiveCats = chosenCats.length ? chosenCats : ["headlines"];
       if (rk === "production" && !confirm("Start a PRODUCTION run (omits TEST RUN watermark)?")) return;
-      this.onAction("morning", { run_kind: rk, categories: effectiveCats });
+
+      if ((edStatus === "done" || isRunFinished) && !confirm(`A run has already completed for ${completedCategoryDisplay || 'this date'}. Reset agents and start a fresh run for ${effectiveCats.join(', ')}?`)) {
+        return;
+      }
+
+      if (edStatus === "done" || isRunFinished) {
+        this.onAction("reset-run", { categories: effectiveCats });
+        setTimeout(() => {
+          this.onAction("morning", { run_kind: rk, categories: effectiveCats, force: true });
+        }, 600);
+      } else {
+        this.onAction("morning", { run_kind: rk, categories: effectiveCats });
+      }
     });
     this.bodyEl.querySelector("#btnDraftAi")?.addEventListener("click", () => {
       const autoApprove = Boolean(this.bodyEl.querySelector("#chkAutoApproveAi")?.checked);

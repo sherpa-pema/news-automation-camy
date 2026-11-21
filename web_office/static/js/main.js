@@ -8,6 +8,7 @@ import { OfficeWsClient, ReplayController } from "./ws_client.js";
 const runDateSelect = document.getElementById("runDateSelect");
 const runKindBadge = document.getElementById("runKindBadge");
 const overallStatusBadge = document.getElementById("overallStatusBadge");
+const categoryBadge = document.getElementById("categoryBadge");
 const liveDot = document.getElementById("liveDot");
 const primaryActionBtn = document.getElementById("primaryActionBtn");
 const tickerLatest = document.getElementById("tickerLatest");
@@ -26,6 +27,7 @@ const STAGE_ORDER = ["scraper", "editor", "voice", "timeline", "media", "motion"
 let currentState = null;
 let currentLogs = [];
 let currentDate = null;
+let inspectingHistoricalRun = false;
 let substageProgress = {}; // stage -> { current, total, percent, message, eta }
 let liveSourceHealth = {}; // source_name -> stats
 
@@ -80,17 +82,17 @@ function formatElapsed(startTime, endTime) {
   return `${m}:${s < 10 ? "0" : ""}${s}`;
 }
 
-function updateStageRail(state) {
+function updateStageRail(state, isStandby = false) {
   if (!stageRail) return;
-  const manifest = state.manifest || {};
+  const manifest = state?.manifest || {};
   const stages = manifest.stages || {};
 
   stageRail.innerHTML = STAGE_ORDER.map((sKey) => {
     const meta = stages[sKey] || {};
-    const status = meta.status || "pending";
-    const retryCount = meta.retry_count || 0;
-    const elapsed = formatElapsed(meta.start_time, meta.end_time);
-    const prog = substageProgress[sKey];
+    const status = isStandby ? "pending" : (meta.status || "pending");
+    const retryCount = isStandby ? 0 : (meta.retry_count || 0);
+    const elapsed = isStandby ? "" : formatElapsed(meta.start_time, meta.end_time);
+    const prog = isStandby ? null : substageProgress[sKey];
 
     let progressHtml = "";
     let progBarHtml = "";
@@ -312,16 +314,38 @@ function updateHudFromState(state) {
   const ed = manifest.stages?.editor?.status || "pending";
   const mediaSt = manifest.stages?.media?.status || "pending";
   const qaSt = manifest.stages?.qa?.status || "pending";
-  const busy = state.active_process || state.active_job?.status === "running";
+  const busy = Boolean(state.active_process || state.active_job?.status === "running");
   const gateClosed = state.gate && state.gate.ok === false;
+  const isFinished = manifest.status === "done" || Boolean(state.artifacts?.has_final_mp4);
+  const isStandby = !busy && !inspectingHistoricalRun && isFinished;
 
-  liveDot.classList.toggle("running", Boolean(busy));
+  engine.setFreshStandbyMode(isStandby);
+  updateStageRail(state, isStandby);
+
+  liveDot.classList.toggle("running", busy);
 
   runKindBadge.textContent = rk;
   runKindBadge.className = `badge ${rk === "PRODUCTION" ? "badge-production" : "badge-test"}`;
 
-  overallStatusBadge.textContent = busy ? "RUNNING" : st;
-  overallStatusBadge.className = `badge badge-${busy ? "running" : manifest.status === "done" ? "done" : manifest.status === "paused" ? "paused" : manifest.status === "failed" ? "failed" : "neutral"}`;
+  const catDisplay = state.category_display || (Array.isArray(state.selected_categories) && state.selected_categories.length ? state.selected_categories.join(", ") : "");
+  if (categoryBadge) {
+    if (catDisplay) {
+      categoryBadge.textContent = `CATEGORY: ${catDisplay.toUpperCase()}`;
+      categoryBadge.title = `Finished / Selected Category: ${catDisplay}`;
+      categoryBadge.classList.remove("hidden");
+    } else {
+      categoryBadge.classList.add("hidden");
+    }
+  }
+
+  if (isStandby) {
+    overallStatusBadge.textContent = "STANDBY";
+    overallStatusBadge.className = "badge badge-standby";
+    overallStatusBadge.title = "No active run in progress. Agents standing by for fresh run.";
+  } else {
+    overallStatusBadge.textContent = busy ? "RUNNING" : st;
+    overallStatusBadge.className = `badge badge-${busy ? "running" : manifest.status === "done" ? "done" : manifest.status === "paused" ? "paused" : manifest.status === "failed" ? "failed" : "neutral"}`;
+  }
 
   // Context-aware primary button
   primaryActionBtn.disabled = false;
@@ -329,6 +353,9 @@ function updateHudFromState(state) {
   if (busy) {
     primaryActionBtn.textContent = "⏳ Pipeline Running...";
     primaryActionBtn.disabled = true;
+  } else if (isStandby) {
+    primaryActionBtn.textContent = "▶ Start Morning Prep";
+    primaryActionBtn.onclick = () => drawers.openStation("boss", "boss");
   } else if (!state.exists || manifest.status === "pending") {
     primaryActionBtn.textContent = "▶ Start Morning Prep";
     primaryActionBtn.onclick = () => drawers.openStation("boss", "boss");
@@ -352,8 +379,8 @@ function updateHudFromState(state) {
     primaryActionBtn.textContent = "🎬 Finish Broadcast";
     primaryActionBtn.onclick = () => handleAction("finish", {});
   } else if (state.artifacts?.has_final_mp4) {
-    primaryActionBtn.textContent = "🎥 Watch Final Video";
-    primaryActionBtn.onclick = () => drawers._openVideoModal("render/final.mp4", `Final Broadcast (${state.date})`);
+    primaryActionBtn.textContent = `🎥 Watch Video (${catDisplay || "Final"})`;
+    primaryActionBtn.onclick = () => drawers._openVideoModal("render/final.mp4", `Final Broadcast — ${catDisplay || "Done"} (${state.date})`);
   } else {
     primaryActionBtn.textContent = "👔 Boss Desk";
     primaryActionBtn.onclick = () => drawers.openStation("boss", "boss");
@@ -371,7 +398,61 @@ function updateHudFromState(state) {
 
   // Next Action Banner
   if (nextActionBar && nextActionText && nextActionActions) {
-    if (state.next_action) {
+    if (isStandby) {
+      nextActionBar.classList.remove("hidden");
+      nextActionText.innerHTML = `Previous broadcast finished: <strong>${escapeHtml(catDisplay || "Headlines")}</strong> (${state.date}). Agents standing by for new run.`;
+      nextActionActions.innerHTML = "";
+
+      if (state.artifacts?.has_final_mp4) {
+        const watchBtn = document.createElement("button");
+        watchBtn.className = "btn btn-primary btn-sm";
+        watchBtn.textContent = `🎥 Watch Video (${catDisplay || "Final"})`;
+        watchBtn.onclick = () => drawers._openVideoModal("render/final.mp4", `Final Broadcast — ${catDisplay || "Done"} (${state.date})`);
+        nextActionActions.appendChild(watchBtn);
+      }
+
+      const resetBtn = document.createElement("button");
+      resetBtn.className = "btn btn-warning btn-sm";
+      resetBtn.textContent = "🔄 Reset for New Run";
+      resetBtn.onclick = () => drawers.openStation("boss", "boss");
+      nextActionActions.appendChild(resetBtn);
+
+      const inspectBtn = document.createElement("button");
+      inspectBtn.className = "btn btn-ghost btn-sm";
+      inspectBtn.textContent = "🔍 Inspect Previous Run";
+      inspectBtn.onclick = () => {
+        inspectingHistoricalRun = true;
+        updateHudFromState(state);
+      };
+      nextActionActions.appendChild(inspectBtn);
+    } else if (inspectingHistoricalRun && isFinished && !busy) {
+      nextActionBar.classList.remove("hidden");
+      nextActionText.innerHTML = `Inspecting completed run: <strong>${escapeHtml(catDisplay || "Headlines")}</strong> (${state.date}).`;
+      nextActionActions.innerHTML = "";
+
+      const returnBtn = document.createElement("button");
+      returnBtn.className = "btn btn-primary btn-sm";
+      returnBtn.textContent = "↩ Return to Standby";
+      returnBtn.onclick = () => {
+        inspectingHistoricalRun = false;
+        updateHudFromState(state);
+      };
+      nextActionActions.appendChild(returnBtn);
+
+      if (state.artifacts?.has_final_mp4) {
+        const watchBtn = document.createElement("button");
+        watchBtn.className = "btn btn-sm";
+        watchBtn.textContent = `🎥 Watch Video`;
+        watchBtn.onclick = () => drawers._openVideoModal("render/final.mp4", `Final Broadcast — ${catDisplay || "Done"} (${state.date})`);
+        nextActionActions.appendChild(watchBtn);
+      }
+
+      const resetBtn = document.createElement("button");
+      resetBtn.className = "btn btn-warning btn-sm";
+      resetBtn.textContent = "🔄 Reset for New Run";
+      resetBtn.onclick = () => drawers.openStation("boss", "boss");
+      nextActionActions.appendChild(resetBtn);
+    } else if (state.next_action) {
       nextActionBar.classList.remove("hidden");
       nextActionText.textContent = state.next_action;
       nextActionActions.innerHTML = "";
@@ -405,8 +486,8 @@ function updateHudFromState(state) {
       } else if (manifest.status === "done" && state.artifacts?.has_final_mp4) {
         const watchBtn = document.createElement("button");
         watchBtn.className = "btn btn-primary btn-sm";
-        watchBtn.textContent = "Watch Final Video";
-        watchBtn.onclick = () => drawers._openVideoModal("render/final.mp4", `Final Broadcast (${state.date})`);
+        watchBtn.textContent = `Watch Final Video (${catDisplay || "Completed"})`;
+        watchBtn.onclick = () => drawers._openVideoModal("render/final.mp4", `Final Broadcast — ${catDisplay || "Done"} (${state.date})`);
         nextActionActions.appendChild(watchBtn);
       }
     } else {
@@ -414,7 +495,9 @@ function updateHudFromState(state) {
     }
   }
 
-  if (state.next_action) {
+  if (isStandby) {
+    tickerLatest.textContent = `Standing by — previous ${catDisplay || 'run'} finished. Ready to start next run.`;
+  } else if (state.next_action) {
     tickerLatest.textContent = state.next_action;
   } else if (currentLogs.length) {
     tickerLatest.textContent = currentLogs[currentLogs.length - 1];
@@ -449,6 +532,12 @@ async function handleAction(action, payload) {
       showToast(data.message || "Pipeline stopped.", "info", 5000);
     } else if (action === "reset-stage") {
       showToast(`Stage reset complete.`, "info", 4000);
+    } else if (action === "reset-run") {
+      audio.chime("done");
+      inspectingHistoricalRun = false;
+      showToast("Agents reset to standby. Ready for new run.", "done", 5000);
+      await loadRunsAndConnect();
+      return;
     } else if (action === "draft-manual") {
       if (data.ok) {
         showToast("Draft passed validation! Ready to Approve.", "done", 5000);
@@ -489,7 +578,10 @@ async function loadRunsAndConnect() {
   const runs = data.runs || [];
 
   runDateSelect.innerHTML = runs
-    .map((r) => `<option value="${r.date}">${r.date} (${r.status})</option>`)
+    .map((r) => {
+      const catLabel = r.category_display ? ` [${r.category_display}]` : "";
+      return `<option value="${r.date}">${r.date}${catLabel} (${r.status})</option>`;
+    })
     .join("");
 
   // Prefer most recent existing run or today
@@ -503,6 +595,7 @@ async function loadRunsAndConnect() {
 
 runDateSelect.addEventListener("change", () => {
   replay.stop();
+  inspectingHistoricalRun = false;
   currentDate = runDateSelect.value;
   wsClient.connect(currentDate);
 });

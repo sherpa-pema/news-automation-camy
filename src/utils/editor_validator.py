@@ -835,10 +835,16 @@ def validate_script_draft(
         total_est_duration_sec += sc_est_dur
 
         if sc_type == "intro":
-            min_w = 12 if len(scenes) >= 18 else 15
-            max_w = 30 if len(scenes) >= 18 else 40
+            min_w = 10
+            max_w = 25 if len(scenes) >= 18 else 30
             if not (min_w <= word_count <= max_w):
                 sc_errors.append(f"Intro word count {word_count} outside {min_w}-{max_w} words")
+
+            greeting_pattern = r"\b(good\s+(evening|morning|afternoon|day)|welcome\s+to\s+(our|the)\s+broadcast|hello\s+and\s+welcome)\b"
+            if re.search(greeting_pattern, narration, re.IGNORECASE):
+                sc_errors.append(
+                    "Intro narration must not contain passive greetings ('Good evening', 'welcome to our broadcast'); use punchy evergreen category hook"
+                )
         elif sc_type == "outro":
             min_w = 12 if len(scenes) >= 18 else 15
             max_w = 30 if len(scenes) >= 18 else 40

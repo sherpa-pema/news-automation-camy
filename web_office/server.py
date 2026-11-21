@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 import hmac
 import ipaddress
 import json
@@ -54,6 +55,7 @@ from web_office.broadcaster import BroadcasterManager
 from web_office.runner import OfficeJobManager, terminate_pid_tree
 from web_office.watcher import (
     build_replay_events,
+    clear_run_state_cache,
     list_runs,
     read_run_state,
     tail_new_lines,
@@ -235,6 +237,11 @@ class PrepareMediaRequest(BaseModel):
 class ResetStageRequest(BaseModel):
     stage: str
     reset_downstream: bool = False
+
+
+class ResetRunRequest(BaseModel):
+    categories: list[str] | None = None
+    archive_previous: bool = True
 
 
 class ApplyPicksRequest(BaseModel):
@@ -766,6 +773,121 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         except Exception:
             pass
         return {"ok": True, "action": "reset-stage", "stage": body.stage, "reset_stages": stages_to_reset}
+
+    @app.post("/api/runs/{run_date}/reset-run")
+    async def api_reset_run(run_date: str, body: ResetRunRequest | None = None) -> dict[str, Any]:
+        _validate_run_date(run_date)
+        busy, reason = job_manager.is_busy(run_date)
+        if busy:
+            raise HTTPException(status_code=409, detail=f"Cannot reset run while pipeline is active: {reason}")
+
+        run_dir = runs_dir / run_date
+        manifest_path = run_dir / "manifest.json"
+        if not run_dir.exists():
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+        req = body or ResetRunRequest()
+        prev_manifest = load_manifest(manifest_path) if manifest_path.exists() else {}
+        prev_cats = prev_manifest.get("selected_categories") or []
+        if not prev_cats:
+            prev_cats = prev_manifest.get("stages", {}).get("scraper", {}).get("metrics", {}).get("selected_categories") or []
+        prev_cat_slug = "_".join(prev_cats) if prev_cats else "run"
+
+        # 1. Archive existing run outputs if requested and artifacts exist
+        archived_to = None
+        if req.archive_previous and manifest_path.exists():
+            final_mp4 = run_dir / "render" / "final.mp4"
+            has_outputs = final_mp4.exists() or (run_dir / "script" / "script.json").exists()
+            if has_outputs:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_dir = runs_dir.parent / "archive" / f"{run_date}_{prev_cat_slug}_{ts}"
+                archive_dir.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copytree(run_dir, archive_dir, dirs_exist_ok=True)
+                    archived_to = str(archive_dir)
+                except Exception:
+                    pass
+
+        # 2. Clean out output artifacts in run_dir to ensure clean fresh run
+        artifact_folders = ["render", "qa", "motion", "media", "timeline", "audio", "script", "raw"]
+        for fld in artifact_folders:
+            sub = run_dir / fld
+            if sub.exists():
+                try:
+                    shutil.rmtree(sub)
+                except Exception:
+                    pass
+            sub.mkdir(parents=True, exist_ok=True)
+
+        for stray in ("captions.srt", "timeline.json", ".pipeline.pid"):
+            stray_p = run_dir / stray
+            if stray_p.exists():
+                try:
+                    stray_p.unlink()
+                except Exception:
+                    pass
+
+        # 3. Reset manifest
+        stage_order = ("scraper", "editor", "voice", "timeline", "media", "motion", "render", "qa")
+        manifest = prev_manifest if prev_manifest else {
+            "run_id": run_date,
+            "date": run_date,
+            "run_kind": "test",
+            "created_at": datetime.now().astimezone().isoformat(),
+        }
+        manifest["status"] = "pending"
+        manifest["updated_at"] = datetime.now().astimezone().isoformat()
+        manifest["stages"] = {
+            st: {
+                "status": "pending",
+                "start_time": None,
+                "end_time": None,
+                "retry_count": 0,
+                "max_retries": 2 if st in ("scraper", "editor", "voice", "render") else 1,
+                "input_files": [],
+                "output_files": [],
+                "error_message": None,
+                "metrics": {},
+            }
+            for st in stage_order
+        }
+
+        valid_keys = {slug for slug, _, _ in AVAILABLE_CATEGORIES.values()} | {"all"}
+        cleaned_cats = [
+            str(c).strip().lower()
+            for c in (req.categories or [])
+            if str(c).strip().lower() in valid_keys
+        ]
+        manifest["selected_categories"] = cleaned_cats
+
+        record_manual_edit(
+            manifest,
+            file="manifest.json",
+            what=f"Full run reset for fresh start (categories={cleaned_cats or 'standby'})",
+            why="Manual reset via Web Office HQ Boss Desk",
+        )
+        save_manifest(manifest, manifest_path)
+        try:
+            from src.orchestrator import write_status_md
+            write_status_md(run_dir, manifest, active_process=False)
+        except Exception:
+            pass
+
+        clear_run_state_cache(run_dir)
+        emit_office_event(
+            run_dir,
+            event_type="boss_alert",
+            message=f"Agents reset to standby for new run ({', '.join(cleaned_cats) if cleaned_cats else 'standby'}).",
+            status="info",
+        )
+
+        return {
+            "ok": True,
+            "action": "reset-run",
+            "date": run_date,
+            "archived_to": archived_to,
+            "selected_categories": manifest.get("selected_categories", []),
+        }
 
     @app.post("/api/runs/{run_date}/stop")
     async def api_stop_run(run_date: str) -> dict[str, Any]:

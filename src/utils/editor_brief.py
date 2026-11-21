@@ -82,7 +82,7 @@ def generate_editor_brief(
     lines.append(f"- **Total Word Budget**: **{target_words} words** (allowed range: **{min_words} to {max_words} words**)")
     if is_headlines:
         lines.append("- **Scene Breakdown** (Headlines Bulletin: 20 to 26 scenes total, 3 to 4 single-line summarized headlines per category in exact sequential order):")
-        lines.append("  - **1 Intro scene**: 12 to 25 words (target ~18 words)")
+        lines.append("  - **1 Intro scene**: 10 to 20 words (target ~13 words, fixed canonical hook)")
         lines.append("  - **18 to 24 Story scenes** (strictly 1 single spoken sentence per scene, 10 to 22 words each, target ~15 words each):")
         lines.append("    * Block 1: **National Politics** (`national_politics`) — 3 to 4 single-line headlines")
         lines.append("    * Block 2: **Society and Local News** (`society_local`) — 3 to 4 single-line headlines")
@@ -93,7 +93,7 @@ def generate_editor_brief(
         lines.append("  - **1 Outro scene**: 12 to 25 words (target ~18 words)")
     else:
         lines.append("- **Scene Breakdown** (Focused Topic Bulletin: 7 scenes total):")
-        lines.append("  - **1 Intro scene**: 15 to 35 words (target ~25 words)")
+        lines.append("  - **1 Intro scene**: 10 to 20 words (target ~13 words, fixed canonical hook)")
         lines.append("  - **5 Story scenes** (2 to 3 broadcast sentences per scene, 44 to 56 words each):")
         lines.append("  - **1 Outro scene**: 15 to 35 words (target ~25 words)")
     lines.append("")
