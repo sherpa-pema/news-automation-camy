@@ -64,7 +64,7 @@ stages:
     reference_txt: "config/voice/reference.txt"
     use_spk_emb: true
     use_zero_spk_emb: false
-    chunk_mode: "scene"
+    chunk_mode: "sentence"
     similarity_threshold: 0.72
     f0_tolerance_pct: 0.15
     n_candidates: 1
