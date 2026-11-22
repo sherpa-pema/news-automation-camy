@@ -250,10 +250,6 @@ export class DrawerManager {
           </div>
         </div>
         <div class="btn-row">
-          <select id="morningKindSelect">
-            <option value="test" ${manifest.run_kind !== "production" ? "selected" : ""}>Test Run (TEST RUN badge)</option>
-            <option value="production">Production Broadcast</option>
-          </select>
           <button class="btn btn-primary" id="btnMorning" ${busy ? "disabled" : ""}>▶ Start Morning Prep</button>
           <button class="btn btn-sm btn-ghost" id="btnResetAgentsInline" ${busy ? "disabled" : ""} title="Reset all agent desks to standby">↺ Reset Agents</button>
         </div>
@@ -330,15 +326,22 @@ export class DrawerManager {
                </div>`
             : ""
         }
-        <p class="muted" style="margin-top:0">${edStatus !== "done" ? "Approve script first to start parallel audio synthesis and visual candidate discovery." : escapeHtml(mediaSummaryText)}</p>
+        <p class="muted" style="margin-top:0">${edStatus !== "done" ? "Approve script above to start parallel audio synthesis and visual candidate discovery." : escapeHtml(mediaSummaryText)}</p>
+        ${
+          edStatus === "done" && !arts.has_picker_html
+            ? `<div class="prep-progress-banner" style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(2,132,199,0.12);border:1px solid #0284c7;border-radius:6px;font-size:12px;color:#38bdf8;margin:8px 0 12px;">
+                 <span>⏳ <strong>Parallel Prep in progress:</strong> Synthesizing voice audio & searching visual candidates...</span>
+               </div>`
+            : ""
+        }
         <div class="btn-row">
           ${
             arts.has_picker_html
               ? `<button class="btn ${mediaStatus === "awaiting_approval" ? "btn-primary" : ""}" id="btnOpenPicker" ${busy ? "disabled" : ""}>🎨 Open Visual Picker & Render</button>
-                 <button class="btn btn-sm" id="btnPrepareMediaForce" ${busy || gateClosed ? "disabled" : ""} title="${escapeHtml(gateClosed ? gate.reason : 'Re-scan online visual candidates')}">↻ Re-scan Visuals</button>`
-              : `<button class="btn btn-primary" id="btnPrepareMedia" ${busy || gateClosed ? "disabled" : ""} title="${escapeHtml(gateClosed ? gate.reason : 'Parallel Prep')}">⚡ Parallel Prep (Voice + Picker)</button>`
+                 <button class="btn btn-sm" id="btnPrepareMediaForce" ${busy || gateClosed ? "disabled" : ""} title="${escapeHtml(gateClosed ? gate.reason : 'Re-scan online visual candidates')}">↻ Re-scan Visuals</button>
+                 <button class="btn btn-sm" id="btnFinish" ${busy || gateClosed ? "disabled" : ""} title="${escapeHtml(gateClosed ? gate.reason : 'Skip manual picking and auto-render full broadcast')}">⚡ Auto-Finish (--finish)</button>`
+              : ""
           }
-          <button class="btn btn-sm" id="btnFinish" ${busy || gateClosed ? "disabled" : ""} title="${escapeHtml(gateClosed ? gate.reason : 'Skip manual picking and auto-render full broadcast')}">⚡ Auto-Finish (--finish)</button>
         </div>
       </div>
     `;
@@ -402,10 +405,9 @@ export class DrawerManager {
     });
 
     this.bodyEl.querySelector("#btnMorning")?.addEventListener("click", () => {
-      const rk = this.bodyEl.querySelector("#morningKindSelect").value;
+      const rk = manifest.run_kind || "test";
       const chosenCats = syncCategoryChips();
       const effectiveCats = chosenCats.length ? chosenCats : ["headlines"];
-      if (rk === "production" && !confirm("Start a PRODUCTION run (omits TEST RUN watermark)?")) return;
 
       if ((edStatus === "done" || isRunFinished) && !confirm(`A run has already completed for ${completedCategoryDisplay || 'this date'}. Reset agents and start a fresh run for ${effectiveCats.join(', ')}?`)) {
         return;
@@ -425,7 +427,6 @@ export class DrawerManager {
       this.onAction("draft-ai", { auto_approve: autoApprove });
     });
     this.bodyEl.querySelector("#btnApprove")?.addEventListener("click", () => this.onAction("approve", { auto_prepare: true }));
-    this.bodyEl.querySelector("#btnPrepareMedia")?.addEventListener("click", () => this.onAction("prepare-media", { force: false }));
     this.bodyEl.querySelector("#btnPrepareMediaForce")?.addEventListener("click", () => {
       if (confirm("Re-scan online visual candidates for all shots?")) {
         this.onAction("prepare-media", { force: true });

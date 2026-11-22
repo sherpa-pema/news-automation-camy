@@ -373,8 +373,8 @@ function updateHudFromState(state) {
     primaryActionBtn.textContent = "🎨 Pick Visuals & Render";
     primaryActionBtn.onclick = () => drawers._openIframeModal("media/review/picker.html", `Media Shot Picker (${state.date})`);
   } else if (ed === "done" && !state.artifacts?.has_picker_html && qaSt !== "done") {
-    primaryActionBtn.textContent = "🎙 Prepare Audio & Visuals";
-    primaryActionBtn.onclick = () => handleAction("prepare-media", { force: false });
+    primaryActionBtn.textContent = "⏳ Parallel Prep in Progress...";
+    primaryActionBtn.disabled = true;
   } else if (ed === "done" && manifest.status !== "done") {
     primaryActionBtn.textContent = "🎬 Finish Broadcast";
     primaryActionBtn.onclick = () => handleAction("finish", {});

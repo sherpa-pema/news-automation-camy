@@ -2992,7 +2992,7 @@ class ScraperAgent(BaseAgent):
 def main() -> int:
     """Standalone CLI entry point for testing and debugging the Scraper Agent."""
     parser = argparse.ArgumentParser(description="Run Scraper Agent independently.")
-    parser.add_argument("--date", default=today_npt().isoformat(), help="Target run date (YYYY-MM-DD)")
+    parser.add_argument("--date", default=today_npt(), help="Target run date (YYYY-MM-DD)")
     parser.add_argument("--source", default=None, help="Limit scraping to one specific source name")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without saving outputs to disk")
     parser.add_argument("--backfill", action="store_true", help="Anchor lookback window to 23:59:59 of target date instead of current scrape time")
