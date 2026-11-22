@@ -91,7 +91,8 @@ def extract_pending_proper_nouns(
             for idx, tok in enumerate(tokens):
                 if idx == 0:
                     continue
-                clean = re.sub(r"[^a-zA-Z]", "", tok)
+                clean = re.sub(r"['’]s$", "", tok, flags=re.IGNORECASE)
+                clean = re.sub(r"[^a-zA-Z]", "", clean)
                 if len(clean) >= 2 and clean[0].isupper() and clean.lower() not in known_words:
                     pending.add(clean)
 

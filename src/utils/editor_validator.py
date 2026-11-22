@@ -911,7 +911,8 @@ def validate_script_draft(
             for w_idx, w in enumerate(sent_words):
                 if w_idx == 0:
                     continue
-                clean_w = re.sub(r"[^a-zA-Z]", "", w)
+                clean_w = re.sub(r"['’]s$", "", w, flags=re.IGNORECASE)
+                clean_w = re.sub(r"[^a-zA-Z]", "", clean_w)
                 if (
                     len(clean_w) >= 2
                     and clean_w[0].isupper()
@@ -1064,7 +1065,8 @@ def validate_script_draft(
                     for w_idx, w in enumerate(sent_words):
                         if w_idx == 0:
                             continue  # First word of sentence is capitalized by grammar
-                        clean_w = re.sub(r"[^a-zA-Z]", "", w)
+                        clean_w = re.sub(r"['’]s$", "", w, flags=re.IGNORECASE)
+                        clean_w = re.sub(r"[^a-zA-Z]", "", clean_w)
                         if clean_w and clean_w[0].isupper() and clean_w.lower() not in whitelist_token_words:
                             if clean_w.lower() not in cluster_text_lower:
                                 sc_warnings.append(f"Proper noun '{clean_w}' in narration not found in cluster text")

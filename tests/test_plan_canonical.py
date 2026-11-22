@@ -16,7 +16,14 @@ from src.agents.motion import (
 
 def test_sync_render_plan_persists_to_disk_and_matches_in_memory(tmp_path: Path) -> None:
     available_runs = sorted(
-        [d for d in Path("data/runs").iterdir() if d.is_dir() and (d / "script").exists() and (d / "timeline").exists()],
+        [
+            d for d in Path("data/runs").iterdir()
+            if d.is_dir()
+            and (d / "script").exists()
+            and (d / "timeline").exists()
+            and (d / "media").exists()
+            and (d / "audio" / "narration.wav").exists()
+        ],
         reverse=True,
     )
     if not available_runs:
