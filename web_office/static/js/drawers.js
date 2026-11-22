@@ -288,7 +288,7 @@ export class DrawerManager {
             : `<p class="muted">No validated <code>script_preview.md</code> yet.</p>`
         }
         <div class="btn-row">
-          <button class="btn btn-success" id="btnApprove" ${busy || edStatus !== "awaiting_approval" ? "disabled" : ""}>✅ Approve Script</button>
+          <button class="btn btn-success" id="btnApprove" ${busy || edStatus !== "awaiting_approval" ? "disabled" : ""} title="Approve script and immediately launch parallel voice synthesis and visual candidate picking">✅ Approve Script</button>
         </div>
       </div>
     `;
@@ -424,7 +424,7 @@ export class DrawerManager {
       const autoApprove = Boolean(this.bodyEl.querySelector("#chkAutoApproveAi")?.checked);
       this.onAction("draft-ai", { auto_approve: autoApprove });
     });
-    this.bodyEl.querySelector("#btnApprove")?.addEventListener("click", () => this.onAction("approve", {}));
+    this.bodyEl.querySelector("#btnApprove")?.addEventListener("click", () => this.onAction("approve", { auto_prepare: true }));
     this.bodyEl.querySelector("#btnPrepareMedia")?.addEventListener("click", () => this.onAction("prepare-media", { force: false }));
     this.bodyEl.querySelector("#btnPrepareMediaForce")?.addEventListener("click", () => {
       if (confirm("Re-scan online visual candidates for all shots?")) {

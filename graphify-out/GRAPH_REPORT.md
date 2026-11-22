@@ -1,17 +1,17 @@
 # Graph Report - news-auto  (2026-11-22)
 
 ## Corpus Check
-- 152 files · ~217,952 words
+- 152 files · ~218,253 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 14 file(s) not represented in the graph (top: .bat 6, (none) 4, .example 1)
 
 ## Summary
-- 3931 nodes · 8237 edges · 293 communities (263 shown, 30 thin omitted)
+- 3934 nodes · 8244 edges · 301 communities (267 shown, 34 thin omitted)
 - Extraction: 95% EXTRACTED · 5% INFERRED · 0% AMBIGUOUS · INFERRED: 425 edges (avg confidence: 0.86)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `1658b0f5`
+- Built from commit: `6923ec50`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -19,7 +19,7 @@
 - Pipeline Configuration and Stages
 - Voice Synthesis and Verification
 - create_app
-- test_timeline.py
+- .run
 - Media Sourcing Integrations
 - voice.py
 - test_editor.py
@@ -27,14 +27,14 @@
 - pathlib
 - test_web_office.py
 - Daily Operations and Health
-- test_media.py
-- test_orchestrator_execute_stage_ignores_downstream_schema_changes
-- .scrape_all
+- PixabaySource
+- compute_validator_fingerprint
+- ._fetch_rss_source
 - utils/timeline.py
 - Agent Architectural Specifications
 - Caption Contract Schema
-- load_manifest
-- Motion Graphics and Overlays
+- Orchestrator
+- test_motion.py
 - daily_ops.py
 - scraper.py
 - Benchmark Chunking Module
@@ -57,12 +57,12 @@
 - Watcher Module
 - OfficeJobManager
 - ScraperAgent
-- plan_cleanup
+- EditorAgent
 - test_motion_golden.py
-- generate_editor_brief
+- TimelineAgent
 - Broadcaster Module
 - Main.Js Module
-- Audio Sync Module
+- test_timeline.py
 - Ming Worker Module
 - Script Contract Schema
 - Script Contract Schema
@@ -81,16 +81,16 @@
 - Llm Writer Module
 - Drawers.Js Module
 - Style Module
-- FakeTTS
+- tts.py
 - Speaker Check Module
-- motion_graphics.py
+- load_manifest
 - Manifest Contract Schema
-- editor_budget.py
+- detect_stale_preview
 - Editorial Aliases and Config
 - Sources Module
 - Manifest Contract Schema
 - Media Manifest Contract Schema
-- test_motion.py
+- check_audio_silence_gaps
 - Sources Module
 - Timeline Alignment and Captions
 - Storyboard Module
@@ -98,15 +98,15 @@
 - Media Manifest Contract Schema
 - Video Rendering and FFmpeg
 - Video Rendering and FFmpeg
-- MingEngine
+- build_srt_content
 - MediaCacheManager
-- extract_numbers_from_text
+- cluster_articles
 - Editorial Aliases and Config
 - Articles Contract Schema
 - Articles Contract Schema
 - Script Contract Schema
 - Timeline Alignment and Captions
-- compute_manifest_status
+- manifest.py
 - MediaAgent
 - Test Motion Credit Module
 - Editorial Aliases and Config
@@ -125,8 +125,8 @@
 - Ws Client.Js Module
 - Script Contract Schema
 - Timeline Alignment and Captions
-- run_doctor
-- yaml
+- .build_scene_timeline
+- load_pronunciations
 - Media Module
 - Style Module
 - Style Module
@@ -134,9 +134,9 @@
 - Video Rendering and FFmpeg
 - Timeline Alignment and Captions
 - Timeline Alignment and Captions
-- .run
+- Any
 - UnsplashSource
-- test_prepare_media_and_apply_picks_pre_render_workflow
+- audit_captions
 - Office Map.Js Module
 - Style Module
 - Style Module
@@ -271,14 +271,14 @@
 - society_local
 - CoverrSource
 - RenderAgent
-- wrap_text
-- BroadcasterManager
+- generate_timeline_preview_video
+- editor_brief.py
 - test_picker_html_balanced_div_tags
-- .__init__
-- ContextFilter
-- draw_stat_callout
-- is_duplicate_title
-- PipelinePausedException
+- NasaSource
+- OpenverseSource
+- prepare_scene_tokens
+- generate_picker_html
+- run_daily.py
 - Bhairahawa
 - Bhandari
 - Bhattarai
@@ -295,12 +295,17 @@
 - Sankhuwasabha
 - Solukhumbu
 - Taplejung
-- test_schedule_install_dry_run_powershell
+- rank_clusters_with_diversity
+- _compact_brief_for_llm
+- master_audio_loudnorm
+- _compile_word_boundary_re
+- add_to_library_cli
+- measure_silence_gaps
 
 ## God Nodes (most connected - your core abstractions)
 1. `stages` - 85 edges
 2. `ScraperAgent` - 69 edges
-3. `create_app()` - 61 edges
+3. `create_app()` - 62 edges
 4. `Candidate` - 60 edges
 5. `load_manifest()` - 55 edges
 6. `validate_contract()` - 52 edges
@@ -310,16 +315,16 @@
 10. `MediaCacheManager` - 45 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `get_cached_doctor()` --indirect_call--> `run_doctor()`  [INFERRED]
+  web_office/server.py → src/utils/daily_ops.py
 - `main()` --uses--> `PipelinePausedException`  [INFERRED]
   run_daily.py → src/orchestrator.py
-- `test_golden_story_source_attribution()` --uses--> `MotionAgent`  [INFERRED]
-  tests/test_motion_golden.py → src/agents/motion.py
-- `fake_iter_candidates()` --calls--> `Candidate`  [EXTRACTED]
-  tests/test_daily_ops.py → src/utils/media_models.py
-- `test_apply_picks_classifies_jpg_url_as_image()` --uses--> `MediaCacheManager`  [INFERRED]
-  tests/test_media.py → src/utils/media_cache.py
-- `run_benchmark()` --calls--> `load_pronunciations()`  [INFERRED]
-  tools/voice_bench.py → src/utils/text_normalizer.py
+- `test_alignment_cache_hit()` --uses--> `FakeAligner`  [INFERRED]
+  tests/test_timeline.py → src/utils/timeline.py
+- `test_devanagari_compatibility_guard()` --uses--> `FakeAligner`  [INFERRED]
+  tests/test_timeline.py → src/utils/timeline.py
+- `test_low_confidence_scene_flagged()` --uses--> `FakeAligner`  [INFERRED]
+  tests/test_timeline.py → src/utils/timeline.py
 
 ## Import Cycles
 - None detected.
@@ -332,63 +337,67 @@
 - **Web Office Real-Time Architecture Pillars** — docs_web_office_broadcaster_manager, docs_web_office_job_manager, docs_web_office_state_cache, docs_web_office_websocket_protocol [INFERRED 0.95]
 - **Pipeline Execution DAG and Coordination** — readme_nepal_news_bot, agents_orchestrator_orchestrator_agent, agents_orchestrator_execution_lifecycle [INFERRED 0.95]
 
-## Communities (293 total, 30 thin omitted)
+## Communities (301 total, 34 thin omitted)
 
 ### Community 0 - "Pipeline Configuration and Stages"
 Cohesion: 0.02
 Nodes (84): stages, agent, aligner, allow_degraded_timeline, allow_soft_captions, base_seed, batching, budget_seconds (+76 more)
 
 ### Community 1 - "Voice Synthesis and Verification"
-Cohesion: 0.05
-Nodes (28): _compute_file_sha256(), _compute_scene_cache_key(), _create_scene_aliases(), extract_pending_proper_nouns(), main(), VoiceAgent, test_voice_persistent_intro_cache_and_reuse(), test_downstream_stage_refuses_on_fingerprint_mismatch() (+20 more)
+Cohesion: 0.06
+Nodes (26): _compute_scene_cache_key(), extract_pending_proper_nouns(), main(), VoiceAgent, test_downstream_stage_refuses_on_fingerprint_mismatch(), test_editing_media_manifest_schema_does_not_invalidate_approval(), test_editing_whitelist_invalidates_approval(), test_legacy_script_path_rejected_and_script_subfolder_required() (+18 more)
 
 ### Community 2 - "create_app"
 Cohesion: 0.07
-Nodes (28): record_manual_edit(), test_web_office_upload_and_validate_endpoints(), test_web_office_tts_daemon_status_and_restart(), _compute_run_items(), create_app(), api_apply_picks(), api_doctor(), api_draft_ai() (+20 more)
+Nodes (29): record_manual_edit(), test_web_office_upload_and_validate_endpoints(), test_web_office_tts_daemon_status_and_restart(), _compute_run_items(), create_app(), api_apply_picks(), api_doctor(), api_draft_ai() (+21 more)
 
-### Community 3 - "test_timeline.py"
-Cohesion: 0.04
-Nodes (43): compute_scene_alignment_cache_key(), main(), TimelineAgent, split_sentences(), split_into_sentences(), build_srt_content(), CaptionCue, FakeAligner (+35 more)
+### Community 3 - ".run"
+Cohesion: 0.08
+Nodes (18): test_alignment_cache_hit(), align_scenes(), test_duration_mismatch_raises_error(), test_final_scene_end_reconciled(), test_low_confidence_scene_flagged(), align_scenes(), test_multilingual_audit_and_warnings(), test_partial_scene_run_does_not_overwrite_canonical() (+10 more)
 
 ### Community 4 - "Media Sourcing Integrations"
 Cohesion: 0.08
 Nodes (6): Candidate, BaseMediaSource, InternetArchiveSource, PexelsSource, clean_html(), WikimediaCommonsSource
 
 ### Community 5 - "voice.py"
-Cohesion: 0.13
-Nodes (12): assemble_scene_audio(), compute_voice_quality_index(), concatenate_scenes(), get_scene_padding(), master_audio_loudnorm(), measure_wav_artifacts(), measure_wav_ebur128(), measure_wav_ebur128_segment() (+4 more)
+Cohesion: 0.12
+Nodes (12): clean_narration_text(), assemble_scene_audio(), compute_voice_quality_index(), concatenate_scenes(), get_scene_padding(), measure_wav_artifacts(), measure_wav_ebur128(), measure_wav_ebur128_segment() (+4 more)
 
 ### Community 6 - "test_editor.py"
-Cohesion: 0.07
-Nodes (21): compute_word_budget(), is_bs_fiscal_or_date_context(), validate_script_draft(), test_intro_greeting_fails_validation(), _make_7_scene_draft(), test_acronym_blocklist_and_western_visual_keywords_and_structured_errors(), test_bikram_sambat_year_whitelisting_in_fiscal_and_date_context(), test_duplicate_cluster_rejection_when_shortlist_sufficient() (+13 more)
+Cohesion: 0.04
+Nodes (35): generate_editor_brief(), calculate_words_per_second(), calculate_words_per_second_details(), compute_word_budget(), count_punctuation_pauses(), count_syllables_in_text(), count_syllables_in_word(), estimate_scene_duration_sec() (+27 more)
 
 ### Community 7 - "media.py"
-Cohesion: 0.09
-Nodes (15): main(), parse_args(), PlannedScene, PlannedShot, create_contact_sheet_for_scene(), draw_card_image(), generate_credits_markdown(), generate_library_report() (+7 more)
+Cohesion: 0.07
+Nodes (16): PlannedScene, PlannedShot, create_contact_sheet_for_scene(), draw_card_image(), generate_credits_markdown(), generate_library_report(), generate_review_html(), generate_wanted_clips_md() (+8 more)
 
 ### Community 8 - "pathlib"
-Cohesion: 0.06
-Nodes (22): build_parser(), _valid_date(), main(), BaseAgent, parse_args(), main(), main(), verify_editor_gate() (+14 more)
+Cohesion: 0.07
+Nodes (11): BaseAgent, parse_args(), _worker_render(), ContextFilter, CorrelatedFormatter, setup_logger(), emit_office_event(), parse_srt() (+3 more)
 
 ### Community 9 - "test_web_office.py"
-Cohesion: 0.10
-Nodes (28): acquire_global_lock(), get_global_lock_path(), is_global_pipeline_active(), is_pid_alive(), release_global_lock(), release_run_lock(), _make_sample_run(), test_api_validate_media_link_ssrf_blocking() (+20 more)
+Cohesion: 0.12
+Nodes (22): _make_sample_run(), test_api_validate_media_link_ssrf_blocking(), test_bounded_uploads_size_and_content(), test_broadcaster_event_capping_and_job_streaming(), test_cleanup_and_source_health_contract_keys(), test_job_pruning_and_lifespan_shutdown(), test_log_tailing_buffers_partial_lines(), test_office_events_emit_and_fail_safe() (+14 more)
 
 ### Community 10 - "Daily Operations and Health"
-Cohesion: 0.09
-Nodes (19): _copy_configs(), _create_approved_script(), test_atomic_mirror_deliverables_copy(), test_cleanup_dry_run_allowed_and_protected_paths(), test_cli_orientation_flags_and_orchestrator(), test_finish_is_idempotent_unless_forced_and_still_checks_gate(), test_finish_refuses_before_approval(), test_finish_refuses_when_gate_fails() (+11 more)
-
-### Community 11 - "test_media.py"
 Cohesion: 0.07
-Nodes (12): NasaSource, OpenverseSource, PixabaySource, mock_media_config(), test_manifest_and_credits_schema_validation(), test_media_agent_run_approval_fingerprint_gate(), test_media_manifest_schema_validation_negative_cases(), test_missing_key_skipped_with_warning() (+4 more)
+Nodes (21): _copy_configs(), _create_approved_script(), test_atomic_mirror_deliverables_copy(), test_cli_orientation_flags_and_orchestrator(), test_doctor_reports_missing_items_and_redacts_env(), test_finish_is_idempotent_unless_forced_and_still_checks_gate(), test_finish_refuses_before_approval(), test_finish_refuses_when_gate_fails() (+13 more)
 
-### Community 13 - ".scrape_all"
-Cohesion: 0.12
-Nodes (3): extract_entry_tags(), main(), test_thin_story_rejected_at_ingest()
+### Community 11 - "PixabaySource"
+Cohesion: 0.33
+Nodes (3): PixabaySource, test_missing_key_skipped_with_warning(), test_pixabay_orientation_filtering()
+
+### Community 12 - "compute_validator_fingerprint"
+Cohesion: 0.08
+Nodes (15): compute_downstream_contracts_hash(), compute_script_validation_fingerprint(), compute_validator_fingerprint(), extract_script_validation_fingerprint(), find_number_spans_in_text(), get_imported_src_files(), is_bs_fiscal_or_date_context(), load_editor_config() (+7 more)
+
+### Community 13 - "._fetch_rss_source"
+Cohesion: 0.14
+Nodes (8): article_matches_categories(), compute_importance_hint(), extract_entry_tags(), parse_article_date(), parse_article_date_with_confidence(), test_article_matches_categories(), test_circuit_breaker_skips_dead_source(), test_compute_importance_hint_position_and_tags()
 
 ### Community 14 - "utils/timeline.py"
-Cohesion: 0.05
-Nodes (22): allocate_weighted_intervals(), audit_captions(), can_fit_lines(), chunk_scene_words_into_captions(), estimate_word_weight(), format_srt_time(), generate_timeline_preview_video(), get_timeline_aligner() (+14 more)
+Cohesion: 0.12
+Nodes (10): allocate_weighted_intervals(), can_fit_lines(), estimate_word_weight(), FakeAligner, get_timeline_aligner(), interpolate_unplaced_words(), MMSAligner, split_sentence_into_chunks() (+2 more)
 
 ### Community 15 - "Agent Architectural Specifications"
 Cohesion: 0.05
@@ -398,25 +407,25 @@ Nodes (25): Editor Agent, Editor Manifest Lifecycle and Pause States, Asset Norm
 Cohesion: 0.04
 Nodes (48): description, description, minimum, type, description, minimum, type, description (+40 more)
 
-### Community 17 - "load_manifest"
-Cohesion: 0.05
-Nodes (35): main(), EditorAgent, main(), main(), Orchestrator, _prep_audio(), _prep_visuals(), get_next_action_text() (+27 more)
+### Community 17 - "Orchestrator"
+Cohesion: 0.09
+Nodes (12): main(), Orchestrator, _prep_audio(), verify_editor_gate(), write_status_md(), reconcile_manifest_status(), test_hand_editing_script_detected_after_approval(), test_pause_states_exit_with_code_3_and_block_downstream() (+4 more)
 
-### Community 18 - "Motion Graphics and Overlays"
-Cohesion: 0.16
-Nodes (8): draw_headline_split(), draw_illustrative_tag(), draw_outro_card(), draw_rounded_panel(), draw_test_run_tag(), draw_title_card(), build_all_overlays(), build_scene_overlays()
+### Community 18 - "test_motion.py"
+Cohesion: 0.07
+Nodes (30): clean_stat_label(), draw_headline_split(), draw_illustrative_tag(), draw_lower_third(), draw_news_ticker(), draw_outro_card(), draw_quote_card(), draw_rounded_panel() (+22 more)
 
 ### Community 19 - "daily_ops.py"
-Cohesion: 0.16
-Nodes (16): _classify_source_health_status(), compute_source_health(), _compute_stage_elapsed(), _copy_latest_deliverables_to_dir(), _extract_run_source_stats(), _format_duration(), format_source_health_markdown(), format_source_health_text() (+8 more)
+Cohesion: 0.09
+Nodes (30): _classify_source_health_status(), compute_source_health(), _compute_stage_elapsed(), _copy_latest_deliverables_to_dir(), _dir_or_file_size(), DoctorCheck, execute_cleanup(), _extract_run_source_stats() (+22 more)
 
 ### Community 20 - "scraper.py"
 Cohesion: 0.07
-Nodes (12): clean_text_content(), extract_html_published_at(), extract_meta_description(), _is_abbreviation_boundary(), is_boilerplate(), parse_article_date(), parse_article_date_with_confidence(), strip_datelines_and_bylines() (+4 more)
+Nodes (18): clean_text_content(), clean_title(), extract_html_published_at(), extract_jsonld_article(), extract_meta_description(), _is_abbreviation_boundary(), is_boilerplate(), is_duplicate_title() (+10 more)
 
 ### Community 21 - "Benchmark Chunking Module"
-Cohesion: 0.13
-Nodes (10): evaluate_wav(), main(), measure_silence_gaps(), compute_audio_stats(), main(), main(), measure_silence_gaps(), main() (+2 more)
+Cohesion: 0.15
+Nodes (9): evaluate_wav(), main(), measure_silence_gaps(), compute_audio_stats(), main(), main(), main(), main() (+1 more)
 
 ### Community 22 - "Editorial Aliases and Config"
 Cohesion: 0.05
@@ -424,35 +433,35 @@ Nodes (38): entity_aliases, army, balen, bhaktapur, biratnagar, birgunj, caan, c
 
 ### Community 23 - "llm_curator.py"
 Cohesion: 0.11
-Nodes (10): build_candidate_digest(), build_curator_prompt(), curate_and_cluster_with_llm(), map_to_broadcast_slot(), _call_llm(), test_build_candidate_digest(), test_build_curator_prompt(), test_curate_and_cluster_with_llm_success() (+2 more)
+Nodes (10): is_thin_story(), build_candidate_digest(), build_curator_prompt(), curate_and_cluster_with_llm(), map_to_broadcast_slot(), test_build_candidate_digest(), test_build_curator_prompt(), test_curate_and_cluster_with_llm_success() (+2 more)
 
 ### Community 24 - "ming_worker.py"
-Cohesion: 0.13
+Cohesion: 0.12
 Nodes (9): main(), measure_audio_health(), measure_audio_health_array(), pre_normalize_audio(), run_worker(), serve_worker(), do_GET(), do_POST() (+1 more)
 
 ### Community 25 - "Quality Assurance and Verification"
-Cohesion: 0.16
-Nodes (14): QAAgent, run_setup(), base_qa_fixture(), _generate_synthetic_video(), test_qa_accepts_featured_card_as_attribution(), test_qa_agent_passes_on_valid_fixture(), test_qa_agent_passes_on_vertical_fixture(), test_qa_catches_duration_mismatch() (+6 more)
+Cohesion: 0.11
+Nodes (15): check_faststart(), QAAgent, run_setup(), base_qa_fixture(), _generate_synthetic_video(), test_qa_accepts_featured_card_as_attribution(), test_qa_agent_passes_on_valid_fixture(), test_qa_agent_passes_on_vertical_fixture() (+7 more)
 
 ### Community 27 - "Quality Assurance and Verification"
 Cohesion: 0.06
 Nodes (35): additionalProperties, items, minItems, type, description, description, type, additionalProperties (+27 more)
 
 ### Community 28 - "mock_fetch"
-Cohesion: 0.09
-Nodes (24): sample_article_html(), sample_feed_xml(), sample_robots_txt(), short_article_html(), test_advertorial_rejected_at_ingest(), test_articles_schema_validation(), mock_fetch(), test_broken_source_does_not_fail_whole_run() (+16 more)
+Cohesion: 0.10
+Nodes (23): main(), sample_article_html(), sample_feed_xml(), test_advertorial_rejected_at_ingest(), test_articles_schema_validation(), mock_fetch(), test_broken_source_does_not_fail_whole_run(), mock_fetch() (+15 more)
 
 ### Community 29 - "server.py"
-Cohesion: 0.10
-Nodes (16): ApplyPicksRequest, CleanupRequest, security_and_auth_middleware(), ws_run_stream(), DraftAIRequest, DraftManualRequest, FinishRequest, _get_request_token() (+8 more)
+Cohesion: 0.09
+Nodes (17): ApplyPicksRequest, ApproveRequest, CleanupRequest, security_and_auth_middleware(), ws_run_stream(), DraftAIRequest, DraftManualRequest, FinishRequest (+9 more)
 
 ### Community 30 - "MotionAgent"
-Cohesion: 0.10
-Nodes (15): run_motion_smoke(), MotionAgent, format_date_display(), classify_scene(), SceneClassification, create_silence_wav(), test_production_run_kind_removes_test_run_tag_and_banner(), _build_motion_fixture() (+7 more)
+Cohesion: 0.11
+Nodes (11): main(), MotionAgent, sync_render_plan_data(), sync_render_plan_with_media_manifest(), SceneClassification, test_production_run_kind_removes_test_run_tag_and_banner(), _build_motion_fixture(), _setup_pipeline_environment() (+3 more)
 
 ### Community 31 - "test_scraper.py"
 Cohesion: 0.07
-Nodes (25): article_matches_categories(), build_text_summary(), canonical_url_key(), compute_importance_hint(), compute_priority_score(), extract_jsonld_article(), normalize_language_code(), normalize_url() (+17 more)
+Nodes (23): build_text_summary(), canonical_url_key(), compute_priority_score(), normalize_url(), parse_category_input(), prompt_category_selection(), sample_robots_txt(), short_article_html() (+15 more)
 
 ### Community 32 - "Video Rendering and FFmpeg"
 Cohesion: 0.06
@@ -463,52 +472,56 @@ Cohesion: 0.17
 Nodes (7): light_stem(), score_candidate_relevance(), _extract_stems(), test_kinnaur_foreign_place_penalty(), test_relevance_scoring_token_match_phrase_and_place_bonus(), test_score_relevance_no_dilution_multi_keyword_and_sensitive(), test_sensitive_scene_person_tag_rule()
 
 ### Community 34 - "test_devanagari_e2e.py"
-Cohesion: 0.14
-Nodes (8): draw_lower_third(), get_font(), get_font_candidates(), get_font_path(), test_devanagari_generate_ass_subtitles(), test_devanagari_motion_graphics_rendering(), test_devanagari_scene_classifier(), test_font_fallbacks_include_nirmala()
+Cohesion: 0.09
+Nodes (12): classify_shot_recipe(), format_date_display(), classify_scene(), test_devanagari_generate_ass_subtitles(), test_devanagari_motion_graphics_rendering(), test_devanagari_scene_classifier(), test_quote_regex_ignores_apostrophes(), test_quote_regex_matches_real_quotes() (+4 more)
 
 ### Community 35 - "Notifier Module"
-Cohesion: 0.13
+Cohesion: 0.12
 Nodes (9): get_lan_ip(), get_web_office_url(), main(), Notifier, test_notifier_discord_dispatch(), test_notifier_network_failure_is_non_fatal(), test_notifier_publish_complete_dispatch(), test_notifier_telegram_dispatch() (+1 more)
 
 ### Community 36 - "test_phase2_visual_quality.py"
-Cohesion: 0.11
-Nodes (8): CaptionStyle, parse_resolution(), resolve_style(), resolve_transitions(), test_2_1_caption_system_extents_landscape(), test_2_1_caption_system_extents_vertical(), test_2_2_draw_card_image_quiet_mode(), test_2_4_transition_grammar()
+Cohesion: 0.06
+Nodes (21): extract_audio_grid(), generate_synthetic_broadcast_theme(), load_and_analyze_music(), snap_cuts_to_beats(), CaptionStyle, parse_resolution(), resolve_style(), resolve_transitions() (+13 more)
 
 ### Community 37 - "Text Normalizer Module"
-Cohesion: 0.05
-Nodes (27): _clean_word_for_lookup(), _collect_normalization_spans(), add_span(), devanagari_to_roman_fallback(), expand_decimal_str(), expand_digits(), expand_ordinal(), get_optional_uroman() (+19 more)
+Cohesion: 0.07
+Nodes (24): _clean_word_for_lookup(), _collect_normalization_spans(), add_span(), contains_devanagari(), devanagari_to_roman_fallback(), expand_decimal_str(), expand_digits(), expand_ordinal() (+16 more)
 
 ### Community 38 - "Watcher Module"
-Cohesion: 0.12
-Nodes (15): get_kathmandu_today(), test_watcher_synthesizes_replay_and_reads_state(), build_replay_events(), _cap_event_payload(), clear_run_state_cache(), extract_run_categories(), format_category_display(), _get_cached_outputs_config() (+7 more)
+Cohesion: 0.11
+Nodes (16): detect_configured_provider(), test_detect_configured_provider_case_insensitive(), test_llm_writer_helpers(), test_watcher_synthesizes_replay_and_reads_state(), build_replay_events(), _cap_event_payload(), extract_run_categories(), format_category_display() (+8 more)
 
 ### Community 39 - "OfficeJobManager"
 Cohesion: 0.10
-Nodes (5): test_job_pruning_and_lifespan_shutdown(), ActiveJob, OfficeJobManager, terminate_pid_tree(), _terminate_pid_tree()
+Nodes (5): test_web_office_global_concurrency_cap(), ActiveJob, OfficeJobManager, terminate_pid_tree(), _terminate_pid_tree()
 
 ### Community 40 - "ScraperAgent"
 Cohesion: 0.08
-Nodes (9): ScraperAgent, test_429_respects_retry_after(), test_circuit_breaker_skips_dead_source(), test_fallback_to_rss_summary_when_extraction_fails(), test_fetch_with_retry_handles_ssl_error(), test_html_source_url_pattern_and_metadata_lookback(), test_nepali_article_marked_needs_translation(), test_robots_checked_on_rss_and_article() (+1 more)
+Nodes (8): ScraperAgent, test_429_respects_retry_after(), test_access_outage_is_hard_failure_not_degraded(), test_degraded_pass_widens_lookback(), mock_scrape_all(), test_fetch_with_retry_handles_ssl_error(), test_robots_checked_on_rss_and_article(), test_robots_disallowed_paths_skipped()
 
-### Community 41 - "plan_cleanup"
-Cohesion: 0.20
-Nodes (6): _dir_or_file_size(), execute_cleanup(), format_cleanup_plan(), _is_protected_path(), plan_cleanup(), api_system_cleanup()
+### Community 41 - "EditorAgent"
+Cohesion: 0.08
+Nodes (14): EditorAgent, main(), parse_args(), test_editor_agent_prepare_passes_category(), test_abandoned_run_refuses_all_stages(), test_approve_refuses_when_validation_failed_or_no_script(), test_cross_day_deduplication_penalty_and_brief_flag(), test_editor_validate_auto_approve_option() (+6 more)
 
 ### Community 42 - "test_motion_golden.py"
 Cohesion: 0.15
 Nodes (6): golden_run(), normalize_plan(), _normalize_obj(), test_golden_render_plan_snapshot(), test_golden_shot_and_overlay_files_exist(), test_golden_story_source_attribution()
 
-### Community 43 - "generate_editor_brief"
-Cohesion: 0.17
-Nodes (6): generate_editor_brief(), test_generate_editor_brief_reflects_category(), test_cross_script_clustering_and_intra_cluster_supersession(), test_editor_brief_contains_skip_it_rule_and_stale_previews(), test_opinion_cluster_exclusion_and_brief_section(), test_editor_brief_displays_multi_source_synthesis()
+### Community 43 - "TimelineAgent"
+Cohesion: 0.12
+Nodes (4): main(), TimelineAgent, CaptionCue, test_audit_cli_mode()
+
+### Community 44 - "Broadcaster Module"
+Cohesion: 0.11
+Nodes (3): test_web_office_state_cache_and_broadcaster(), BroadcasterManager, RunBroadcaster
 
 ### Community 45 - "Main.Js Module"
 Cohesion: 0.07
 Nodes (34): audio, authFetch(), categoryBadge, currentLogs, drawers, engine, escapeHtml(), formatElapsed() (+26 more)
 
-### Community 46 - "Audio Sync Module"
-Cohesion: 0.14
-Nodes (11): extract_audio_grid(), generate_synthetic_broadcast_theme(), load_and_analyze_music(), snap_cuts_to_beats(), test_extract_audio_grid_disabled(), test_extract_audio_grid_enabled(), test_generate_synthetic_broadcast_theme(), test_load_and_analyze_music_synthetic() (+3 more)
+### Community 46 - "test_timeline.py"
+Cohesion: 0.09
+Nodes (12): chunk_scene_words_into_captions(), split_chunk_into_lines(), mock_timeline_run_dir(), sample_script_dict(), test_caption_chunking_constraints(), test_caption_chunking_randomized_properties(), test_captions_schema_negative_cases(), test_digit_expansion() (+4 more)
 
 ### Community 48 - "Ming Worker Module"
 Cohesion: 0.13
@@ -523,8 +536,8 @@ Cohesion: 0.09
 Nodes (23): description, type, description, type, description, type, description, enum (+15 more)
 
 ### Community 51 - "editor_cluster.py"
-Cohesion: 0.08
-Nodes (20): apply_cross_day_deduplication(), articles_are_similar(), cluster_articles(), _compile_ascii_entity_re(), detect_opinion(), detect_stale_preview(), extract_canonical_entities(), extract_spine_numbers() (+12 more)
+Cohesion: 0.17
+Nodes (9): apply_cross_day_deduplication(), articles_are_similar(), _compile_ascii_entity_re(), extract_canonical_entities(), extract_spine_numbers(), _features_are_similar(), parse_timestamp(), _precompute_article_features() (+1 more)
 
 ### Community 52 - "Video Rendering and FFmpeg"
 Cohesion: 0.09
@@ -535,16 +548,16 @@ Cohesion: 0.10
 Nodes (22): type, type, type, additionalProperties, type, type, editor_config_sha256, editor_whitelist_sha256 (+14 more)
 
 ### Community 54 - "Nepali Date Module"
-Cohesion: 0.17
-Nodes (10): ad_to_bs(), bs_to_ad(), format_bs_date(), is_probable_bs_year(), parse_nepali_date(), today_npt(), test_nepali_date_conversion_known_milestones(), test_nepali_date_formatting() (+2 more)
+Cohesion: 0.20
+Nodes (8): ad_to_bs(), bs_to_ad(), is_probable_bs_year(), parse_nepali_date(), today_npt(), test_nepali_date_conversion_known_milestones(), test_nepali_date_parsing(), test_today_npt_and_helpers()
 
 ### Community 55 - "media_selector.py"
-Cohesion: 0.11
-Nodes (8): compute_perceptual_hash(), compute_sha256(), normalize_image(), normalize_video(), probe_media(), extract_clean_extension(), build_media_sources(), test_video_and_image_normalization()
+Cohesion: 0.13
+Nodes (7): compute_perceptual_hash(), compute_sha256(), normalize_image(), normalize_video(), probe_media(), extract_clean_extension(), test_video_and_image_normalization()
 
 ### Community 56 - "test_category_intro.py"
-Cohesion: 0.15
-Nodes (13): get_canonical_category_keys(), get_intro_cache_filenames(), identify_category_from_intro(), is_canonical_intro_narration(), normalize_selected_categories(), resolve_category_intro(), test_all_canonical_intros_comply_with_tts_and_budget(), test_identify_category_from_intro_and_cache_filenames() (+5 more)
+Cohesion: 0.13
+Nodes (16): get_canonical_category_keys(), get_intro_cache_filenames(), identify_category_from_intro(), is_canonical_intro_narration(), normalize_selected_categories(), resolve_category_intro(), test_all_canonical_intros_comply_with_tts_and_budget(), test_generate_editor_brief_reflects_category() (+8 more)
 
 ### Community 57 - "Media Module"
 Cohesion: 0.10
@@ -559,40 +572,40 @@ Cohesion: 0.13
 Nodes (11): Reference Voice Backup NP Lemi, Reference Voice v1 Text, Finish Pipeline Sequence, Morning Prep Routine, Daily Run Operational Runbook, Daily Run Storage Cleanup, Windows Scheduled Task Morning Job, Visual Tweak Picker Workflow (+3 more)
 
 ### Community 61 - "validate_contract"
-Cohesion: 0.09
-Nodes (11): load_schema(), _load_schema_cached(), validate_contract(), validate_file(), contains_devanagari(), test_devanagari_text_normalizer(), test_golden_qa_report_schema_and_invariants(), test_golden_render_plan_schema_and_invariants() (+3 more)
+Cohesion: 0.08
+Nodes (14): main(), run_motion_smoke(), load_schema(), _load_schema_cached(), validate_contract(), validate_file(), test_manifest_schema_validation_negative_cases(), test_manifest_schema_with_manual_edits() (+6 more)
 
 ### Community 62 - "Timeline Alignment and Captions"
 Cohesion: 0.11
 Nodes (18): description, type, description, type, description, description, type, properties (+10 more)
 
 ### Community 63 - "Llm Writer Module"
-Cohesion: 0.10
-Nodes (14): format_spoken_date(), _build_surgical_repair_prompt(), _compact_brief_for_llm(), detect_configured_provider(), _enforce_canonical_intro_scene(), _extract_json_object(), _extract_repaired_scenes(), generate_and_validate_draft() (+6 more)
+Cohesion: 0.17
+Nodes (9): _build_surgical_repair_prompt(), _call_llm(), _enforce_canonical_intro_scene(), _extract_json_object(), _extract_repaired_scenes(), generate_and_validate_draft(), _is_word_budget_global_error(), _load_json_if_exists() (+1 more)
 
 ### Community 65 - "Style Module"
 Cohesion: 0.11
 Nodes (17): fonts, primary_candidates, regular_candidates, music, enabled, fade_duration_sec, music_bed_db, snap_tolerance_sec (+9 more)
 
-### Community 66 - "FakeTTS"
-Cohesion: 0.13
-Nodes (8): compute_candidate_score(), FakeTTS, get_tts_engine(), TTSEngine, test_assemble_scene_audio_resamples_mismatched_rate(), test_compute_candidate_score_formula(), test_padding_and_pause_insertion(), test_worker_job_result_roundtrip_and_failure_handling()
+### Community 66 - "tts.py"
+Cohesion: 0.08
+Nodes (11): compute_candidate_score(), FakeTTS, get_tts_engine(), MingEngine, TTSEngine, unload_tts_daemon(), test_assemble_scene_audio_resamples_mismatched_rate(), test_daemon_health_mismatch_falls_back() (+3 more)
 
 ### Community 67 - "Speaker Check Module"
 Cohesion: 0.18
 Nodes (7): analyze_segments(), analyze_timeline_narration(), compute_median_f0(), compute_rms_dbfs(), extract_embedding(), _get_resampler(), main()
 
-### Community 68 - "motion_graphics.py"
-Cohesion: 0.24
-Nodes (3): escape_ass_text(), format_ass_time(), generate_ass_subtitles()
+### Community 68 - "load_manifest"
+Cohesion: 0.20
+Nodes (13): main(), main(), _prep_visuals(), create_initial_manifest(), load_manifest(), save_manifest(), update_stage_status(), test_save_manifest_atomic_and_concurrency() (+5 more)
 
 ### Community 69 - "Manifest Contract Schema"
 Cohesion: 0.12
 Nodes (17): properties, type, type, minimum, type, additionalProperties, description, type (+9 more)
 
-### Community 70 - "editor_budget.py"
-Cohesion: 0.08
-Nodes (17): calculate_words_per_second(), calculate_words_per_second_details(), count_punctuation_pauses(), count_syllables_in_text(), count_syllables_in_word(), estimate_scene_duration_sec(), normalize_for_speech(), mock_editor_config() (+9 more)
+### Community 70 - "detect_stale_preview"
+Cohesion: 0.22
+Nodes (4): detect_stale_preview(), parse_time_str(), test_detect_stale_preview_heuristics(), test_nepal_time_of_day_stale_previews()
 
 ### Community 71 - "Editorial Aliases and Config"
 Cohesion: 0.12
@@ -610,9 +623,9 @@ Nodes (16): description, type, properties, created_at, run_id, stages, status, u
 Cohesion: 0.12
 Nodes (16): description, type, description, type, description, type, properties, description (+8 more)
 
-### Community 75 - "test_motion.py"
-Cohesion: 0.18
-Nodes (12): classify_shot_recipe(), draw_news_ticker(), sample_captions(), style_config(), test_ass_generation_escaping_and_structure(), test_ass_generation_vertical_resolution(), test_caption_margin_v_config(), test_overlay_safe_zone_and_non_overlap() (+4 more)
+### Community 75 - "check_audio_silence_gaps"
+Cohesion: 0.17
+Nodes (5): check_audio_silence_gaps(), _compute_file_sha256(), _create_scene_aliases(), test_validation_catches_silence_gap(), test_vectorized_check_audio_silence_gaps()
 
 ### Community 76 - "Sources Module"
 Cohesion: 0.13
@@ -623,7 +636,7 @@ Cohesion: 0.17
 Nodes (15): description, type, properties, required, id, sentences, type, words (+7 more)
 
 ### Community 78 - "Storyboard Module"
-Cohesion: 0.23
+Cohesion: 0.22
 Nodes (7): build_storyboard_timestamps(), _extract_timestamps_from_warning(), _find_caption_text(), _find_covering_scene(), _find_covering_shot(), _fmt_ts(), generate_storyboard()
 
 ### Community 79 - "Pipeline Configuration and Stages"
@@ -642,17 +655,17 @@ Nodes (14): additionalProperties, properties, type, items, type, additionalPrope
 Cohesion: 0.16
 Nodes (14): items, type, additionalProperties, required, type, description, items, type (+6 more)
 
-### Community 83 - "MingEngine"
-Cohesion: 0.16
-Nodes (3): MingEngine, test_daemon_health_mismatch_falls_back(), test_ming_engine_daemon_and_fallback()
+### Community 83 - "build_srt_content"
+Cohesion: 0.18
+Nodes (6): build_srt_content(), format_srt_time(), validate_srt_syntax(), test_end_to_end_timeline_agent_run(), test_real_run_caption_quality_regression_2026_11_15(), test_srt_formatting_and_syntax_validation()
 
 ### Community 84 - "MediaCacheManager"
 Cohesion: 0.06
-Nodes (13): MediaCacheManager, extract_noun_keyword(), MediaSelector, test_blocklisted_news_domains(), test_cache_pruning(), test_license_allowed_nasa_and_cc0(), test_license_policy_filtering(), test_max_one_map_or_diagram_still() (+5 more)
+Nodes (14): MediaCacheManager, extract_noun_keyword(), MediaSelector, build_media_sources(), test_blocklisted_news_domains(), test_cache_pruning(), test_license_allowed_nasa_and_cc0(), test_license_policy_filtering() (+6 more)
 
-### Community 85 - "extract_numbers_from_text"
-Cohesion: 0.13
-Nodes (8): extract_numbers_from_text(), find_number_spans_in_text(), parse_spoken_number_phrase(), test_currency_prefix_and_spoken_decimals(), test_number_normalization_and_invented_figure(), test_south_asian_comma_number_extraction(), test_devanagari_number_grounding_after_translation(), test_nepali_clustering_and_devanagari_number_validation()
+### Community 85 - "cluster_articles"
+Cohesion: 0.22
+Nodes (4): cluster_articles(), map_to_broadcast_slot(), test_clustering_keeps_all_outlets_and_drops_opinion_and_thin(), test_nepali_clustering_and_devanagari_number_validation()
 
 ### Community 86 - "Editorial Aliases and Config"
 Cohesion: 0.15
@@ -674,13 +687,13 @@ Nodes (13): type, source_urls, visual_keywords, warnings, description, items, ty
 Cohesion: 0.24
 Nodes (4): align_scene(), _get_resampler(), load_mms_model(), main()
 
-### Community 91 - "compute_manifest_status"
-Cohesion: 0.12
-Nodes (8): acquire_run_lock(), compute_manifest_status(), create_initial_manifest(), _parse_iso_timestamp(), test_manifest_status_computation_and_stale_detection(), test_editor_approve_detects_modified_draft_script(), test_editor_validator_requires_evidence_for_all_sentences(), test_orchestrator_stage_retry_persistence_and_backoff()
+### Community 91 - "manifest.py"
+Cohesion: 0.15
+Nodes (14): acquire_global_lock(), acquire_run_lock(), compute_manifest_status(), get_global_lock_path(), global_pipeline_lock(), is_global_pipeline_active(), is_pid_alive(), is_run_process_active() (+6 more)
 
 ### Community 92 - "MediaAgent"
-Cohesion: 0.06
-Nodes (13): MediaAgent, test_apply_picks_with_manual_upload(), test_candidates_mode_with_internet_search_disabled(), test_candidates_mode_without_timeline(), review_config(), test_apply_picks_all_actions_and_contract(), test_apply_picks_download_or_norm_failure_creates_card_and_syncs_render_plan(), test_candidates_mode_below_threshold_card_proposal() (+5 more)
+Cohesion: 0.07
+Nodes (11): main(), MediaAgent, test_apply_picks_with_manual_upload(), test_candidates_mode_with_internet_search_disabled(), test_candidates_mode_without_timeline(), test_apply_picks_all_actions_and_contract(), test_apply_picks_download_or_norm_failure_creates_card_and_syncs_render_plan(), test_candidates_mode_below_threshold_card_proposal() (+3 more)
 
 ### Community 93 - "Test Motion Credit Module"
 Cohesion: 0.27
@@ -727,12 +740,12 @@ Cohesion: 0.18
 Nodes (11): description, minimum, type, duration_sec, transition, type, additionalProperties, properties (+3 more)
 
 ### Community 105 - "infer_category_hint"
-Cohesion: 0.22
-Nodes (5): infer_category_hint(), _keyword_matches(), _compile_word_boundary_re(), test_infer_category_hint_no_substring_false_positives(), test_infer_category_hint_tiers()
+Cohesion: 0.29
+Nodes (4): infer_category_hint(), _keyword_matches(), test_infer_category_hint_no_substring_false_positives(), test_infer_category_hint_tiers()
 
 ### Community 107 - "Video Rendering and FFmpeg"
-Cohesion: 0.15
-Nodes (9): sync_render_plan_data(), sync_render_plan_with_media_manifest(), resolve_shot_motion(), test_sync_render_plan_persists_to_disk_and_matches_in_memory(), test_golden_run_has_motion_variety(), test_resolve_shot_motion_featured_card_suppresses_card_zoom(), test_resolve_shot_motion_pass_through_explicit(), test_resolve_shot_motion_stills_variety() (+1 more)
+Cohesion: 0.29
+Nodes (6): resolve_shot_motion(), test_golden_run_has_motion_variety(), test_resolve_shot_motion_featured_card_suppresses_card_zoom(), test_resolve_shot_motion_pass_through_explicit(), test_resolve_shot_motion_stills_variety(), test_resolve_shot_motion_video_is_none()
 
 ### Community 109 - "Script Contract Schema"
 Cohesion: 0.22
@@ -742,13 +755,13 @@ Nodes (10): description, items, type, additionalProperties, required, evidence, 
 Cohesion: 0.20
 Nodes (10): description, properties, type, type, type, type, aligner, device (+2 more)
 
-### Community 111 - "run_doctor"
-Cohesion: 0.25
-Nodes (5): DoctorCheck, format_doctor_report(), _read_dotenv_keys(), run_doctor(), test_doctor_reports_missing_items_and_redacts_env()
-
-### Community 112 - "yaml"
+### Community 111 - ".build_scene_timeline"
 Cohesion: 0.22
-Nodes (4): get_default_mirror_dir(), load_execution_config(), load_outputs_config(), validate_all()
+Nodes (3): compute_scene_alignment_cache_key(), SceneJob, WordTiming
+
+### Community 112 - "load_pronunciations"
+Cohesion: 0.29
+Nodes (4): get_unverified_pronunciations_applied(), load_pronunciations(), load_pronunciations_with_metadata(), test_pronunciation_verification_tags_and_unverified_tracking()
 
 ### Community 113 - "Media Module"
 Cohesion: 0.22
@@ -778,9 +791,13 @@ Nodes (9): type, description, items, type, low_confidence_scenes, warnings, desc
 Cohesion: 0.22
 Nodes (9): caption_count, low_confidence_words, max_cps, max_late_ms, min_score, quality, unplaced, properties (+1 more)
 
-### Community 120 - ".run"
-Cohesion: 0.29
-Nodes (3): test_access_outage_is_hard_failure_not_degraded(), test_degraded_pass_widens_lookback(), mock_scrape_all()
+### Community 120 - "Any"
+Cohesion: 0.28
+Nodes (4): detect_opinion(), is_advertisement(), is_opinion_or_ad(), test_detect_opinion_heuristics()
+
+### Community 122 - "audit_captions"
+Cohesion: 0.25
+Nodes (4): audit_captions(), test_audit_captions_cross_scene_overlap_detection(), test_caption_audit_pure_function(), test_verbatim_caption_check()
 
 ### Community 123 - "Office Map.Js Module"
 Cohesion: 0.23
@@ -811,8 +828,8 @@ Cohesion: 0.29
 Nodes (7): Web Office Automation HQ, BroadcasterManager Singleton, OfficeJobManager Concurrency Guard, Fingerprint State Caching, Web Office WebSocket Event Protocol, Web Office Dependencies, Web Office 2D Floorplan HTML
 
 ### Community 130 - "Test Motion Layout Module"
-Cohesion: 0.39
-Nodes (5): validate_layout(), test_validate_layout_caption_band_collision(), test_validate_layout_featured_card_caption_band_collision(), test_validate_layout_intra_scene_aabb_collision(), test_validate_layout_safe_margin_violation()
+Cohesion: 0.25
+Nodes (6): validate_layout(), test_motion_agent_fails_fast_on_layout_violation(), test_validate_layout_caption_band_collision(), test_validate_layout_featured_card_caption_band_collision(), test_validate_layout_intra_scene_aabb_collision(), test_validate_layout_safe_margin_violation()
 
 ### Community 131 - "Media Module"
 Cohesion: 0.29
@@ -855,8 +872,8 @@ Cohesion: 0.33
 Nodes (6): intro_templates, sports, headline_template, label, narration, visual_keywords
 
 ### Community 141 - "compare_reports"
-Cohesion: 0.24
-Nodes (4): test_voice_bench_fake_engine_and_compare(), compare_reports(), format_scoreboard(), main()
+Cohesion: 0.29
+Nodes (3): test_voice_bench_fake_engine_and_compare(), compare_reports(), format_scoreboard()
 
 ### Community 142 - "business_economics"
 Cohesion: 0.40
@@ -923,16 +940,16 @@ Cohesion: 0.40
 Nodes (5): headline_template, label, narration, visual_keywords, culture_entertainment
 
 ### Community 158 - "test_voice.py"
-Cohesion: 0.06
-Nodes (18): check_audio_silence_gaps(), clean_narration_text(), _apply_micro_fade_pcm16(), _level_pcm16_active_rms(), mock_run_dir(), sample_script_dict(), test_compute_voice_quality_index_matches_table_section_1(), test_equal_power_micro_fade() (+10 more)
+Cohesion: 0.08
+Nodes (14): _apply_micro_fade_pcm16(), _level_pcm16_active_rms(), mock_run_dir(), sample_script_dict(), test_compute_candidate_score_formula(), test_compute_voice_quality_index_matches_table_section_1(), test_equal_power_micro_fade(), test_get_scene_padding_broadcast_policy() (+6 more)
 
 ### Community 159 - "default"
 Cohesion: 0.40
 Nodes (5): headline_template, label, narration, visual_keywords, default
 
 ### Community 160 - "test_render.py"
-Cohesion: 0.10
-Nodes (15): probe_file(), compute_scene_cache_key(), format_chapter_time(), _setup_pipeline_environment(), test_e2e_motion_render_qa_landscape(), test_e2e_motion_render_qa_vertical(), test_format_chapter_time(), test_minimal_two_scene_render() (+7 more)
+Cohesion: 0.11
+Nodes (17): probe_file(), compute_scene_cache_key(), format_chapter_time(), create_silence_wav(), test_motion_agent_plan_creation_and_watermark(), test_overlay_plan_and_composition_structure(), test_overlay_vertical_composition(), test_description_publish_pack_generation() (+9 more)
 
 ### Community 161 - "Editorial Aliases and Config"
 Cohesion: 0.40
@@ -1304,23 +1321,27 @@ Nodes (3): CoverrSource, is_marked_as_ai(), test_coverr_ai_exclusion_and_disable
 
 ### Community 265 - "RenderAgent"
 Cohesion: 0.09
-Nodes (11): check_nvenc_available(), RenderAgent, _worker_render(), slice_ass_for_scene(), test_2_3_supersampled_zoompan_in_render(), test_qa_thumbnail_candidates_generation(), test_vertical_shorts_caption_generation(), test_youtube_chapters_and_used_media_filtering() (+3 more)
+Nodes (9): check_nvenc_available(), RenderAgent, slice_ass_for_scene(), test_2_3_supersampled_zoompan_in_render(), test_qa_thumbnail_candidates_generation(), test_vertical_shorts_caption_generation(), test_youtube_chapters_and_used_media_filtering(), test_overlay_alpha_fade_animation() (+1 more)
 
-### Community 266 - "wrap_text"
-Cohesion: 0.29
-Nodes (3): draw_quote_card(), wrap_text(), test_2_5_wrap_text_hardening()
+### Community 268 - "editor_brief.py"
+Cohesion: 0.33
+Nodes (3): format_spoken_date(), format_bs_date(), test_nepali_date_formatting()
 
 ### Community 269 - "test_picker_html_balanced_div_tags"
 Cohesion: 0.25
 Nodes (3): test_draw_card_image_visible_center_text_landscape_and_vertical(), test_picker_html_balanced_div_tags(), __init__()
 
-### Community 273 - "draw_stat_callout"
-Cohesion: 0.33
-Nodes (3): clean_stat_label(), draw_stat_callout(), test_2_2_clean_stat_label()
+### Community 273 - "prepare_scene_tokens"
+Cohesion: 0.29
+Nodes (4): prepare_scene_tokens(), test_devanagari_compatibility_guard(), align_scenes(), test_respelled_word_mapping()
 
-### Community 274 - "is_duplicate_title"
-Cohesion: 0.40
-Nodes (3): clean_title(), is_duplicate_title(), test_title_deduplication()
+### Community 274 - "generate_picker_html"
+Cohesion: 0.33
+Nodes (3): generate_picker_html(), test_picker_html_has_direct_apply_picks_controls(), test_picker_html_integrity_no_external_urls()
+
+### Community 275 - "run_daily.py"
+Cohesion: 0.18
+Nodes (5): build_parser(), _valid_date(), PipelinePausedException, format_doctor_report(), get_kathmandu_today()
 
 ### Community 276 - "Bhairahawa"
 Cohesion: 0.67
@@ -1388,23 +1409,23 @@ Nodes (3): Taplejung, respelling, verified
 
 ## Knowledge Gaps
 - **29 isolated node(s):** `BroadcasterManager Singleton`, `OfficeJobManager Concurrency Guard`, `Fingerprint State Caching`, `Web Office Dependencies`, `Editor Manifest Lifecycle and Pause States` (+24 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2043 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **30 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2044 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **34 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Candidate` connect `Media Sourcing Integrations` to `score_candidate_relevance`, `media.py`, `CoverrSource`, `YtDlpSource`, `test_media.py`, `Daily Operations and Health`, `MediaCacheManager`, `media_selector.py`, `UnsplashSource`, `LocalLibrarySource`, `MediaAgent`?**
-  _High betweenness centrality (0.017) - this node is a cross-community bridge._
+- **Why does `ScraperAgent` connect `ScraperAgent` to `pathlib`, `.__init__`, `Daily Operations and Health`, `._fetch_rss_source`, `scraper.py`, `mock_fetch`, `test_scraper.py`?**
+  _High betweenness centrality (0.021) - this node is a cross-community bridge._
 - **What connects `BroadcasterManager Singleton`, `OfficeJobManager Concurrency Guard`, `Fingerprint State Caching` to the rest of the system?**
   _29 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Pipeline Configuration and Stages` be split into smaller, more focused modules?**
   _Cohesion score 0.023809523809523808 - nodes in this community are weakly interconnected._
-- **Why does `ScraperAgent` connect `ScraperAgent` to `pathlib`, `Daily Operations and Health`, `.scrape_all`, `load_manifest`, `scraper.py`, `.run`, `mock_fetch`, `test_scraper.py`?**
-  _High betweenness centrality (0.016) - this node is a cross-community bridge._
+- **Why does `compute_validator_fingerprint()` connect `compute_validator_fingerprint` to `Voice Synthesis and Verification`, `voice.py`, `test_editor.py`, `media.py`, `pathlib`, `EditorAgent`, `Daily Operations and Health`, `TimelineAgent`, `test_timeline.py`, `Orchestrator`, `daily_ops.py`, `Quality Assurance and Verification`, `test_voice.py`, `MediaAgent`, `MotionAgent`?**
+  _High betweenness centrality (0.018) - this node is a cross-community bridge._
 - **Should `Voice Synthesis and Verification` be split into smaller, more focused modules?**
-  _Cohesion score 0.05413469735720375 - nodes in this community are weakly interconnected._
-- **Why does `compute_validator_fingerprint()` connect `pathlib` to `test_render.py`, `Voice Synthesis and Verification`, `test_timeline.py`, `voice.py`, `test_editor.py`, `media.py`, `editor_budget.py`, `test_voice.py`, `Daily Operations and Health`, `test_media.py`, `test_orchestrator_execute_stage_ignores_downstream_schema_changes`, `Video Rendering and FFmpeg`, `load_manifest`, `daily_ops.py`, `Quality Assurance and Verification`, `compute_manifest_status`, `MediaAgent`, `MotionAgent`?**
-  _High betweenness centrality (0.015) - this node is a cross-community bridge._
+  _Cohesion score 0.05853174603174603 - nodes in this community are weakly interconnected._
+- **Why does `validate_contract()` connect `validate_contract` to `test_render.py`, `.run`, `load_manifest`, `test_editor.py`, `media.py`, `pathlib`, `TimelineAgent`, `compute_validator_fingerprint`, `mock_fetch`, `test_timeline.py`, `test_motion.py`, `build_srt_content`, `scraper.py`, `Quality Assurance and Verification`, `manifest.py`, `MediaAgent`, `MotionAgent`, `test_scraper.py`?**
+  _High betweenness centrality (0.014) - this node is a cross-community bridge._
 - **Should `create_app` be split into smaller, more focused modules?**
-  _Cohesion score 0.07195121951219512 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06866002214839424 - nodes in this community are weakly interconnected._

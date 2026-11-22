@@ -224,6 +224,12 @@ class DraftManualRequest(BaseModel):
     selection: dict[str, Any] | None = None
 
 
+class ApproveRequest(BaseModel):
+    auto_prepare: bool = True
+    force: bool = False
+    orientation: Literal["landscape", "vertical"] | None = None
+
+
 class FinishRequest(BaseModel):
     force: bool = False
     orientation: Literal["landscape", "vertical"] | None = None
@@ -678,7 +684,7 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         }
 
     @app.post("/api/runs/{run_date}/approve")
-    async def api_approve_script(run_date: str) -> dict[str, Any]:
+    async def api_approve_script(run_date: str, body: ApproveRequest | None = None) -> dict[str, Any]:
         _validate_run_date(run_date)
         busy, reason = job_manager.is_busy(run_date)
         if busy:
@@ -699,6 +705,20 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
         reconciled_manifest = load_manifest(manifest_path)
         reconcile_manifest_status(reconciled_manifest, run_dir=run_dir, active_process=False)
         save_manifest(reconciled_manifest, manifest_path)
+
+        should_prepare = body is None or body.auto_prepare
+        if should_prepare:
+            args = ["run_daily.py", "--prepare-media", "--date", run_date]
+            if body and body.force:
+                args.append("--force")
+            if body and body.orientation:
+                args.extend(["--orientation", body.orientation])
+            try:
+                job = await job_manager.start_job(run_date, "prepare-media", args)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return {"ok": True, "outputs": outputs, "job_id": job.job_id, "action": "prepare-media"}
+
         return {"ok": True, "outputs": outputs}
 
     @app.post("/api/runs/{run_date}/prepare-media")

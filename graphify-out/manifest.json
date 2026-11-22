@@ -678,9 +678,9 @@
     "semantic_hash": "288cd7fae60f23aae35788d811c95706"
   },
   "tests/test_web_office.py": {
-    "mtime": 1795285184.8466976,
-    "seen": 1795285231.03902,
-    "ast_hash": "b216e5c3f3c149244811640a2dd48ca2",
+    "mtime": 1795330325.135882,
+    "seen": 1795330528.1676662,
+    "ast_hash": "6f77510895fffaedcc73e73c8db7fde2",
     "semantic_hash": ""
   },
   "tools/benchmark_chunking.py": {
@@ -768,9 +768,9 @@
     "semantic_hash": "c83d763f0d42620f932b48f23d6d3fe2"
   },
   "web_office/server.py": {
-    "mtime": 1795284471.5166085,
-    "seen": 1795285231.039047,
-    "ast_hash": "f17184cae461754b8726d851ba63ee06",
+    "mtime": 1795329852.5446641,
+    "seen": 1795330528.1677504,
+    "ast_hash": "c22bfb8b5bfb1d4490cbc05a4593bfc0",
     "semantic_hash": ""
   },
   "web_office/static/js/canvas_engine.js": {
@@ -780,15 +780,15 @@
     "semantic_hash": ""
   },
   "web_office/static/js/drawers.js": {
-    "mtime": 1795284970.302536,
-    "seen": 1795285231.03905,
-    "ast_hash": "d293e1db55f843cf2e5b95a8dd77f5a3",
+    "mtime": 1795330092.4827697,
+    "seen": 1795330528.1677616,
+    "ast_hash": "445a655eb86cf21fdc152a1e6a474f60",
     "semantic_hash": ""
   },
   "web_office/static/js/main.js": {
-    "mtime": 1795285150.3038118,
-    "seen": 1795285231.0390518,
-    "ast_hash": "c96c04d235529b9d2bdd4229af6d9b13",
+    "mtime": 1795330191.8881404,
+    "seen": 1795330528.1677659,
+    "ast_hash": "dfa0a16881fbf9c1956f961be8f084bd",
     "semantic_hash": ""
   },
   "web_office/static/js/office_map.js": {

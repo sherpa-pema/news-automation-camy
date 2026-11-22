@@ -26,6 +26,7 @@ data/pronunciation_audit/
 # Run Data & Media
 data/runs/*
 !data/runs/.gitkeep
+data/archive/
 data/latest/
 data/media_cache/
 data/media_library/*

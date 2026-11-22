@@ -547,7 +547,11 @@ async function handleAction(action, payload) {
       }
     } else if (action === "approve") {
       audio.chime("done");
-      showToast("Script approved! Ready to render broadcast.", "done", 5000);
+      if (data.job_id) {
+        showToast("Script approved! Parallel prep (voice + visuals) started automatically.", "done", 5000);
+      } else {
+        showToast("Script approved! Ready to render broadcast.", "done", 5000);
+      }
     } else {
       showToast(`Action '${action}' dispatched successfully.`, "done", 4000);
     }

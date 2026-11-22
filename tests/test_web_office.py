@@ -197,6 +197,57 @@ def test_web_office_prepare_media_and_state_summary(tmp_path: Path, monkeypatch)
     assert (run_dir / "media" / "review" / "picks_ui.json").exists()
 
 
+def test_web_office_approve_auto_prepares_media(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    run_dir = _make_sample_run(tmp_path)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["stages"]["editor"]["status"] = "awaiting_approval"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    app = create_app(repo_root=tmp_path)
+    started_jobs: list[tuple[str, str, list[str]]] = []
+
+    async def fake_start_job(run_date: str, action: str, args: list[str]):
+        started_jobs.append((run_date, action, args))
+        return type("Job", (), {"job_id": f"{action}-1"})()
+
+    import web_office.server as srv_mod
+    monkeypatch.setattr(srv_mod.OfficeJobManager, "start_job", lambda self, rd, act, args: fake_start_job(rd, act, args))
+    monkeypatch.setattr(srv_mod.EditorAgent, "approve", lambda self, m: [str(run_dir / "script" / "approval.json")])
+
+    client = TestClient(app)
+
+    # 1. Default approve automatically launches prepare-media
+    res = client.post("/api/runs/2026-11-12/approve")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert data["action"] == "prepare-media"
+    assert data["job_id"] == "prepare-media-1"
+    assert started_jobs[-1][1] == "prepare-media"
+    assert "--prepare-media" in started_jobs[-1][2]
+    assert started_jobs[-1][0] == "2026-11-12"
+
+    # 2. Explicit auto_prepare=False only approves without starting prepare-media
+    started_jobs.clear()
+    res_no_auto = client.post("/api/runs/2026-11-12/approve", json={"auto_prepare": False})
+    assert res_no_auto.status_code == 200
+    data_no_auto = res_no_auto.json()
+    assert data_no_auto["ok"] is True
+    assert "job_id" not in data_no_auto
+    assert len(started_jobs) == 0
+
+    # 3. Explicit auto_prepare=True with orientation and force forwards them
+    started_jobs.clear()
+    res_custom = client.post("/api/runs/2026-11-12/approve", json={"auto_prepare": True, "force": True, "orientation": "vertical"})
+    assert res_custom.status_code == 200
+    assert started_jobs[-1][1] == "prepare-media"
+    assert "--force" in started_jobs[-1][2]
+    assert "--orientation" in started_jobs[-1][2]
+    assert "vertical" in started_jobs[-1][2]
+
+
 def test_web_office_stop_workflow(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     run_dir = _make_sample_run(tmp_path)
