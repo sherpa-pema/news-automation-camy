@@ -14,13 +14,17 @@ Supported providers (configured via environment variables or `.env`):
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 from dotenv import load_dotenv
 import requests
+
+logger = logging.getLogger("editor")
 
 
 def detect_configured_provider(preferred: str | None = None) -> tuple[str | None, str | None]:
@@ -826,7 +830,8 @@ def generate_and_validate_draft(
 
         # Check story selection diversity when enough clusters exist in shortlist
         diversity_ok = True
-        if len(shortlist) >= 5 and (len(scenes_list) in (7, 8) or 14 <= len(scenes_list) <= 26):
+        story_count = sum(1 for sc in scenes_list if sc.get("type") == "story")
+        if len(shortlist) >= 5 and story_count >= 2:
             url_to_cid = {
                 a.get("url", ""): c.get("cluster_id")
                 for c in shortlist
@@ -838,12 +843,11 @@ def generate_and_validate_draft(
                     cid = next((url_to_cid[u] for u in sc.get("source_urls", []) if u in url_to_cid), None)
                     if cid:
                         story_cids.append(cid)
-            story_count = sum(1 for sc in scenes_list if sc.get("type") == "story")
             if len(story_cids) == story_count and len(set(story_cids)) < story_count:
                 diversity_ok = False
 
         can_surgical = (
-            (len(scenes_list) in (7, 8) or 14 <= len(scenes_list) <= 26)
+            len(scenes_list) >= 3
             and not non_budget_global_errors
             and diversity_ok
             and 0 < len(failing_indices) < len(scenes_list)

@@ -301,13 +301,29 @@ class EditorAgent(BaseAgent):
             json.dump(shortlist, f, indent=2)
 
         # Freeze speech-rate budget (write script/budget.json once)
+        forced_format = manifest.get("format") or manifest.get("mode")
+        if forced_format in ("headlines", "focused"):
+            bulletin_mode = forced_format
+        elif selected_cats_norm and "all" not in selected_cats_norm and "headlines" not in selected_cats_norm:
+            bulletin_mode = "focused"
+        elif len(shortlist) < 10:
+            bulletin_mode = "focused"
+        else:
+            bulletin_mode = "headlines"
+
         if budget_path.exists():
             with open(budget_path, "r", encoding="utf-8") as bf:
                 frozen = json.load(bf)
             wps = float(frozen["words_per_second"])
             sps = float(frozen.get("syllables_per_second", 3.3))
             calib_msg = frozen.get("calculation") or f"Frozen budget: {wps:.2f} words/sec"
-            budget = compute_word_budget(wps, sps=sps)
+            saved_mode = frozen.get("format", bulletin_mode)
+            budget = compute_word_budget(
+                wps,
+                sps=sps,
+                format=saved_mode,
+                cluster_count=len(shortlist),
+            )
             for k in (
                 "syllables_per_second",
                 "comma_pause_sec",
@@ -319,6 +335,7 @@ class EditorAgent(BaseAgent):
                 "max_total_words",
                 "tolerance_pct",
                 "scene_targets",
+                "format",
             ):
                 if k in frozen:
                     budget[k] = frozen[k]
@@ -334,6 +351,8 @@ class EditorAgent(BaseAgent):
                 sps=sps,
                 comma_pause_sec=comma_pause,
                 period_pause_sec=period_pause,
+                format=bulletin_mode,
+                cluster_count=len(shortlist),
             )
             frozen_payload = {
                 "words_per_second": wps,
@@ -343,6 +362,7 @@ class EditorAgent(BaseAgent):
                 "source": details.get("source"),
                 "source_file": details.get("source_file"),
                 "calculation": details.get("calculation"),
+                "format": bulletin_mode,
                 **{
                     k: v
                     for k, v in budget.items()
@@ -354,7 +374,7 @@ class EditorAgent(BaseAgent):
 
         logger.info(f"Speech rate calibration: {calib_msg}")
         logger.info(
-            f"Word budget: {budget['target_total_words']} words "
+            f"Word budget ({budget.get('format', bulletin_mode)}): {budget['target_total_words']} words "
             f"({budget['min_total_words']} - {budget['max_total_words']}) for ~{budget['target_duration_sec']}s audio."
         )
 
@@ -370,6 +390,7 @@ class EditorAgent(BaseAgent):
             opinion_clusters=opinion_clusters,
             stale_preview_clusters=stale_clusters,
             run_kind=run_kind,
+            mode=budget.get("format", bulletin_mode),
             selected_categories=selected_cats_norm,
             custom_templates=self.editor_cfg.get("intro_templates"),
         )

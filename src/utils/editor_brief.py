@@ -42,7 +42,16 @@ def generate_editor_brief(
     target_words = budget["target_total_words"]
     min_words = budget["min_total_words"]
     max_words = budget["max_total_words"]
-    is_headlines = (mode == "headlines" or len(shortlist) >= 12)
+    if mode == "headlines":
+        is_headlines = True
+    elif mode == "focused":
+        is_headlines = False
+    elif budget.get("format") == "headlines":
+        is_headlines = True
+    elif budget.get("format") == "focused":
+        is_headlines = False
+    else:
+        is_headlines = (len(shortlist) >= 10)
 
     intro_info = resolve_category_intro(
         categories=selected_categories,
@@ -98,9 +107,12 @@ def generate_editor_brief(
         lines.append("    * Note: Group stories by category in this sequence. If a category has fewer clusters or none in the shortlist, proceed with the next available category. Never invent stories or duplicate clusters.")
         lines.append("  - **1 Outro scene**: 12 to 25 words (target ~18 words)")
     else:
-        lines.append("- **Scene Breakdown** (Focused Topic Bulletin: 7 scenes total):")
+        avail_c = len(shortlist) if shortlist else 5
+        story_count = max(2, min(avail_c, 5))
+        total_sc = story_count + 2
+        lines.append(f"- **Scene Breakdown** (Focused Topic Bulletin: {total_sc} scenes total, in-depth multi-sentence coverage):")
         lines.append("  - **1 Intro scene**: 10 to 20 words (target ~13 words, fixed canonical hook)")
-        lines.append("  - **5 Story scenes** (2 to 3 broadcast sentences per scene, 44 to 56 words each):")
+        lines.append(f"  - **{story_count} Story scenes** (strictly 2 to 4 broadcast sentences per scene, 30 to 55 words each, target ~40 words):")
         lines.append("  - **1 Outro scene**: 15 to 35 words (target ~25 words)")
     lines.append("")
     lines.append("---")
@@ -115,7 +127,10 @@ def generate_editor_brief(
     lines.append("7. **Developing Stories (Superseded Updates)**: If a cluster contains articles marked `[OLDER UPDATE — DO NOT USE FOR NUMBERS]`, ground all casualty, vote, and financial counts strictly from the latest non-superseded article.")
     lines.append("8. **Cross-Day Repeats**: Clusters marked `[COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]` were already aired in the last 48 hours; skip them unless a fresh developing angle justifies inclusion.")
     lines.append("9. **Multi-Source Synthesis**: When a cluster contains multiple member outlets, synthesize complementary details across sentences (e.g. combine casualties from one outlet with vehicle/route context or quotes from another) while citing the exact source URL for each sentence in the `evidence` list.")
-    lines.append("10. **Headlines-Only Bulletin (Single-Sentence Summaries)**: This broadcast is strictly a headlines bulletin. Every story scene MUST contain exactly ONE single spoken sentence (10 to 22 words) summarizing the core event. DO NOT write descriptions, background paragraphs, historical context, or secondary sentences. Story scenes MUST transition sequentially through the category blocks across available shortlisted clusters.")
+    if is_headlines:
+        lines.append("10. **Headlines-Only Bulletin (Single-Sentence Summaries)**: This broadcast is strictly a headlines bulletin. Every story scene MUST contain exactly ONE single spoken sentence (10 to 22 words) summarizing the core event. DO NOT write descriptions, background paragraphs, historical context, or secondary sentences. Story scenes MUST transition sequentially through the category blocks across available shortlisted clusters.")
+    else:
+        lines.append("10. **Focused In-Depth Stories (Multi-Sentence Coverage)**: Every story scene MUST contain 2 to 4 broadcast sentences (30 to 55 words total per story scene). Develop key context, facts, and developments from the source articles. Intro and outro scenes remain single punchy statements.")
     lines.append("")
     lines.append("### Broadcast Style & TTS Optimization")
     lines.append("1. **TTS-Friendly**: Short, punchy broadcast sentences. Standard English spelling for Nepali names and places.")
@@ -132,6 +147,26 @@ def generate_editor_brief(
     lines.append(f"2. `selection.json` (Editorial rationales)")
     lines.append("")
     lines.append("### `draft_script.json` Schema Example:")
+    example_story_narr = (
+        "In Kathmandu, officials announced twenty new environmental initiatives today while community volunteers gathered to plant trees along the riverbank."
+        if is_headlines
+        else (
+            "In Kathmandu, officials announced twenty new environmental initiatives today while community volunteers gathered to plant trees along the riverbank. "
+            "Municipal leaders stated that the project will expand green coverage across five municipal wards over the coming months."
+        )
+    )
+    example_ev = [
+        {
+            "sentence_index": 0,
+            "source_url": "https://example.com/article1"
+        }
+    ]
+    if not is_headlines:
+        example_ev.append({
+            "sentence_index": 1,
+            "source_url": "https://example.com/article1"
+        })
+
     example_draft = {
         "language": "English",
         "origin": "editor",
@@ -154,7 +189,7 @@ def generate_editor_brief(
                 "id": "scene_01",
                 "type": "story",
                 "headline": "Example Headline in Sentence Case Without Period",
-                "narration": "In Kathmandu, officials announced twenty new environmental initiatives today while community volunteers gathered to plant trees along the riverbank.",
+                "narration": example_story_narr,
                 "category": "national_politics",
                 "sensitive": False,
                 "source": "The Kathmandu Post, Onlinekhabar English",
@@ -167,12 +202,7 @@ def generate_editor_brief(
                     "community volunteers",
                     "tree planting"
                 ],
-                "evidence": [
-                    {
-                        "sentence_index": 0,
-                        "source_url": "https://example.com/article1"
-                    }
-                ]
+                "evidence": example_ev
             },
             {
                 "id": "outro",

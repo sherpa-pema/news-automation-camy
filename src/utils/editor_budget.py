@@ -229,6 +229,8 @@ def compute_word_budget(
     comma_pause_sec: float = DEFAULT_COMMA_PAUSE_SEC,
     period_pause_sec: float = DEFAULT_PERIOD_PAUSE_SEC,
     editor_cfg: dict[str, Any] | None = None,
+    format: str | None = None,
+    cluster_count: int | None = None,
 ) -> dict[str, Any]:
     """Computes total word budget and scene targets for target audio duration."""
     b_cfg = {}
@@ -243,10 +245,58 @@ def compute_word_budget(
         except Exception:
             b_cfg = {}
 
+    tolerance_pct = float(tolerance_pct if tolerance_pct is not None else b_cfg.get("tolerance_pct", 0.10))
+
+    if format == "focused":
+        story_count = max(2, min(cluster_count, 5)) if cluster_count is not None else 5
+        intro_min = 10
+        intro_max = 25
+        story_min = 25
+        story_max = 55
+        outro_min = 15
+        outro_max = 35
+
+        if story_count <= 4:
+            # Low-yield focused bulletin (2-4 stories). VoiceAgent requires duration >= 60.0s.
+            min_sec = float(min_sec if min_sec is not None else 65.0)
+            target_sec = float(target_sec if target_sec is not None else max(75.0, story_count * 22.0 + 35.0))
+            max_sec = float(max_sec if max_sec is not None else 180.0)
+            min_total_words = max(150, round(min_sec * wps * (1.0 - tolerance_pct)))
+            max_total_words = round(max_sec * wps * (1.0 + tolerance_pct))
+            target_words = round(target_sec * wps)
+        else:
+            # Standard 5-story focused bulletin
+            min_sec = float(min_sec if min_sec is not None else 110.0)
+            max_sec = float(max_sec if max_sec is not None else 180.0)
+            target_sec = float(target_sec if target_sec is not None else 145.0)
+            target_words = round(target_sec * wps)
+            min_total_words = round(min_sec * wps * (1.0 - tolerance_pct))
+            max_total_words = round(max_sec * wps * (1.0 + tolerance_pct))
+
+        res = {
+            "words_per_second": wps,
+            "syllables_per_second": sps,
+            "comma_pause_sec": comma_pause_sec,
+            "period_pause_sec": period_pause_sec,
+            "target_duration_sec": target_sec,
+            "duration_range_sec": [min_sec, max_sec],
+            "target_total_words": target_words,
+            "min_total_words": min_total_words,
+            "max_total_words": max_total_words,
+            "tolerance_pct": tolerance_pct,
+            "scene_targets": {
+                "intro": {"min_words": intro_min, "max_words": intro_max, "target_words": round((intro_min + intro_max) / 2)},
+                "story": {"min_words": story_min, "max_words": story_max, "target_words": round((story_min + story_max) / 2), "count": story_count},
+                "outro": {"min_words": outro_min, "max_words": outro_max, "target_words": round((outro_min + outro_max) / 2)},
+            },
+        }
+        res["format"] = "focused"
+        return res
+
+    # Default / Headlines bulletin mode
     min_sec = float(min_sec if min_sec is not None else b_cfg.get("min_duration_sec", 120.0))
     max_sec = float(max_sec if max_sec is not None else b_cfg.get("max_duration_sec", 180.0))
     target_sec = float(target_sec if target_sec is not None else b_cfg.get("target_duration_sec", 150.0))
-    tolerance_pct = float(tolerance_pct if tolerance_pct is not None else b_cfg.get("tolerance_pct", 0.10))
 
     sc_cfg = b_cfg.get("scenes", {})
     intro_min = int(sc_cfg.get("intro_min_words", 12))
@@ -260,7 +310,9 @@ def compute_word_budget(
     min_total_words = round(min_sec * wps * (1.0 - tolerance_pct))
     max_total_words = round(max_sec * wps * (1.0 + tolerance_pct))
 
-    return {
+    story_target_count = min(cluster_count, 20) if cluster_count is not None else 20
+
+    res = {
         "words_per_second": wps,
         "syllables_per_second": sps,
         "comma_pause_sec": comma_pause_sec,
@@ -273,7 +325,10 @@ def compute_word_budget(
         "tolerance_pct": tolerance_pct,
         "scene_targets": {
             "intro": {"min_words": intro_min, "max_words": intro_max, "target_words": round((intro_min + intro_max) / 2)},
-            "story": {"min_words": story_min, "max_words": story_max, "target_words": round((story_min + story_max) / 2), "count": 20},
+            "story": {"min_words": story_min, "max_words": story_max, "target_words": round((story_min + story_max) / 2), "count": story_target_count},
             "outro": {"min_words": outro_min, "max_words": outro_max, "target_words": round((outro_min + outro_max) / 2)},
         },
     }
+    if format:
+        res["format"] = format
+    return res

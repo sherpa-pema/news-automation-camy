@@ -1388,6 +1388,7 @@ class ScraperAgent(BaseAgent):
         kept: int,
         error: str | None = None,
         cb_cfg: dict[str, Any] | None = None,
+        stats: dict[str, Any] | None = None,
     ) -> None:
         with self._circuit_breaker_lock:
             state = self._load_circuit_breaker_state()
@@ -1396,7 +1397,23 @@ class ScraperAgent(BaseAgent):
             failures_thresh = int(cfg.get("failures", 3))
             cooldown_runs = int(cfg.get("cooldown_runs", 3))
 
-            is_failure = bool(error or kept <= 0)
+            if error:
+                is_failure = True
+            elif kept > 0:
+                is_failure = False
+            elif stats:
+                found = int(stats.get("found", 0))
+                drop_reasons = stats.get("drop_reasons") or {}
+                cat_filtered = int(drop_reasons.get("category_filtered", 0))
+                lookback_dropped = int(drop_reasons.get("lookback", 0))
+                # If the feed responded and returned entries, but items were dropped due to topic/lookback, that is not an outage
+                if found > 0 and (cat_filtered > 0 or lookback_dropped > 0):
+                    is_failure = False
+                else:
+                    is_failure = True
+            else:
+                is_failure = True
+
             if is_failure:
                 consecutive = int(src_data.get("consecutive_failures", 0)) + 1
                 src_data["consecutive_failures"] = consecutive
@@ -1794,7 +1811,7 @@ class ScraperAgent(BaseAgent):
             if len(articles) >= max_articles:
                 break
 
-        self._record_circuit_breaker_outcome(source_name, len(articles), error_msg, cb_cfg)
+        self._record_circuit_breaker_outcome(source_name, len(articles), error_msg, cb_cfg, stats=stats)
         self._finalize_latency_stats(stats, latencies)
         return articles, stats, error_msg
 
@@ -2115,7 +2132,7 @@ class ScraperAgent(BaseAgent):
 
         if html_ages:
             stats["newest_age_hours"] = min(html_ages)
-        self._record_circuit_breaker_outcome(source_name, len(articles), error_msg, cb_cfg)
+        self._record_circuit_breaker_outcome(source_name, len(articles), error_msg, cb_cfg, stats=stats)
         self._finalize_latency_stats(stats, latencies)
         return articles, stats, error_msg
 
@@ -2559,7 +2576,9 @@ class ScraperAgent(BaseAgent):
                             sec_src["include_url_patterns"] = feed_cfg["include_url_patterns"]
                         if feed_cfg.get("exclude_url_patterns"):
                             sec_src["exclude_url_patterns"] = feed_cfg["exclude_url_patterns"]
-                    if lookback_hours is None and self.lookback_hours is None:
+                    # Category section feeds publish at lower frequency; give them 14-day lookback
+                    # unless an explicit CLI lookback override was set on the agent instance.
+                    if self.lookback_hours is None:
                         sec_src["lookback_seconds_override"] = 14 * 24 * 3600
                     extra_section_sources.append(sec_src)
             if extra_section_sources:

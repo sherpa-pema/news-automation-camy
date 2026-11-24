@@ -735,9 +735,14 @@ def validate_script_draft(
     else:
         is_headlines = False
 
-    min_allowed_scenes = min(12, len(shortlist) + 2) if (shortlist and is_headlines) else (12 if is_headlines else 7)
-    if not (len(scenes) in (7, 8) or (min_allowed_scenes <= len(scenes) <= 26)):
-        add_global_error(f"Expected {min_allowed_scenes} to 26 scenes (intro + story headlines + outro; legacy: Expected exactly 7 scenes), got {len(scenes)}")
+    if is_headlines:
+        min_allowed_scenes = min(12, len(shortlist) + 2) if (shortlist and is_headlines) else 12
+        if not (len(scenes) in (7, 8) or (min_allowed_scenes <= len(scenes) <= 26)):
+            add_global_error(f"Expected {min_allowed_scenes} to 26 scenes (intro + story headlines + outro; legacy: Expected exactly 7 scenes), got {len(scenes)}")
+    else:
+        min_allowed_scenes = min(4, len(shortlist) + 2) if shortlist else 4
+        if not (min_allowed_scenes <= len(scenes) <= 10):
+            add_global_error(f"Expected {min_allowed_scenes} to 10 scenes in focused bulletin, got {len(scenes)}")
 
     broadcast_seq_cfg = None
     if cfg and "broadcast_sequence" in cfg:
@@ -1126,7 +1131,12 @@ def validate_script_draft(
     min_budget = budget.get("min_total_words", 250)
     max_budget = budget.get("max_total_words", 380)
     if is_headlines and len(scenes) < 20:
-        min_budget = min(min_budget, max(120, int(min_budget * (len(scenes) / 20.0))))
+        min_budget = min(min_budget, max(60, int(min_budget * (len(scenes) / 20.0))))
+    scene_max_sum = sum(
+        (25 if s.get("type") == "intro" else (35 if s.get("type") == "outro" else (28 if is_headlines else 60)))
+        for s in scenes
+    )
+    min_budget = min(min_budget, scene_max_sum)
     if not (min_budget <= total_words <= max_budget):
         add_global_error(f"Total word count {total_words} outside budget range [{min_budget}, {max_budget}]")
 
