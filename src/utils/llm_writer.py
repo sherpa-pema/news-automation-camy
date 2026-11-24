@@ -338,7 +338,12 @@ def _build_surgical_repair_prompt(
         for a in c.get("articles", []):
             url_to_cluster[a.get("url", "")] = c
 
-    is_headlines_mode = len(scenes) >= 18
+    is_headlines_mode = (
+        budget.get("format") == "headlines"
+        or budget.get("scene_targets", {}).get("story", {}).get("max_words", 60) <= 28
+        or len(shortlist) >= 10
+        or len(scenes) >= 9
+    )
     narration_rule = (
         "- SINGLE-LINE HEADLINES ONLY: Story scene narration MUST be strictly ONE single sentence (10 to 25 words)."
         if is_headlines_mode
@@ -356,7 +361,7 @@ def _build_surgical_repair_prompt(
         narration_rule,
         "- Narration: ZERO digits (0-9), ZERO %, $, &, /, (), [], or non-ASCII characters. Spell all numbers out.",
         "- Do NOT use blocked acronyms (e.g. NEA, NRB, NEPSE, CIAA, CIB, CAAN, NOC, KMC, TU, UML, RSP) unless expanded to full institution name.",
-        "- Every number in narration must be grounded in the latest non-superseded source article of its matched cluster.",
+        "- PERMISSIBLE NUMBERS & ANTI-HALLUCINATION: Every number in narration must be grounded in the latest non-superseded source article of its matched cluster. DO NOT INVENT NUMBERS. Use qualitative terms (e.g. 'several', 'multiple', 'substantially') if exact numbers do not appear in the source text.",
         "- Never copy 8+ consecutive words from source text.",
         "- Visual keywords: 3 to 5 generic Nepal-appropriate stock terms (no blocked Western terms).",
         "- SENSITIVITY: If an error mentions 'sensitive is false' or the cluster text contains sensitive triggers (fatal, death, casualties, accident, suicide, rape, murder, arrest, etc.), you MUST set \"sensitive\": true on that scene object.",
@@ -460,6 +465,81 @@ def _extract_repaired_scenes(parsed: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _apply_deterministic_pre_patches(
+    draft_obj: dict[str, Any],
+    rep: dict[str, Any],
+    intro_info: dict[str, Any] | None = None,
+) -> bool:
+    """Applies deterministic, zero-latency Python fixes to common LLM formatting mistakes."""
+    from src.utils.editor_validator import split_sentences
+
+    scenes = draft_obj.get("scenes") or []
+    if not scenes:
+        return False
+
+    patched = False
+    structured_errors = rep.get("structured_errors") or []
+    error_by_idx: dict[int, list[str]] = {}
+    for err in structured_errors:
+        idx = err.get("scene_index")
+        if idx is not None:
+            error_by_idx.setdefault(int(idx), []).append(str(err.get("message", "")).lower())
+
+    for i, sc in enumerate(scenes):
+        sc_type = sc.get("type")
+        err_msgs = error_by_idx.get(i, [])
+
+        # 1. Trailing period on headline
+        hl = sc.get("headline", "")
+        if hl.endswith("."):
+            sc["headline"] = hl.rstrip(".")
+            patched = True
+
+        # 2. Intro/Outro category and evidence hygiene
+        if sc_type in ("intro", "outro"):
+            if sc.get("category") is not None:
+                sc["category"] = None
+                patched = True
+            if sc.get("evidence"):
+                sc["evidence"] = []
+                patched = True
+
+        # 3. Intro passive greetings
+        if sc_type == "intro" and intro_info:
+            has_greeting_err = any("passive greetings" in m for m in err_msgs)
+            if has_greeting_err:
+                sc["narration"] = intro_info.get("narration", sc["narration"])
+                if sc.get("spoken_text"):
+                    sc["spoken_text"] = None
+                patched = True
+
+        # 4. Sensitive flag missing
+        if any("sensitive is false" in m for m in err_msgs):
+            if not sc.get("sensitive", False):
+                sc["sensitive"] = True
+                patched = True
+
+        # 5. Multi-sentence story narration in single-line headlines mode
+        if sc_type == "story" and any("strictly 1 sentence" in m for m in err_msgs):
+            narr = sc.get("narration", "")
+            sents = split_sentences(narr)
+            if len(sents) > 1:
+                lead = sents[0].strip()
+                lead_words = len(lead.split())
+                if 10 <= lead_words <= 28:
+                    sc["narration"] = lead
+                    if sc.get("spoken_text"):
+                        sp_sents = split_sentences(sc["spoken_text"])
+                        sc["spoken_text"] = sp_sents[0].strip() if sp_sents else None
+                    ev = [e for e in sc.get("evidence", []) if e.get("sentence_index") == 0]
+                    if not ev and sc.get("source_urls"):
+                        ev = [{"sentence_index": 0, "source_url": sc["source_urls"][0]}]
+                    sc["evidence"] = ev
+                    patched = True
+
+    return patched
+
+
 def generate_and_validate_draft(
     run_dir: Path | str,
     *,
@@ -496,7 +576,7 @@ def generate_and_validate_draft(
     editor_agent = EditorAgent(rdir, editor_mode="llm_writer")
     shortlist = _load_json_if_exists(script_dir / "shortlist.json", [])
     budget = _load_json_if_exists(script_dir / "budget.json", {})
-    focused_bulletin = 0 < len(shortlist) < 12
+    focused_bulletin = 0 < len(shortlist) < 8
     brief_text = (
         _EXCLUDED_SECTIONS_RE.sub("", raw_brief_text).strip()
         if focused_bulletin
@@ -527,7 +607,7 @@ def generate_and_validate_draft(
             "2. STORY NARRATION: Each story scene narration MUST contain 2 to 3 crisp broadcast sentences (44 to 56 words per story scene) summarizing the verified facts from its cluster.\n"
             "3. Total spoken words across all 7 scenes MUST fall inside the allowed range in Section 1.\n"
             "4. Narration MUST contain ZERO digits (0-9), ZERO %, $, &, /, (), [], or non-ASCII characters. Spell all numbers out (e.g. 'forty percent', 'ten million').\n"
-            "5. Every number/quantity mentioned in narration must exist in that story's source cluster (and use latest non-superseded update).\n"
+            "5. PERMISSIBLE NUMBERS & ANTI-HALLUCINATION: Every number/quantity mentioned in narration must exist in that story's source cluster (and use latest non-superseded update). DO NOT INVENT NUMBERS. If exact numbers are not present in the cluster text, use qualitative language instead.\n"
             "6. Headlines: max 10 words, sentence case, NO ending period.\n"
             "7. visual_keywords: 3 to 5 generic Nepal-appropriate stock phrases per scene (no blocked Western terms).\n"
             "8. Story scenes: source_urls must come from the chosen cluster; evidence must map EVERY sentence_index (0, 1, ...) to a member article source_url; never copy 8+ consecutive words from source text; set sensitive: true if crime/death/fatal/accident/minor/children trigger applies.\n"
@@ -535,6 +615,12 @@ def generate_and_validate_draft(
             "10. TRANSLATION: Member articles marked NEPALI must be translated to English first. Narration stays ASCII-only (rule 4). Numbers must be transliterated from Devanagari (०-९) and must still trace to the Nepali source."
         )
     else:
+        avail_clusters = len(shortlist) if shortlist else 20
+        min_stories = 18 if avail_clusters >= 18 else min(avail_clusters, 12)
+        max_stories = min(avail_clusters, 24)
+        total_min_scenes = min_stories + 2
+        total_max_scenes = max_stories + 2
+
         system_prompt = (
             "You are a broadcast news writer for Nepal News Bot. Read the Editor Brief carefully and "
             "return a SINGLE valid JSON object (no markdown fences, no commentary outside JSON) with "
@@ -542,22 +628,18 @@ def generate_and_validate_draft(
             '  "draft_script": { "language": "English", "origin": "editor", "run_kind": "...", "date": "YYYY-MM-DD", "scenes": [...] },\n'
             '  "selection": { "selected_clusters": [...], "skipped_clusters": [...] }\n'
             "CRITICAL RULES (HEADLINES-ONLY BULLETIN):\n"
-            f"1. Exactly 20 to 26 scenes: intro (id='intro', FIXED 10-20 words, with the EXACT canonical hook: \"{intro_info['narration']}\". Do NOT add greetings like 'Good evening' or conversational filler), followed by 18 to 24 story headline scenes, and outro (12-25 words).\n"
+            f"1. Exactly {total_min_scenes} to {total_max_scenes} scenes: intro (id='intro', FIXED 10-20 words, with the EXACT canonical hook: \"{intro_info['narration']}\". Do NOT add greetings like 'Good evening' or conversational filler), followed by {min_stories} to {max_stories} story headline scenes (one per selected shortlisted cluster), and outro (12-25 words).\n"
             "2. SINGLE-LINE HEADLINES ONLY: Every story scene narration MUST contain strictly ONE single spoken sentence (10 to 22 words, target ~15 words) summarizing the core event. Absolutely NO descriptions, background paragraphs, historical context, or secondary sentences.\n"
             "3. Total spoken words across all scenes MUST fall inside the allowed range in Section 1.\n"
             "4. Narration MUST contain ZERO digits (0-9), ZERO %, $, &, /, (), [], or non-ASCII characters. Spell all numbers out.\n"
-            "5. Every number/quantity mentioned in narration must exist in that story's source cluster (and use latest non-superseded update).\n"
+            "5. PERMISSIBLE NUMBERS & ANTI-HALLUCINATION: Every number/quantity in narration must exist in that story's source cluster (and use latest non-superseded update). DO NOT INVENT NUMBERS. If exact numbers are not present in the cluster text, use qualitative language instead (e.g. 'several', 'multiple', 'substantially').\n"
             "6. Headlines: max 10 words, sentence case, NO ending period.\n"
             "7. visual_keywords: 3 to 5 generic Nepal-appropriate stock phrases per scene.\n"
             "8. Story scenes: source_urls must come from the chosen cluster; evidence must map sentence_index 0 to a member article source_url; never copy 8+ consecutive words from source text; set sensitive: true if crime/death/fatal/accident/minor trigger applies.\n"
-            "9. STRICT SEQUENTIAL CATEGORY ORDER (3 to 4 single-line headlines per category block):\n"
-            "   - Block 1: \"national_politics\" (3 to 4 scenes) - National Politics\n"
-            "   - Block 2: \"society_local\" (3 to 4 scenes) - Society and Local News\n"
-            "   - Block 3: \"culture_entertainment\" (3 to 4 scenes) - Culture and Entertainment\n"
-            "   - Block 4: \"business_economics\" (3 to 4 scenes) - Business and Economics\n"
-            "   - Block 5: \"science_technology\" (3 to 4 scenes) - Science and Technology\n"
-            "   - Block 6: \"sports\" (3 to 4 scenes) - Sports\n"
-            "   - All scenes in a category block must be grouped together before moving to the next category block.\n"
+            "9. CATEGORY SEQUENCE: Follow the sequential category order across available shortlisted clusters:\n"
+            "   - national_politics -> society_local -> culture_entertainment -> business_economics -> science_technology -> sports.\n"
+            "   - Group all scenes of a category together before moving to the next category.\n"
+            "   - If the shortlist has few or zero clusters for a category, include only the available clusters and proceed to the next available category. Never invent stories or duplicate clusters.\n"
             "   - intro and outro categories MUST be null.\n"
             "10. MULTI-SOURCE SYNTHESIS: When a chosen cluster includes multiple member outlets, synthesize key facts into the single summary line. Cite the primary supporting source_url in evidence.\n"
             "11. TRANSLATION: Member articles marked NEPALI must be translated to English first. Narration stays ASCII-only (rule 4). Numbers must be transliterated from Devanagari (०-९) and must still trace to the Nepali source. Never paraphrase a translation into a different claim."
@@ -665,20 +747,9 @@ def generate_and_validate_draft(
                 "metrics": rep.get("metrics", {}),
             }
 
-        # Deterministic zero-latency pre-patch for missing sensitive=true flags
+        # Deterministic zero-latency pre-patches (sensitive flags, intro greetings, trailing periods, category hygiene, multi-sentence headline trimming)
         structured_errors = rep.get("structured_errors") or []
-        scenes_list = current_draft_obj.get("scenes") or []
-        sensitive_patched = False
-        for err in structured_errors:
-            s_idx = err.get("scene_index")
-            if s_idx is not None and 0 <= int(s_idx) < len(scenes_list):
-                if "sensitive is false" in str(err.get("message", "")).lower():
-                    if not scenes_list[int(s_idx)].get("sensitive", False):
-                        scenes_list[int(s_idx)]["sensitive"] = True
-                        sensitive_patched = True
-
-        if sensitive_patched:
-            current_draft_obj["scenes"] = scenes_list
+        if _apply_deterministic_pre_patches(current_draft_obj, rep, intro_info=intro_info):
             (script_dir / "draft_script.json").write_text(
                 json.dumps(current_draft_obj, indent=2, ensure_ascii=False),
                 encoding="utf-8",

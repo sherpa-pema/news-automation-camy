@@ -81,15 +81,21 @@ def generate_editor_brief(
     lines.append(f"- **Target Video Duration**: 2:00 to 3:00 (120 to 180 seconds, target {budget['target_duration_sec']:.0f}s)")
     lines.append(f"- **Total Word Budget**: **{target_words} words** (allowed range: **{min_words} to {max_words} words**)")
     if is_headlines:
-        lines.append("- **Scene Breakdown** (Headlines Bulletin: 20 to 26 scenes total, 3 to 4 single-line summarized headlines per category in exact sequential order):")
+        avail_clusters = len(shortlist) if shortlist else 20
+        min_stories = 18 if avail_clusters >= 18 else min(avail_clusters, 12)
+        max_stories = min(avail_clusters, 24)
+        total_min_sc = min_stories + 2
+        total_max_sc = max_stories + 2
+        lines.append(f"- **Scene Breakdown** (Headlines Bulletin: {total_min_sc} to {total_max_sc} scenes total, single-line summarized headlines grouped sequentially by category):")
         lines.append("  - **1 Intro scene**: 10 to 20 words (target ~13 words, fixed canonical hook)")
-        lines.append("  - **18 to 24 Story scenes** (strictly 1 single spoken sentence per scene, 10 to 22 words each, target ~15 words each):")
-        lines.append("    * Block 1: **National Politics** (`national_politics`) — 3 to 4 single-line headlines")
-        lines.append("    * Block 2: **Society and Local News** (`society_local`) — 3 to 4 single-line headlines")
-        lines.append("    * Block 3: **Culture and Entertainment** (`culture_entertainment`) — 3 to 4 single-line headlines")
-        lines.append("    * Block 4: **Business and Economics** (`business_economics`) — 3 to 4 single-line headlines")
-        lines.append("    * Block 5: **Science and Technology** (`science_technology`) — 3 to 4 single-line headlines")
-        lines.append("    * Block 6: **Sports** (`sports`) — 3 to 4 single-line headlines")
+        lines.append(f"  - **{min_stories} to {max_stories} Story scenes** (strictly 1 single spoken sentence per scene, 10 to 22 words each, target ~15 words each):")
+        lines.append("    * Block 1: **National Politics** (`national_politics`)")
+        lines.append("    * Block 2: **Society and Local News** (`society_local`)")
+        lines.append("    * Block 3: **Culture and Entertainment** (`culture_entertainment`)")
+        lines.append("    * Block 4: **Business and Economics** (`business_economics`)")
+        lines.append("    * Block 5: **Science and Technology** (`science_technology`)")
+        lines.append("    * Block 6: **Sports** (`sports`)")
+        lines.append("    * Note: Group stories by category in this sequence. If a category has fewer clusters or none in the shortlist, proceed with the next available category. Never invent stories or duplicate clusters.")
         lines.append("  - **1 Outro scene**: 12 to 25 words (target ~18 words)")
     else:
         lines.append("- **Scene Breakdown** (Focused Topic Bulletin: 7 scenes total):")
@@ -109,7 +115,7 @@ def generate_editor_brief(
     lines.append("7. **Developing Stories (Superseded Updates)**: If a cluster contains articles marked `[OLDER UPDATE — DO NOT USE FOR NUMBERS]`, ground all casualty, vote, and financial counts strictly from the latest non-superseded article.")
     lines.append("8. **Cross-Day Repeats**: Clusters marked `[COVERED RECENTLY — REQUIRE NEW DEVELOPING ANGLE]` were already aired in the last 48 hours; skip them unless a fresh developing angle justifies inclusion.")
     lines.append("9. **Multi-Source Synthesis**: When a cluster contains multiple member outlets, synthesize complementary details across sentences (e.g. combine casualties from one outlet with vehicle/route context or quotes from another) while citing the exact source URL for each sentence in the `evidence` list.")
-    lines.append("10. **Headlines-Only Bulletin (Single-Sentence Summaries)**: This broadcast is strictly a headlines bulletin. Every story scene MUST contain exactly ONE single spoken sentence (10 to 22 words) summarizing the core event. DO NOT write descriptions, background paragraphs, historical context, or secondary sentences. Story scenes MUST transition monotonically through the 6 category blocks (3 to 4 single-line headlines per block).")
+    lines.append("10. **Headlines-Only Bulletin (Single-Sentence Summaries)**: This broadcast is strictly a headlines bulletin. Every story scene MUST contain exactly ONE single spoken sentence (10 to 22 words) summarizing the core event. DO NOT write descriptions, background paragraphs, historical context, or secondary sentences. Story scenes MUST transition sequentially through the category blocks across available shortlisted clusters.")
     lines.append("")
     lines.append("### Broadcast Style & TTS Optimization")
     lines.append("1. **TTS-Friendly**: Short, punchy broadcast sentences. Standard English spelling for Nepali names and places.")

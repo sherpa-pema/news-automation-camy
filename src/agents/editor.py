@@ -585,6 +585,7 @@ class EditorAgent(BaseAgent):
                 "editor",
                 "awaiting_approval",
                 output_files=output_files,
+                error_message=None,
                 metrics={
                     "total_words": total_words,
                     "estimated_duration_sec": total_duration,

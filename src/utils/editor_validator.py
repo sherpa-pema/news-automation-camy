@@ -713,8 +713,31 @@ def validate_script_draft(
     }
 
     scenes = draft_data.get("scenes", [])
-    if not (len(scenes) in (7, 8) or 14 <= len(scenes) <= 26):
-        add_global_error(f"Expected 20 to 26 scenes (intro + 18-24 headlines + outro; legacy: Expected exactly 7 scenes), got {len(scenes)}")
+
+    # Format determination: Decouple format rules from draft scene count to avoid moving-target trap
+    story_target_max = budget.get("scene_targets", {}).get("story", {}).get("max_words", 60)
+    story_target_count = budget.get("scene_targets", {}).get("story", {}).get("count", 0)
+
+    if draft_data.get("format") == "headlines" or budget.get("format") == "headlines":
+        is_headlines = True
+    elif draft_data.get("format") == "focused" or budget.get("format") == "focused":
+        is_headlines = False
+    elif len(scenes) in (7, 8):
+        story_scenes = [s for s in scenes if s.get("type") == "story"]
+        if story_scenes and all(len(split_sentences(s.get("narration", ""))) <= 1 for s in story_scenes) and story_target_max <= 28 and len(shortlist) >= 12:
+            is_headlines = True
+        else:
+            is_headlines = False
+    elif len(scenes) >= 12:
+        is_headlines = True
+    elif story_target_count >= 14 or story_target_max <= 28:
+        is_headlines = True
+    else:
+        is_headlines = False
+
+    min_allowed_scenes = min(12, len(shortlist) + 2) if (shortlist and is_headlines) else (12 if is_headlines else 7)
+    if not (len(scenes) in (7, 8) or (min_allowed_scenes <= len(scenes) <= 26)):
+        add_global_error(f"Expected {min_allowed_scenes} to 26 scenes (intro + story headlines + outro; legacy: Expected exactly 7 scenes), got {len(scenes)}")
 
     broadcast_seq_cfg = None
     if cfg and "broadcast_sequence" in cfg:
@@ -778,7 +801,7 @@ def validate_script_draft(
                 )
 
         # Monotonic sequential category block check for multi-scene scripts
-        if len(scenes) >= 14 and 1 <= sc_idx <= len(scenes) - 2:
+        if (is_headlines or len(scenes) >= 14) and 1 <= sc_idx <= len(scenes) - 2:
             cat_val = (scene.get("category") or "").strip().lower()
             matched_slot_idx = None
             for slot_idx, (_, _, slot_name, valid_cats) in enumerate(BROADCAST_SEQUENCE_RULES):
@@ -836,7 +859,7 @@ def validate_script_draft(
 
         if sc_type == "intro":
             min_w = 10
-            max_w = 25 if len(scenes) >= 18 else 30
+            max_w = 25 if is_headlines else 30
             if not (min_w <= word_count <= max_w):
                 sc_errors.append(f"Intro word count {word_count} outside {min_w}-{max_w} words")
 
@@ -846,24 +869,24 @@ def validate_script_draft(
                     "Intro narration must not contain passive greetings ('Good evening', 'welcome to our broadcast'); use punchy evergreen category hook"
                 )
         elif sc_type == "outro":
-            min_w = 12 if len(scenes) >= 18 else 15
-            max_w = 30 if len(scenes) >= 18 else 40
+            min_w = 12 if is_headlines else 15
+            max_w = 30 if is_headlines else 40
             if not (min_w <= word_count <= max_w):
                 sc_errors.append(f"Outro word count {word_count} outside {min_w}-{max_w} words")
         else:
-            min_w = 10 if len(scenes) >= 18 else (15 if len(scenes) >= 14 else 20)
-            max_w = 28 if len(scenes) >= 18 else (45 if len(scenes) >= 14 else 60)
+            min_w = 10 if is_headlines else 20
+            max_w = 28 if is_headlines else 60
             if not (min_w <= word_count <= max_w):
                 sc_errors.append(f"Story scene word count {word_count} outside {min_w}-{max_w} words")
 
         # Sentence count for story scenes
         sentences = split_sentences(narration)
         if sc_type == "story":
-            if len(scenes) >= 18:
+            if is_headlines:
                 if len(sentences) != 1:
                     sc_errors.append(f"Headline bulletin story narration must be strictly 1 sentence (got {len(sentences)})")
             else:
-                min_s = 1 if len(scenes) >= 14 else 2
+                min_s = 2
                 max_s = 4
                 if not (min_s <= len(sentences) <= max_s):
                     sc_errors.append(f"Story narration must have {min_s} to {max_s} sentences (got {len(sentences)})")
@@ -1102,6 +1125,8 @@ def validate_script_draft(
     # Total word count budget check (10% tolerance)
     min_budget = budget.get("min_total_words", 250)
     max_budget = budget.get("max_total_words", 380)
+    if is_headlines and len(scenes) < 20:
+        min_budget = min(min_budget, max(120, int(min_budget * (len(scenes) / 20.0))))
     if not (min_budget <= total_words <= max_budget):
         add_global_error(f"Total word count {total_words} outside budget range [{min_budget}, {max_budget}]")
 
@@ -1109,6 +1134,8 @@ def validate_script_draft(
     if dur_range and isinstance(dur_range, (list, tuple)) and len(dur_range) == 2:
         min_dur = float(dur_range[0])
         max_dur = float(dur_range[1])
+        if is_headlines and len(scenes) < 20:
+            min_dur = min_dur * (len(scenes) / 20.0)
         if not (min_dur - 5.0 <= total_est_duration_sec <= max_dur + 5.0):
             add_global_error(
                 f"Total estimated duration {total_est_duration_sec:.1f}s outside allowed range [{min_dur - 5.0:.1f}s, {max_dur + 5.0:.1f}s]"

@@ -440,13 +440,16 @@ def update_stage_status(
 
     if status == "running":
         stage["start_time"] = now_iso
+        stage["error_message"] = None
     elif status == "done":
         stage["end_time"] = now_iso
+        stage["error_message"] = None
+    elif status in ("awaiting_approval", "prepared"):
         stage["error_message"] = None
     elif status == "failed":
         stage["end_time"] = now_iso
 
-    if error_message is not None and status != "done":
+    if error_message is not None:
         stage["error_message"] = error_message
     if output_files is not None:
         stage["output_files"] = output_files
